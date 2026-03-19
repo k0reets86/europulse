@@ -1,0 +1,259 @@
+{
+  "updated_at": "2026-03-15",
+  "site": {
+    "title": "EuroPulse",
+    "theme": "Blocksy",
+    "primary_language": "de",
+    "languages": ["de", "uk", "en"],
+    "admin_language": "ru_RU"
+  },
+  "plugins": [
+    "blocksy-companion",
+    "complianz-gdpr",
+    "koko-analytics",
+    "limit-login-attempts-reloaded",
+    "polylang",
+    "redis-cache",
+    "seo-by-rank-math",
+    "updraftplus"
+  ],
+  "home": {
+    "slider_posts": 5,
+    "latest_posts": 6,
+    "order": [
+      "hero",
+      "secondary",
+      "latest",
+      "deutschland",
+      "ukraine",
+      "europa",
+      "politik",
+      "wirtschaft",
+      "leben_in_deutschland",
+      "community",
+      "utility"
+    ],
+    "split_sections": ["Deutschland", "Ukraine", "Community"],
+    "grid_sections": ["Europa", "Politik", "Wirtschaft", "Leben in Deutschland"]
+  },
+  "meta_rules": {
+    "order": ["date", "categories"],
+    "layout": {
+      "cards_and_slider": {
+        "date_line": 1,
+        "categories_line": 2
+      }
+    },
+    "dot_before_each_category": true,
+    "ad_label_has_dot": false,
+    "desktop_card_font_px": 8.5,
+    "desktop_card_line_height": 1.22,
+    "mobile_card_font_px": 8,
+    "mobile_card_line_height": 1.2,
+    "native_entry_meta_font_px": 10,
+    "native_entry_meta_line_height": 1.34
+  },
+  "chips": {
+    "ticker": {
+      "desktop": { "font_px": 11, "dot_px": 8, "gap_px": 7, "duration_s": 66 },
+      "mobile": { "font_px": 8, "dot_px": 6, "gap_px": 4, "duration_s": 52 }
+    },
+    "hero": {
+      "desktop": {
+        "font_px": 11,
+        "dot_px": 8,
+        "gap_px": 7,
+        "right_px": 18,
+        "max_width_px": 136,
+        "meta_right_px": 154,
+        "badge_padding_right_px": 162
+      },
+      "mobile": {
+        "font_px": 8,
+        "dot_px": 6,
+        "gap_px": 4,
+        "right_px": 10,
+        "max_width_px": 74,
+        "meta_right_px": 86,
+        "badge_padding_right_px": 92
+      }
+    },
+    "card": {
+      "font_px": 9,
+      "dot_px": 6,
+      "gap_px": 5
+    },
+    "priority": ["sponsored", "breaking", "top_story"]
+  },
+  "header": {
+    "desktop_row_height_px": 74,
+    "mobile_row_height_px": 60,
+    "utility_font_desktop_px": 12,
+    "utility_font_mobile_px": 10,
+    "search_mode_desktop": "popover",
+    "search_mode_mobile": "offcanvas",
+    "logo_pulse": {
+      "enabled": true,
+      "desktop": { "left_px": 84, "width_px": 58, "height_px": 14, "duration_s": 3.6 },
+      "mobile": { "left_px": 98, "width_px": 60, "height_px": 12, "duration_s": 3.6 }
+    },
+    "back_to_top": {
+      "desktop_px": 46,
+      "mobile_px": 42
+    }
+  },
+  "slider_rules": {
+    "layout_desktop": "image_left_panel_right",
+    "layout_mobile": "image_top_panel_bottom",
+    "headline_lines_desktop": 4,
+    "headline_lines_mobile": 4,
+    "headline_font_desktop": "clamp(19px, 1.28vw, 24px)",
+    "headline_font_mobile": "clamp(19px, 5.6vw, 24px)",
+    "headline_font_mobile_xs_px": 16,
+    "excerpt_lines_desktop": 3,
+    "excerpt_lines_mobile": 4,
+    "excerpt_lines_mobile_xs": 3,
+    "excerpt_char_limits": {
+      "de": 190,
+      "uk": 208,
+      "en": 186
+    }
+  },
+  "secondary_rules": {
+    "desktop_columns": 3,
+    "tablet_columns": 2,
+    "mobile_columns": 1,
+    "image_aspect_ratio": "16/10",
+    "image_height_px": 128,
+    "title_font_desktop_px": 16
+  },
+  "latest_rules": {
+    "desktop_columns": 3,
+    "tablet_columns": 2,
+    "mobile_columns": 1,
+    "card_height_desktop_px": 158,
+    "card_height_mobile_px": 150,
+    "thumb_desktop": { "width_px": 92, "height_px": 64 },
+    "title_font_desktop_px": 14,
+    "title_font_mobile_px": 13,
+    "title_lines": 2,
+    "excerpt_font_desktop_px": 10.5,
+    "excerpt_font_mobile_px": 10,
+    "excerpt_lines": 3,
+    "excerpt_char_limits": {
+      "de": 108,
+      "uk": 96,
+      "en": 110
+    }
+  },
+  "text_budgets": {
+    "title_chars": {
+      "de": 82,
+      "uk": 92,
+      "en": 82
+    }
+  },
+  "section_rules": {
+    "split": {
+      "desktop": "lead_with_image_left_text_list_right",
+      "mobile": "lead_top_text_list_below",
+      "lead_image_aspect_ratio": "16/10",
+      "lead_image_height_desktop_px": 168,
+      "lead_image_height_mobile_px": 148,
+      "list_title_font_desktop_px": 14,
+      "list_title_font_mobile_px": 13,
+      "list_excerpt_font_desktop_px": 11,
+      "list_excerpt_font_mobile_px": 10.5,
+      "mobile_list_thumbs": false
+    },
+    "grid": {
+      "desktop_columns": 2,
+      "tablet_columns": 2,
+      "mobile_columns": 1,
+      "compact_card_height_desktop_px": 303,
+      "compact_card_height_mobile_px": 328
+    }
+  },
+  "utility_rules": {
+    "card_intro_font_desktop_px": 11,
+    "card_intro_line_height_desktop": 1.32,
+    "card_intro_font_mobile_px": 10.5,
+    "card_intro_line_height_mobile": 1.28,
+    "chip_size": "card"
+  },
+  "archive_rules": {
+    "meta_separator": "•",
+    "mobile_media_height_px": 176,
+    "mobile_title_font_px": 20,
+    "mobile_excerpt_font_px": 12.5
+  },
+  "single_rules": {
+    "mobile_page_title_px": 27,
+    "mobile_page_title_xs_px": 21,
+    "mobile_dek_px": 14,
+    "mobile_body_px": 14.5,
+    "mobile_body_line_height": 1.66,
+    "mobile_figcaption_px": 11
+  },
+  "responsive": {
+    "breakpoints_px": [999.98, 839.98, 781, 689.98, 599.98, 389.98],
+    "verified_phone_widths_px": [375, 390, 428],
+    "requirements": [
+      "no_horizontal_overflow",
+      "ticker_always_visible",
+      "mobile_search_in_menu",
+      "split_sections_stay_lead_plus_text_list",
+      "latest_cards_keep_equal_height",
+      "hero_chip_never_overlaps_meta"
+    ]
+  },
+  "post_meta": {
+    "breaking_flag": "europulse_breaking",
+    "breaking_until": "europulse_breaking_until",
+    "sponsored_flag": "europulse_sponsored",
+    "popular_score": "europulse_popular_score",
+    "sources": "europulse_sources",
+    "video_poster": "europulse_video_poster"
+  },
+  "seo_meta": [
+    "rank_math_title",
+    "rank_math_description",
+    "rank_math_focus_keyword",
+    "rank_math_seo_score"
+  ],
+  "search": {
+    "language_aware": true,
+    "fields": ["post_title", "post_excerpt", "post_content"]
+  },
+  "video_rules": {
+    "player": "WordPress core MediaElement",
+    "poster_meta": "europulse_video_poster",
+    "poster_fallback": "featured_image",
+    "show_play_overlay_on_cards": true
+  },
+  "ad_rules": {
+    "target": "_blank",
+    "labels": {
+      "de": "Anzeige",
+      "uk": "Реклама",
+      "en": "Advertisement"
+    },
+    "label_is_separate_from_category_meta": true
+  },
+  "runtime_files": {
+    "loader": "/var/www/europulse/public/wp-content/mu-plugins/europulse-foundation.php",
+    "core": "/var/www/europulse/public/wp-content/mu-plugins/europulse-foundation/includes/core.php",
+    "front_hooks": "/var/www/europulse/public/wp-content/mu-plugins/europulse-foundation/includes/front-hooks.php",
+    "render": "/var/www/europulse/public/wp-content/mu-plugins/europulse-foundation/includes/render.php",
+    "content_seo_hooks": "/var/www/europulse/public/wp-content/mu-plugins/europulse-foundation/includes/content-seo-hooks.php",
+    "styles": "/var/www/europulse/public/wp-content/mu-plugins/europulse-normalize.css"
+  },
+  "qa_scripts": [
+    "/root/projects/europulse/scripts/smoke_check.js",
+    "/root/projects/europulse/scripts/deep_ui_audit.js",
+    "/root/projects/europulse/scripts/full_viewport_matrix.js",
+    "/root/projects/europulse/scripts/qa_accessibility.js",
+    "/root/projects/europulse/scripts/qa_crawl_check.py",
+    "/root/projects/europulse/scripts/stress_test.js"
+  ]
+}

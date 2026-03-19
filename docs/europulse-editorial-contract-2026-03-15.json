@@ -1,0 +1,142 @@
+{
+  "name": "EuroPulse Editorial Contract",
+  "version": "2026-03-15",
+  "tone": {
+    "target_outlets": [
+      "Deutsche Welle",
+      "Tagesschau",
+      "BBC News",
+      "Al Jazeera",
+      "CNN",
+      "AP",
+      "Reuters"
+    ],
+    "required": [
+      "professional",
+      "clear",
+      "human",
+      "smooth",
+      "reader-oriented"
+    ],
+    "forbidden": [
+      "bureaucratic tone",
+      "press-release language",
+      "soviet bulletin style",
+      "template labels inside body",
+      "dry legalistic overload"
+    ]
+  },
+  "content_requirements": {
+    "full_article_required": true,
+    "must_have": [
+      "strong_lead",
+      "multiple_paragraphs",
+      "seo_package",
+      "featured_media"
+    ],
+    "quotes": {
+      "use_if_available": true,
+      "must_be_substantive": true,
+      "no_mechanical_quote_padding": true
+    }
+  },
+  "body_structure": {
+    "flow": [
+      "what happened",
+      "why it matters",
+      "details and numbers",
+      "who confirms it",
+      "reader impact",
+      "what happens next"
+    ],
+    "forbidden_inline_sections": [
+      "Почему это важно",
+      "Контекст",
+      "Расширенный контекст",
+      "Что дальше",
+      "Why this matters",
+      "Context",
+      "Expanded context",
+      "What happens next"
+    ]
+  },
+  "length_rules": {
+    "short_news_words": [350, 650],
+    "strong_news_words": [600, 900],
+    "developing_story_words": [700, 1100],
+    "analysis_words": [1200, 2200],
+    "dynamic": true
+  },
+  "source_rules": {
+    "news_min_sources": 2,
+    "sensitive_news_min_sources": 3,
+    "analysis_min_sources": 4,
+    "analysis_target_sources": 5
+  },
+  "media_rules": {
+    "featured_media_required": true,
+    "priority": [
+      "source_image",
+      "editorial_fallback_image",
+      "inline_media"
+    ],
+    "video_can_be_inline": true
+  },
+  "selection_rules": {
+    "true_news_signals": [
+      "real_change_for_people",
+      "clear_consequences",
+      "conflict_or_decision",
+      "reader_impact",
+      "topic_development"
+    ],
+    "reject_signals": [
+      "official_routine_visit",
+      "appointments_without_impact",
+      "protocol_ceremonial_item",
+      "generic_calendar_or_start_page",
+      "trivial_local_noise",
+      "watch_live_or_stream_roundup",
+      "press_release_without_new_fact"
+    ],
+    "boost_signals": [
+      "transport_disruptions",
+      "migration_and_documents",
+      "jobs_and_benefits",
+      "economy_and_prices",
+      "eu_politics_and_security",
+      "ukraine_consequences",
+      "community_events_with_practical_value"
+    ],
+    "hard_reject_official_routine_without_public_impact": true
+  },
+  "formats": {
+    "developing_story": {
+      "theme_based": true,
+      "show_story_evolution": true,
+      "separate_fact_from_uncertainty": true
+    },
+    "weekly_analysis": {
+      "theme_based": true,
+      "not_category_based": true,
+      "requires_context": true,
+      "requires_consequences": true,
+      "requires_forward_view": true
+    }
+  },
+  "styles": {
+    "strict": "calm newsroom without dryness",
+    "analytic": "default recommended mode with more context and meaning",
+    "lively": "slightly lighter and more human, never tabloid"
+  },
+  "seo": {
+    "required_fields": [
+      "seo_title",
+      "meta_description",
+      "slug",
+      "excerpt",
+      "focus_keywords"
+    ],
+    "rule": "SEO must support journalism, not degrade it"
+  }
+}

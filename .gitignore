@@ -1,0 +1,9 @@
+node_modules/
+tmp-playwright/
+screenshots/
+qa-reports/
+backups/
+input/
+*.png
+*.jpg
+*.jpeg

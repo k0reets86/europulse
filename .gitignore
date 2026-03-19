@@ -7,3 +7,6 @@ input/
 *.png
 *.jpg
 *.jpeg
+__pycache__/
+*.pyc
+.write_test

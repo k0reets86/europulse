@@ -1,0 +1,2936 @@
+[
+  {
+    "viewport": {
+      "name": "iphone-se",
+      "width": 375,
+      "height": 667,
+      "group": "phone"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 62,
+        "width": 330
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 330
+      },
+      "community": {
+        "count": 62,
+        "width": 330
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-se",
+      "width": 375,
+      "height": 667,
+      "group": "phone"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 64,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 172,
+        "width": 330
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 330
+      },
+      "community": {
+        "count": 172,
+        "width": 330
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-se",
+      "width": 375,
+      "height": 667,
+      "group": "phone"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 171,
+        "width": 330
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 330
+      },
+      "community": {
+        "count": 171,
+        "width": 330
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-se",
+      "width": 375,
+      "height": 667,
+      "group": "phone"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-se",
+      "width": 375,
+      "height": 667,
+      "group": "phone"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-12",
+      "width": 390,
+      "height": 844,
+      "group": "phone"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 62,
+        "width": 343
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 343
+      },
+      "community": {
+        "count": 62,
+        "width": 343
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-12",
+      "width": 390,
+      "height": 844,
+      "group": "phone"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 64,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 172,
+        "width": 343
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 343
+      },
+      "community": {
+        "count": 172,
+        "width": 343
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-12",
+      "width": 390,
+      "height": 844,
+      "group": "phone"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 171,
+        "width": 343
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 343
+      },
+      "community": {
+        "count": 171,
+        "width": 343
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-12",
+      "width": 390,
+      "height": 844,
+      "group": "phone"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-12",
+      "width": 390,
+      "height": 844,
+      "group": "phone"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-14-pro-max",
+      "width": 430,
+      "height": 932,
+      "group": "phone"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 62,
+        "width": 378
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 378
+      },
+      "community": {
+        "count": 62,
+        "width": 378
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-14-pro-max",
+      "width": 430,
+      "height": 932,
+      "group": "phone"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 64,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 172,
+        "width": 378
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 378
+      },
+      "community": {
+        "count": 172,
+        "width": 378
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-14-pro-max",
+      "width": 430,
+      "height": 932,
+      "group": "phone"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 171,
+        "width": 378
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 378
+      },
+      "community": {
+        "count": 171,
+        "width": 378
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-14-pro-max",
+      "width": 430,
+      "height": 932,
+      "group": "phone"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "iphone-14-pro-max",
+      "width": 430,
+      "height": 932,
+      "group": "phone"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "pixel-7",
+      "width": 412,
+      "height": 915,
+      "group": "phone"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 62,
+        "width": 363
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 363
+      },
+      "community": {
+        "count": 62,
+        "width": 363
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "pixel-7",
+      "width": 412,
+      "height": 915,
+      "group": "phone"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 64,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 172,
+        "width": 363
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 363
+      },
+      "community": {
+        "count": 172,
+        "width": 363
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "pixel-7",
+      "width": 412,
+      "height": 915,
+      "group": "phone"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 171,
+        "width": 363
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 363
+      },
+      "community": {
+        "count": 171,
+        "width": 363
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "pixel-7",
+      "width": 412,
+      "height": 915,
+      "group": "phone"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "pixel-7",
+      "width": 412,
+      "height": 915,
+      "group": "phone"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-s20",
+      "width": 360,
+      "height": 800,
+      "group": "phone"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 62,
+        "width": 317
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 317
+      },
+      "community": {
+        "count": 62,
+        "width": 317
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-s20",
+      "width": 360,
+      "height": 800,
+      "group": "phone"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 64,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 172,
+        "width": 317
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 317
+      },
+      "community": {
+        "count": 172,
+        "width": 317
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-s20",
+      "width": 360,
+      "height": 800,
+      "group": "phone"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 171,
+        "width": 317
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 317
+      },
+      "community": {
+        "count": 171,
+        "width": 317
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-s20",
+      "width": 360,
+      "height": 800,
+      "group": "phone"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-s20",
+      "width": 360,
+      "height": 800,
+      "group": "phone"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-a51",
+      "width": 412,
+      "height": 914,
+      "group": "phone"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 62,
+        "width": 363
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 363
+      },
+      "community": {
+        "count": 62,
+        "width": 363
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-a51",
+      "width": 412,
+      "height": 914,
+      "group": "phone"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 64,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 172,
+        "width": 363
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 363
+      },
+      "community": {
+        "count": 172,
+        "width": 363
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-a51",
+      "width": 412,
+      "height": 914,
+      "group": "phone"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 171,
+        "width": 363
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 363
+      },
+      "community": {
+        "count": 171,
+        "width": 363
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-a51",
+      "width": 412,
+      "height": 914,
+      "group": "phone"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "galaxy-a51",
+      "width": 412,
+      "height": 914,
+      "group": "phone"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "redmi-note",
+      "width": 393,
+      "height": 851,
+      "group": "phone"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 62,
+        "width": 346
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 346
+      },
+      "community": {
+        "count": 62,
+        "width": 346
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "redmi-note",
+      "width": 393,
+      "height": 851,
+      "group": "phone"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 64,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 172,
+        "width": 346
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 346
+      },
+      "community": {
+        "count": 172,
+        "width": 346
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "redmi-note",
+      "width": 393,
+      "height": 851,
+      "group": "phone"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 171,
+        "width": 346
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 346
+      },
+      "community": {
+        "count": 171,
+        "width": 346
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "redmi-note",
+      "width": 393,
+      "height": 851,
+      "group": "phone"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "redmi-note",
+      "width": 393,
+      "height": 851,
+      "group": "phone"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "small-android",
+      "width": 360,
+      "height": 740,
+      "group": "phone"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 62,
+        "width": 317
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 317
+      },
+      "community": {
+        "count": 62,
+        "width": 317
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "small-android",
+      "width": 360,
+      "height": 740,
+      "group": "phone"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 64,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 172,
+        "width": 317
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 317
+      },
+      "community": {
+        "count": 172,
+        "width": 317
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "small-android",
+      "width": 360,
+      "height": 740,
+      "group": "phone"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [
+        154,
+        154,
+        154,
+        154,
+        154,
+        154
+      ],
+      "germany": {
+        "count": 171,
+        "width": 317
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 317
+      },
+      "community": {
+        "count": 171,
+        "width": 317
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "small-android",
+      "width": 360,
+      "height": 740,
+      "group": "phone"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "small-android",
+      "width": 360,
+      "height": 740,
+      "group": "phone"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 85,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-mini",
+      "width": 768,
+      "height": 1024,
+      "group": "tablet"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 691
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 691
+      },
+      "community": {
+        "count": 62,
+        "width": 691
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-mini",
+      "width": 768,
+      "height": 1024,
+      "group": "tablet"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 691
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 691
+      },
+      "community": {
+        "count": 172,
+        "width": 691
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-mini",
+      "width": 768,
+      "height": 1024,
+      "group": "tablet"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 691
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 691
+      },
+      "community": {
+        "count": 171,
+        "width": 691
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-mini",
+      "width": 768,
+      "height": 1024,
+      "group": "tablet"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-mini",
+      "width": 768,
+      "height": 1024,
+      "group": "tablet"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-air",
+      "width": 820,
+      "height": 1180,
+      "group": "tablet"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 357
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 357
+      },
+      "community": {
+        "count": 62,
+        "width": 738
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-air",
+      "width": 820,
+      "height": 1180,
+      "group": "tablet"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 357
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 357
+      },
+      "community": {
+        "count": 172,
+        "width": 738
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-air",
+      "width": 820,
+      "height": 1180,
+      "group": "tablet"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 357
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 357
+      },
+      "community": {
+        "count": 171,
+        "width": 738
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-air",
+      "width": 820,
+      "height": 1180,
+      "group": "tablet"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-air",
+      "width": 820,
+      "height": 1180,
+      "group": "tablet"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-pro-11",
+      "width": 834,
+      "height": 1194,
+      "group": "tablet"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 363
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 363
+      },
+      "community": {
+        "count": 62,
+        "width": 751
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-pro-11",
+      "width": 834,
+      "height": 1194,
+      "group": "tablet"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 363
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 363
+      },
+      "community": {
+        "count": 172,
+        "width": 751
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-pro-11",
+      "width": 834,
+      "height": 1194,
+      "group": "tablet"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 363
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 363
+      },
+      "community": {
+        "count": 171,
+        "width": 751
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-pro-11",
+      "width": 834,
+      "height": 1194,
+      "group": "tablet"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "ipad-pro-11",
+      "width": 834,
+      "height": 1194,
+      "group": "tablet"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tablet-android",
+      "width": 800,
+      "height": 1280,
+      "group": "tablet"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 348
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 348
+      },
+      "community": {
+        "count": 62,
+        "width": 720
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tablet-android",
+      "width": 800,
+      "height": 1280,
+      "group": "tablet"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 348
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 348
+      },
+      "community": {
+        "count": 172,
+        "width": 720
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tablet-android",
+      "width": 800,
+      "height": 1280,
+      "group": "tablet"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 348
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 348
+      },
+      "community": {
+        "count": 171,
+        "width": 720
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tablet-android",
+      "width": 800,
+      "height": 1280,
+      "group": "tablet"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tablet-android",
+      "width": 800,
+      "height": 1280,
+      "group": "tablet"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1366",
+      "width": 1366,
+      "height": 768,
+      "group": "laptop"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 548
+      },
+      "community": {
+        "count": 62,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1366",
+      "width": 1366,
+      "height": 768,
+      "group": "laptop"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 548
+      },
+      "community": {
+        "count": 172,
+        "width": 1120
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1366",
+      "width": 1366,
+      "height": 768,
+      "group": "laptop"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 548
+      },
+      "community": {
+        "count": 171,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1366",
+      "width": 1366,
+      "height": 768,
+      "group": "laptop"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1366",
+      "width": 1366,
+      "height": 768,
+      "group": "laptop"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1440",
+      "width": 1440,
+      "height": 900,
+      "group": "laptop"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 548
+      },
+      "community": {
+        "count": 62,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1440",
+      "width": 1440,
+      "height": 900,
+      "group": "laptop"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 548
+      },
+      "community": {
+        "count": 172,
+        "width": 1120
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1440",
+      "width": 1440,
+      "height": 900,
+      "group": "laptop"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 548
+      },
+      "community": {
+        "count": 171,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1440",
+      "width": 1440,
+      "height": 900,
+      "group": "laptop"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "laptop-1440",
+      "width": 1440,
+      "height": 900,
+      "group": "laptop"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1600",
+      "width": 1600,
+      "height": 900,
+      "group": "desktop"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 548
+      },
+      "community": {
+        "count": 62,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1600",
+      "width": 1600,
+      "height": 900,
+      "group": "desktop"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 548
+      },
+      "community": {
+        "count": 172,
+        "width": 1120
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1600",
+      "width": 1600,
+      "height": 900,
+      "group": "desktop"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 548
+      },
+      "community": {
+        "count": 171,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1600",
+      "width": 1600,
+      "height": 900,
+      "group": "desktop"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1600",
+      "width": 1600,
+      "height": 900,
+      "group": "desktop"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1920",
+      "width": 1920,
+      "height": 1080,
+      "group": "desktop"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 548
+      },
+      "community": {
+        "count": 62,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1920",
+      "width": 1920,
+      "height": 1080,
+      "group": "desktop"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 548
+      },
+      "community": {
+        "count": 172,
+        "width": 1120
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1920",
+      "width": 1920,
+      "height": 1080,
+      "group": "desktop"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 548
+      },
+      "community": {
+        "count": 171,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1920",
+      "width": 1920,
+      "height": 1080,
+      "group": "desktop"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop-1920",
+      "width": 1920,
+      "height": 1080,
+      "group": "desktop"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-2560",
+      "width": 2560,
+      "height": 1440,
+      "group": "tv"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 548
+      },
+      "community": {
+        "count": 62,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-2560",
+      "width": 2560,
+      "height": 1440,
+      "group": "tv"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 548
+      },
+      "community": {
+        "count": 172,
+        "width": 1120
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-2560",
+      "width": 2560,
+      "height": 1440,
+      "group": "tv"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 548
+      },
+      "community": {
+        "count": 171,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-2560",
+      "width": 2560,
+      "height": 1440,
+      "group": "tv"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-2560",
+      "width": 2560,
+      "height": 1440,
+      "group": "tv"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-3840",
+      "width": 3840,
+      "height": 2160,
+      "group": "tv"
+    },
+    "page": "de-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 62,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 62,
+        "width": 548
+      },
+      "community": {
+        "count": 62,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-3840",
+      "width": 3840,
+      "height": 2160,
+      "group": "tv"
+    },
+    "page": "uk-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 94,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 172,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 172,
+        "width": 548
+      },
+      "community": {
+        "count": 172,
+        "width": 1120
+      },
+      "heroChipText": "Терміново",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-3840",
+      "width": 3840,
+      "height": 2160,
+      "group": "tv"
+    },
+    "page": "en-home",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [
+        158,
+        158,
+        158,
+        158,
+        158,
+        158
+      ],
+      "germany": {
+        "count": 171,
+        "width": 548
+      },
+      "ukraine": {
+        "count": 171,
+        "width": 548
+      },
+      "community": {
+        "count": 171,
+        "width": 1120
+      },
+      "heroChipText": "Breaking News",
+      "heroTermsHeight": 10,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-3840",
+      "width": 3840,
+      "height": 2160,
+      "group": "tv"
+    },
+    "page": "de-cat",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  },
+  {
+    "viewport": {
+      "name": "tv-3840",
+      "width": 3840,
+      "height": 2160,
+      "group": "tv"
+    },
+    "page": "de-post",
+    "result": {
+      "tickerExists": true,
+      "tickerLabelWidth": 124,
+      "latestHeights": [],
+      "germany": null,
+      "ukraine": null,
+      "community": null,
+      "heroChipText": "",
+      "heroTermsHeight": 0,
+      "utilityVisible": true,
+      "searchInMenu": true,
+      "pulseContent": "\"\"",
+      "pulseAnimation": "europulse-logo-wave-normalized"
+    }
+  }
+]

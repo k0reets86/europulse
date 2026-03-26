@@ -1,0 +1,167 @@
+# TODO
+
+## In Progress
+
+- [~] Довести `EPV3` до production-ready автономии на live
+- [x] `EPV2` выключен на live, но сохранён как reference/fallback
+- [x] `EPV3` активирован на live и проходит базовый автономный цикл через собственные таблицы `ep_epv3_queue` / `ep_epv3_runs`
+- [x] Добавить в `EPV3` batched orchestrator:
+- [x] несколько process-stage transitions за один tick
+- [x] отдельный delayed publish-cycle в том же tick
+- [x] Поднять `EPV3` admin UI до многостраничной структуры уровня `EPV2`:
+- [x] Обзор
+- [x] Источники
+- [x] Очередь
+- [x] Настройки
+- [x] Ручной режим
+- [x] Проверка материала
+- [x] Логи
+- [x] Запуски
+- [x] Проверить live-render всех новых страниц `EPV3` без fatal
+- [x] Подтвердить live autonomous path:
+- [x] item `#8` дошёл до `ready_publish`
+- [x] item `#8` опубликован как post `2679`
+- [x] item `#6` опубликован как post `2680`
+- [x] Проверить, что published posts получают quality meta:
+- [x] `_epv3_context_score`
+- [x] `_epv3_seo_score`
+- [x] `_epv3_google_score`
+- [x] `_epv3_release_score`
+- [x] Усилить `EPV3` dossier-builder:
+- [x] несколько query-strategy вместо одного search term
+- [x] supporting-source enrichment через Google News RSS fallback
+- [x] Усилить `EPV3` DE-builder:
+- [x] обязательный quote fallback
+- [x] citations в `de_payload` и в публикации
+- [~] Дожать multi-source dossier так, чтобы supporting sources чаще реально появлялись на live case, а не только primary source
+- [~] Дожать editorial quality переводов и DE rewrite до production уровня, а не только до валидного AI-output
+- [~] Заморозить `EPV2` как reference/fallback и прекратить расширять legacy-ветки сверх аварийных fixes
+- [~] Полностью перезапустить `EPV3` с нуля без использования старого черновика
+- [ ] Собрать `EPV3 knowledge pack` из `EPV2` перед переписыванием:
+- [ ] обязательный файл: `/root/projects/europulse/docs/epv3-mandatory-knowledge-pack.md`
+- [ ] вынуть и зафиксировать промпты, editorial rules, source rules, media attribution, citation/linking rules, category/selection logic, DE-first pipeline rules
+- [ ] использовать knowledge pack как входную спецификацию для `EPV3`, а не пытаться переносить legacy-хаос в код
+- [x] Восстановить контекст по `AGENTS.md` и `SESSION_HANDOFF.md`
+- [x] Снять live-срез safe orchestrator mode после relaunch
+- [x] Провести первичный аудит: cron, DB load, memory/FPM pressure, fatal/security risks
+- [x] Зафиксировать план стабилизации и доведения плагина до автономной работы
+- [x] Убрать pipeline-dispatch из admin HTTP/AJAX очереди
+- [x] Добавить capability checks на сервисные `admin_post` actions
+- [x] Добавить timing/instrumentation для collect/process/publish/orchestrator
+- [x] Выложить эти правки в active live plugin
+- [x] Убрать тяжёлый resilience cleanup из admin AJAX и обычных web hits при `server_orchestrator_enabled=1`
+- [x] Добавить breakdown instrumentation для медленного resilience cleanup
+- [x] Убрать дорогую payload/media-нормализацию из recovery/cleanup путей
+- [x] Ускорить orphan process-lock recovery в `server_orchestrator` mode и явно финализировать зависшие runs
+- [x] Перевести ручные admin-run actions на безопасный enqueue/dispatch без длинного HTTP-выполнения
+- [x] Перевести встроенный worker client на безопасный PHP entrypoint без shell-команды
+- [x] Включить `worker_mode=cli` на live и подтвердить реальный `worker_translate_finish` run
+- [x] Убрать loop `retry_process` -> `retry_process` для review-ready payload после провала publish-grade
+- [~] Разобрать причину долгого `process` run на live по фактическим стадиям
+- [x] Разобрать, почему при активном `epv2_lock_process` может не быть `processing_de` item
+- [x] Разобрать, почему `php-fpm` workers висят минутами даже без активного orchestrator process
+- [x] Вынести heavy worker path из web/FPM и убрать shell-command worker entrypoint
+- [x] Добавить worker bridge / step telemetry для `full_bundle|rebuild_bundle|translate_finish|publish_finish`
+- [x] Срезать duplicate enrichment и heavy network loops в `generate_review_payload()` / `source_enricher`
+- [x] Перевести baseline dossier build в fast mode без supporting search
+- [x] Перевести fast mode без primary document fetch
+- [ ] Разобрать, почему `wp eval ... process_scheduled()` на live может зависать до записи нового run
+- [~] Перевести pipeline на строгий `DE-first`: сначала полноценный немецкий мастер, потом `UK/EN`
+- [x] Снять 5-минутный self-throttle server orchestrator (`has_recent_started`) и перевести orchestrator на multi-stage drain за один tick
+- [x] Разрезать generic translation-loop на точные стадии `translate_uk -> translate_en -> publish_finish`
+- [x] Передавать сохранённый `context_memory` в `rebuild_bundle` и приоритизировать DE/context-first search terms
+- [x] Перестроить supporting-source search pipeline на Bing-first fallback в коротком runtime budget
+- [x] Перевести supporting relevance filter на `context_memory/story_context`
+- [x] Включить server-side cleanup для `server_orchestrator_enabled=1`
+- [x] Включить orphan process-lock recovery прямо в `run_process_windowed()`
+- [x] Начать резать ранние multilingual ветки: `worker full_bundle/rebuild_bundle` переведены на `DE-only` publish-grade lift
+- [x] После worker rebuild разрешить прямой переход в `translate_finish`, если `DE master` уже валиден
+- [x] Ввести `context_analysis` по body/dossier и быстрый `context_reject` до дорогого AI rewrite
+- [x] Ввести `stage_checklist` в payload и начать routing стадий через checklist
+- [x] Заменить старые `publish/review threshold` throws на `queue_required_stage()` через единый `payload_next_required_stage()`
+- [~] Разрезать sync worker bridge: `process` всё ещё блокируется в `proc_open + wait` на `php_worker/wp-cli bridge`
+- [x] Убрать force-bug в async collect/publish (`true || $force`)
+- [x] Убрать тяжёлые side effects с обычных фронтовых `init`-хитов
+- [x] Добавить guard на прямые SQL к Action Scheduler tables
+- [x] Добавить базовую HTTP/content-type валидацию в HTML ingest
+- [x] Добавить составные индексы для hot-path очереди и runs
+
+## Next
+
+- [ ] Проверить автопубликацию item `#7` и item `#9` без ручного вмешательства
+- [ ] Убедиться, что `EPV3` сам продолжает очередь между тиками cron, а не только из `wp eval`
+- [ ] Подключить в `EPV3` реальные external-source providers кроме Google News RSS fallback
+- [ ] Перенести в `EPV3` реальные source rules / editorial prompts из knowledge pack, а не только базовую AI-сборку
+- [ ] Усилить `EPV3` media attribution/import:
+- [ ] локальный import attachment при валидном source media
+- [ ] fallback только на релевантный external source
+- [ ] явная подпись и ссылка на первоисточник
+- [ ] Довести published content до полного editorial format:
+- [ ] цитаты в теле, а не только в payload
+- [ ] citations/source block в финальном контенте
+- [ ] полноценный SEO/meta/tag flow
+- [ ] Не удалять `EPV2`; оставить его как fallback/reference до успешного cutover `EPV3`
+- [ ] Новый чистый каркас `EPV3` создан заново в `/root/projects/europulse/wp-plugins/europulse-autopilot-v3`
+- [ ] Больше не использовать старый черновик `EPV3`; развивать только новый clean-slate каркас
+- [ ] Переключить основной план с “дочинить legacy” на “вынуть знания и собрать `EPV3`”
+- [ ] Создать `EPV3` как новый чистый плагин рядом со старым:
+- [ ] intake
+- [ ] body-context analysis
+- [ ] enrichment from other sources
+- [ ] DE master
+- [ ] media with attribution/source link
+- [ ] UK/EN only after final DE
+- [ ] publish_ready
+- [ ] delayed publish after full extra cycle
+- [ ] В `EPV3` держать только:
+- [ ] один orchestrator
+- [ ] read-only выбор следующего item
+- [ ] короткие stage transitions без тяжёлых side effects в selector path
+- [ ] без web/admin-triggered orchestration
+- [ ] без direct `wp-load` fallback внутри worker-path
+- [ ] Любую новую работу по `EPV2` ограничить только:
+- [ ] сохранением текущей работоспособности сайта
+- [ ] извлечением знаний/правил/настроек
+- [ ] минимальными аварийными fixes без расширения legacy-логики
+- [~] Убрать раннюю деградацию в `ready_review`: recoverable ветки уже возвращаются в `retry_process`, но нужно дочистить оставшиеся fallback paths и длинные auto-finish кейсы
+- [ ] Перестроить auto-pipeline на полную автономную цепочку:
+- [ ] `collect` -> жёсткий фильтр мусора/пресс-релизов/шума
+- [ ] глубокий semantic/topic analysis по body, а не только title
+- [ ] category/priority/quota decision по теме и подтемам
+- [ ] если dossier слабый: добор внешних источников по semantic теме и подтемам до достаточной фактуры
+- [ ] если media слабое/отсутствует: поиск и парсинг релевантного изображения по смыслу текста, а не по одному заголовку
+- [ ] доведение DE master до полного publish-grade `100/100`: content, structure, SEO, metadata, tags, media
+- [ ] только после этого переводы `uk/en` с учётом SEO/meta constraints
+- [ ] финальная multilingual/publish validation перед автопубликацией
+- [ ] Оставить `ready_review` только для редких тупиков:
+- [ ] долгий provider outage / hard infra failure
+- [ ] неразрешимый factual conflict
+- [ ] после полного auto-search не найдено допустимое media
+- [ ] после полного auto-enrichment материал всё ещё не проходит минимальный factual/publish threshold
+- [ ] Пересобрать lock/run recovery model и добить orphan/stale started runs
+- [ ] Нормализовать scheduling model: один server orchestrator, без скрытого WP web-dispatch
+- [ ] Оптимизировать DB access в очереди и ingestion
+- [x] Добавить составные индексы для `ep_epv2_queue`
+- [ ] Применить schema upgrade на live и проверить реальные индексы в MySQL
+- [~] Убрать прямую зависимость heavy worker от `wp-load.php`
+- [~] Доделать настоящий внешний worker для тяжёлого process pipeline
+- [x] Поднять live `worker_timeout_seconds` до `600` и синхронизировать новый default в коде
+- [x] Проверить live после policy-правок: item `294` доведён до `published`, queue больше не складывает recoverable items в `ready_review`
+- [ ] Добить long-running `process` path для item `291` и аналогичных auto-finish/rebuild кейсов
+- [ ] Дождаться и проверить автопубликацию `298` после `publish_not_before = 2026-03-26 10:32:00 UTC`
+- [ ] Подтвердить, что item `303` проходит тот же DE-first pipeline без manual/review fallback
+- [x] Разрезать ложный rebuild-loop для ready multilingual payload на `publish_finish`
+- [x] Добавить lightweight `stage marker refresh` без полного `enrich_payload()` на `translate/publish_finish` стадиях
+- [x] Заставить translation worker считать stage успешным только при реально валидном `uk/en` пакете
+- [ ] Добавить shadow-runner для изолированного прогона queue item через внешний worker без записи в live queue
+- [ ] Прогнать `303`, `307`, `293` через shadow-runner и сверить outcome/warnings без legacy live-state
+- [ ] После подтверждения shadow-пайплайна переключить production process-path на тот же deterministic route
+- [ ] Пересмотреть retry taxonomy и quality gates для `retry_process`
+- [ ] Перевести `ready_review` в операторский поток с понятным action list вместо зависания в общей очереди
+- [ ] Усилить admin health/ops dashboard
+- [ ] Добавить smoke/integration checks для orchestration
+- [ ] Убрать blocking worker execution из `process_scheduled()`:
+- [ ] быстрый stage-dispatch
+- [ ] отдельный persisted worker-run state
+- [ ] возврат item в очередь только после подтверждённого stage result
+- [ ] Убрать hot-path записи из `EPV2_Queue::processable_items_for_states()` и `promote_publish_ready_payloads()`

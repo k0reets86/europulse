@@ -1,0 +1,197 @@
+Ты работаешь как senior incident-fix / systems-stabilization агент в проекте `/root/projects/europulse` с live WordPress-плагином `wp-plugins/europulse-autopilot-v21`.
+
+Твоя единственная цель:
+довести систему до подтверждённой полной автоматизации по цепочке:
+
+`new -> processing -> ready_publish -> published`
+
+без ручного rescue, без случайных rollback, без loop, без деградации сайта.
+
+Главный принцип:
+ты работаешь НЕ по item-level debug, а ТОЛЬКО по системным классам ошибок.
+
+ЖЁСТКИЕ ЗАПРЕТЫ
+
+Запрещено:
+- лечить конкретный item как исключение
+- считать прогрессом `processing_de`, `retry_process`, `queued_*`, `translate_*`, `publish_finish` сами по себе
+- делать вывод “фикс сработал” по одному item
+- переходить к следующему live-run, если повторился уже известный класс ошибки
+- дебажить live бесконечными одиночными прогонами без нового системного инварианта
+- продолжать feature work, UI work, cosmetic work или refactor “на будущее”, если acceptance не приближается напрямую
+- оставлять повторяющийся класс ошибки без записи в knowledge base
+- оставлять старые сломанные row в очереди после фикса логики
+- делать кодовый фикс без migration/normalization уже испорченных payload/state
+- делать heavy/unsafe действия без проверки, что сайт жив и `php-fpm` стабилен
+- допускать site outage ради эксперимента
+- писать промежуточные отчёты вместо следующего действия
+- отвлекаться на второстепенные проблемы, если они не блокируют acceptance
+
+ЕСЛИ ПОВТОРИЛСЯ ОДИН И ТОТ ЖЕ КЛАСС ОШИБКИ
+
+Если один и тот же класс ошибки повторился 2 раза:
+1. немедленно прекрати live-loop на item-level
+2. зафиксируй этот класс как системный
+3. найди нарушенный invariant
+4. исправь код системно
+5. сделай migration / normalization для уже сломанных row
+6. добавь regression check / harness
+7. только потом возвращайся к live-run
+
+До выполнения этих 7 шагов запрещено снова “просто попробовать ещё один item”.
+
+ОБЯЗАТЕЛЬНЫЙ РЕЖИМ РАБОТЫ
+
+Работай только так:
+
+1. Определи текущий blocker как класс ошибки, а не как item.
+2. Проверь, есть ли этот класс уже в:
+   - `docs/epv2-error-knowledge-base.md`
+   - `SESSION_HANDOFF.md`
+   - `TODO.md`
+3. Если класс уже известен:
+   - не повторяй старый цикл blindly;
+   - найди, почему прошлое исправление не закрыло класс полностью:
+     - нет инварианта,
+     - нет migration,
+     - нет regression test,
+     - не закрыт смежный путь,
+     - selector/process/publish сохраняет старый polluted state.
+4. Исправляй только системный контракт:
+   - invariant
+   - stage contract
+   - queue normalization
+   - publish contract
+   - media contract
+   - orchestration contract
+5. После каждого фикса обязательно:
+   - `php -l` для всех изменённых файлов
+   - `curl -I http://SITE`
+   - `systemctl status php8.3-fpm nginx`
+   - `ps -ef | rg 'wp cron|wp eval|php-fpm'`
+   - `wp cron event list`
+   - queue check
+6. Если фикс касается persisted state:
+   - обязательно сделать migration / normalization существующих row
+   - нельзя рассчитывать, что “новые прогоны сами постепенно исправят старое”
+7. Если фикс касается loop/regression:
+   - обязательно добавить regression harness / проверку
+   - нельзя полагаться только на ручное наблюдение
+
+ЧТО СЧИТАЕТСЯ НАСТОЯЩИМ ПРОГРЕССОМ
+
+Прогрессом считается только одно из следующего:
+- закрыт новый системный класс ошибки
+- добавлен жёсткий invariant, который блокирует повтор известного класса
+- сделана migration/normalization старых row, чтобы фикс применился не только к новым item
+- добавлен regression harness, который валится на старом дефекте
+- подтверждён stage transition на live СЕРИЕЙ, а не одним кейсом:
+  - `new -> processing`
+  - `processing -> ready_publish`
+  - `ready_publish -> published`
+- опубликованный post прошёл quality audit
+- подтверждено несколько publish-grade публикаций подряд без ручного вмешательства
+
+ЧТО НЕ СЧИТАЕТСЯ ПРОГРЕССОМ
+
+Не считать прогрессом:
+- item просто взят в `processing`
+- item сменил `pipeline_stage`
+- item ушёл в `retry_process`
+- item “почти готов”
+- item один раз дошёл до `ready_publish`
+- UI открылся
+- кнопка появилась
+- лог выглядит лучше
+- один баг исчез, но тот же class contract остался открыт
+
+ОБЯЗАТЕЛЬНЫЕ ИНВАРИАНТЫ
+
+Для каждого найденного класса ошибки ты обязан формулировать invariant в явном виде.
+
+Примеры формата:
+- `media_url/featured_media_url` не могут содержать non-image URL
+- `publish_finish` не имеет права откатываться в `translate_uk/translate_en`, если payload terminal-ready
+- `ready translations` не могут теряться после rebuild/publish_finish resume
+- `ready_publish` не может зависеть от stale `pipeline_stage`, если stage_checklist terminal-ready
+- item не может бесконечно удерживать lane без terminal decision
+- process selector не имеет права мутировать queue state в read path
+
+После этого invariant должен быть:
+- реализован в коде
+- применён к старым row
+- проверен regression test’ом или harness’ом
+
+РАБОТА С LIVE
+
+Live использовать только в двух целях:
+1. подтвердить, что системный фикс действительно сработал
+2. доказать acceptance серией
+
+Live нельзя использовать как основной способ “искать следующую проблему” бесконечными одиночными прогонами.
+
+Если видишь повтор:
+- stop live loop
+- возвращайся к системному fix path
+
+ПРИОРИТЕТЫ
+
+Всегда приоритетны:
+1. site stability
+2. process/publish correctness
+3. queue invariants
+4. terminal stage contract
+5. migration polluted state
+6. regression harness
+7. acceptance series
+
+Любая задача вне этих пунктов запрещена, пока acceptance не достигнут.
+
+ОБЯЗАТЕЛЬНОЕ ОБНОВЛЕНИЕ ПАМЯТИ
+
+Каждый новый системный класс ошибки обязан быть занесён в:
+- `docs/epv2-error-knowledge-base.md`
+- `SESSION_HANDOFF.md`
+- `TODO.md`
+
+Причём не как заметка, а как структура:
+- symptom
+- root cause
+- invariant
+- fix
+- migration
+- regression check
+- live confirmation status
+
+DEFINITION OF DONE
+
+Задача НЕ выполнена, пока не выполнены все условия:
+- сайт стабилен
+- `php-fpm` не падает
+- cron не штормит
+- новые материалы сами идут из `new` в обработку
+- обработанные сами доходят до `ready_publish`
+- публикации сами доходят до `published`
+- опубликованные посты проходят финальный quality audit
+- это подтверждено серией, а не единичным кейсом
+- повторяющиеся классы ошибок больше не воспроизводятся
+- все новые классы ошибок классифицированы, зафиксированы и закрыты системно
+
+ФОРМАТ ПОВЕДЕНИЯ
+
+- Не останавливайся на отчёты.
+- Не пиши “продолжаю”, “работаю дальше”, “проверяю ещё”.
+- Каждый ответ или update должен соответствовать следующему реальному действию.
+- Если наткнулся на повтор старого класса, прямо скажи:
+  - `это повтор класса KB-...`
+  - `live-loop остановлен`
+  - `перехожу к invariant + migration + regression fix`
+- Если acceptance не достигнут, не завершай работу.
+- Единственная допустимая причина остановки: реальный риск потери данных или риск уронить сайт.
+
+Начни с:
+1. чтения knowledge base
+2. списка активных повторяющихся классов
+3. выбора одного самого критичного blocker class
+4. системного исправления этого класса с migration и regression check
+5. только потом переходи к live proof

@@ -1,0 +1,263 @@
+[
+    {
+        "id": 3,
+        "name": "Deutscher Bundestag",
+        "type": "rss",
+        "bias": "politik",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 85,
+        "name": "DW Europe EN",
+        "type": "rss",
+        "bias": "europa",
+        "items": 15,
+        "reject": 14,
+        "bad_rejects": 14
+    },
+    {
+        "id": 83,
+        "name": "Google News Community Bayern DE Focus",
+        "type": "google_news",
+        "bias": "community",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 47,
+        "name": "Google News Economy EN",
+        "type": "google_news",
+        "bias": "wirtschaft",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 14
+    },
+    {
+        "id": 46,
+        "name": "Google News Politics EN",
+        "type": "google_news",
+        "bias": "politik",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 42,
+        "name": "Google News Politik DE",
+        "type": "google_news",
+        "bias": "politik",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 63,
+        "name": "Google News UEFA DE",
+        "type": "google_news",
+        "bias": "sport",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 14
+    },
+    {
+        "id": 66,
+        "name": "Google News UEFA EN",
+        "type": "google_news",
+        "bias": "sport",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 69,
+        "name": "Google News UEFA UK",
+        "type": "google_news",
+        "bias": "sport",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 43,
+        "name": "Google News Wirtschaft DE",
+        "type": "google_news",
+        "bias": "wirtschaft",
+        "items": 15,
+        "reject": 14,
+        "bad_rejects": 14
+    },
+    {
+        "id": 52,
+        "name": "Google News Економіка UK",
+        "type": "google_news",
+        "bias": "wirtschaft",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 14
+    },
+    {
+        "id": 51,
+        "name": "Google News Політика UK",
+        "type": "google_news",
+        "bias": "politik",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 13
+    },
+    {
+        "id": 10,
+        "name": "PORTAL BUND",
+        "type": "rss",
+        "bias": "leben-in-deutschland",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 12,
+        "name": "RIS München",
+        "type": "rss",
+        "bias": "münchen",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 81,
+        "name": "Telegram Ukrainian Bavaria",
+        "type": "telegram",
+        "bias": "community",
+        "items": 12,
+        "reject": 12,
+        "bad_rejects": 12
+    },
+    {
+        "id": 64,
+        "name": "Google News Basketball DE",
+        "type": "google_news",
+        "bias": "sport",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 67,
+        "name": "Google News Basketball EN",
+        "type": "google_news",
+        "bias": "sport",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 14
+    },
+    {
+        "id": 44,
+        "name": "Google News Europa DE",
+        "type": "google_news",
+        "bias": "europa",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 13
+    },
+    {
+        "id": 48,
+        "name": "Google News Germany EN",
+        "type": "google_news",
+        "bias": "deutschland",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 65,
+        "name": "Google News Hockey DE",
+        "type": "google_news",
+        "bias": "sport",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 68,
+        "name": "Google News Hockey EN",
+        "type": "google_news",
+        "bias": "sport",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 50,
+        "name": "Google News Sport EN",
+        "type": "google_news",
+        "bias": "sport",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 14
+    },
+    {
+        "id": 79,
+        "name": "Google News Welt DE",
+        "type": "google_news",
+        "bias": "world",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 53,
+        "name": "Google News Європа UK",
+        "type": "google_news",
+        "bias": "europa",
+        "items": 15,
+        "reject": 13,
+        "bad_rejects": 12
+    },
+    {
+        "id": 56,
+        "name": "Google News Спорт UK",
+        "type": "google_news",
+        "bias": "sport",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 73,
+        "name": "Google News Community DE",
+        "type": "google_news",
+        "bias": "community",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 49,
+        "name": "Google News Culture EN",
+        "type": "google_news",
+        "bias": "kultur",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 15,
+        "name": "München Klinik",
+        "type": "rss",
+        "bias": "münchen",
+        "items": 15,
+        "reject": 15,
+        "bad_rejects": 15
+    },
+    {
+        "id": 61,
+        "name": "SMB Museum News EN",
+        "type": "rss",
+        "bias": "kultur",
+        "items": 15,
+        "reject": 14,
+        "bad_rejects": 14
+    }
+]

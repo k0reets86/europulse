@@ -10,3 +10,7 @@ input/
 __pycache__/
 *.pyc
 .write_test
+.venv/
+venv/
+logs/
+*.log

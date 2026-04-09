@@ -1,0 +1,471 @@
+Ты работаешь в проекте `/root/projects/europulse` с WordPress-плагином `wp-plugins/europulse-autopilot-v21`.
+
+Твоя задача:
+не “улучшить систему”, а довести её до подтверждённого end-to-end результата:
+автоматический проход новостей `new -> processing -> ready_publish -> published`
+без ручного rescue
+с подтверждённым качеством текста, SEO, featured media и post output.
+
+Главный принцип:
+работать только по системным классам ошибок.
+Запрещено:
+- лечить один item как исключение
+- считать прогрессом `processing_de`, `retry_process`, `queued_*`
+- останавливаться на частичном результате
+- продолжать feature work, если сайт отдаёт не `200`
+- оставлять ошибку без записи в knowledge base
+- запускать тяжёлые циклы без проверки `php-fpm`, cron, lock и сайта
+
+Необходимые результаты:
+1. Сайт стабилен и не падает.
+2. Automation не штормит cron и не убивает php-fpm.
+3. Новые новости сами уходят из `new` в обработку.
+4. Обработанные материалы сами доходят до `ready_publish`.
+5. Публикации сами выходят в `published`.
+6. Опубликованные посты проходят финальный quality audit.
+7. Всё подтверждено серией, а не одним кейсом.
+
+Работай блоками.
+
+БЛОК A. АВАРИЙНАЯ СТАБИЛИЗАЦИЯ
+
+Цель:
+- сайт отвечает `200 OK`
+- `php-fpm` активен
+- нет runaway `wp cron`
+- нет OOM-штормов
+- plugin runtime не валит сайт из-за Redis/object-cache/maintenance exception
+
+Обязательные проверки:
+- `curl -I http://SITE`
+- `systemctl status php8.3-fpm nginx`
+- `ps -ef | rg 'wp cron|wp eval|php-fpm'`
+- `tail -n 200 /var/log/php8.3-fpm.log`
+- `journalctl -u php8.3-fpm -n 200`
+
+Обязательные предохранители в коде:
+
+1. Safe fallback на get_option/object-cache failure:
+```php
+public static function get(): array {
+    if (self::$profile !== null) {
+        return self::$profile;
+    }
+
+    try {
+        $json = get_option('europulse_ui_system_profile_json', '');
+    } catch (Throwable $e) {
+        self::$profile = [];
+        return self::$profile;
+    }
+
+    $data = json_decode((string) $json, true);
+    self::$profile = is_array($data) ? $data : [];
+    return self::$profile;
+}
+```
+
+2. Runtime maintenance не должен валить cron-run целиком:
+```php
+private static function maintain_runtime_state(bool $allow_heavy_cleanup = true): void {
+    self::recover_orphan_collect_lock();
+    self::recover_orphan_process_lock();
+    self::recover_orphan_publish_lock();
+
+    if (! self::runtime_maintenance_due()) {
+        return;
+    }
+
+    try {
+        EPV2_Queue::normalize_non_active_recoverable_items();
+
+        if ($allow_heavy_cleanup) {
+            EPV2_Resilience_Manager::cleanup();
+        }
+
+        EPV2_Queue::promote_publish_ready_payloads(['retry_process', 'ready_review']);
+        EPV2_Queue::normalize_ready_publish_schedule();
+        EPV2_Queue::normalize_non_active_recoverable_items();
+    } catch (Throwable $e) {
+        EPV2_Logger::warning('jobs', 'runtime maintenance skipped after recoverable failure', [
+            'error' => $e->getMessage(),
+            'heavy_cleanup' => $allow_heavy_cleanup ? 1 : 0,
+        ]);
+    }
+
+    self::touch_runtime_maintenance();
+}
+```
+
+3. Если сайт в `502`, немедленно:
+- поднять `php-fpm`
+- остановить все зависшие `wp cron event run --due-now`
+- только потом продолжать plugin work
+
+БЛОК B. CRON И ORCHESTRATION CONTRACT
+
+Цель:
+- один канонический trigger на collect/process/publish
+- нет legacy async duplication
+- нет cron storm
+- process path не тащит heavy global cleanup
+
+Каноническая схема scheduling:
+
+```php
+private static function schedule_hook(string $hook, int $minutes): void {
+    $minutes = max(5, $minutes);
+    $recurrence = 'epv2_' . $minutes . '_minutes';
+
+    if (! wp_next_scheduled($hook)) {
+        wp_schedule_event(time() + MINUTE_IN_SECONDS, $recurrence, $hook);
+    }
+}
+```
+
+Очистка legacy hooks:
+```php
+private static function clear_legacy_async_hooks(): void {
+    foreach (['epv2_collect_async', 'epv2_process_async', 'epv2_publish_async'] as $hook) {
+        wp_clear_scheduled_hook($hook);
+    }
+}
+```
+
+Запрещённый паттерн:
+- один и тот же `process` должен запускаться и recurring hook, и async hook, и extra fallback hook одновременно
+
+Правильный паттерн:
+- `collect`
+- `process`
+- `publish`
+каждый имеет один канонический wake path
+
+System cron вместо WP self-spawn:
+```bash
+* * * * * cd /var/www/europulse/public && /usr/bin/php /var/www/europulse/public/wp-cron.php >/dev/null 2>&1
+```
+
+или безопасный WP-CLI runner:
+```bash
+* * * * * cd /var/www/europulse/public && /usr/local/bin/wp --path=/var/www/europulse/public cron event run --due-now >/tmp/europulse-wp-cron.log 2>&1
+```
+
+Но только если нет зависаний. Если `--due-now` создаёт шторм, запрещено оставлять его как есть.
+
+В `wp-config.php` для системного cron:
+```php
+define('DISABLE_WP_CRON', true);
+```
+
+БЛОК C. QUEUE/STATE INVARIANTS
+
+Цель:
+никакой row не должен одновременно жить в двух логиках.
+
+Жёсткие инварианты:
+- `state = new` не имеет hidden processing contract
+- `ready_publish/published` не имеют required stage
+- terminal-ready payload не хранит stale `pipeline_stage`
+- manual-confirmation item не ревайвится в automation без отдельного правила
+
+Правильный normalization паттерн:
+```php
+private static function normalize_staged_new_items(): void {
+    global $wpdb;
+    $table = $wpdb->prefix . 'epv2_queue';
+    $rows = $wpdb->get_results("
+        SELECT id, ai_payload, admin_notes
+        FROM {$table}
+        WHERE state = 'new'
+        ORDER BY updated_at DESC
+        LIMIT 50
+    ");
+
+    foreach ((array) $rows as $row) {
+        if (self::row_notes_require_manual_confirmation($row)) {
+            continue;
+        }
+
+        $notes = self::row_notes($row);
+        $system = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+        $has_retry_after = (string) ($system['retry_after'] ?? '') !== '';
+        $has_live_code = (string) ($system['live_status_code'] ?? '') !== '';
+        $has_stage = self::row_processing_stage($row) !== '';
+
+        if (! $has_retry_after && ! $has_live_code && ! $has_stage) {
+            continue;
+        }
+
+        $wpdb->update($table, ['state' => 'retry_process'], ['id' => (int) $row->id]);
+    }
+}
+```
+
+Fairness между bucket’ами:
+```php
+public static function processing_bucket(object $item): string {
+    $state = (string) ($item->state ?? '');
+
+    if ($state === 'new' && self::row_processing_stage($item) === '') {
+        return 'new';
+    }
+    if (self::row_processing_stage($item) !== '') {
+        return 'resume_stage';
+    }
+    if (in_array($state, ['retry_process', 'ready_review'], true)) {
+        return 'resume_auto';
+    }
+    return 'other';
+}
+```
+
+Обязательное правило:
+если в очереди есть processable `new`, один broken `resume_stage` item не имеет права бесконечно удерживать lane.
+
+БЛОК D. PROCESS HOT PATH
+
+Цель:
+`process` должен быстро брать item и быстро принимать одно из terminal решений:
+- next stage
+- ready_publish
+- ready_review/manual
+- rejected
+
+Запрещено:
+- endless loop `publish_finish -> retry_process -> publish_finish`
+- endless loop `rebuild_bundle -> retry_process -> rebuild_bundle`
+- heavy cleanup в начале каждого process run
+
+Правильный guard:
+```php
+public static function run_process_async(): void {
+    self::maybe_schedule();
+    self::maintain_runtime_state(false);
+
+    if (EPV2_Lock_Manager::is_active('process')) {
+        return;
+    }
+
+    EPV2_AI_Processor::process_scheduled(true, false);
+}
+```
+
+И внутри process:
+```php
+$skip_inline_cleanup = $force;
+if (! $skip_inline_cleanup) {
+    EPV2_Resilience_Manager::cleanup();
+}
+```
+
+То есть:
+- scheduler делает maintenance
+- process делает item work
+- не наоборот
+
+БЛОК E. TERMINAL STAGE CONTRACT
+
+Цель:
+если payload уже terminal-ready, stage contract обязан схлопнуться.
+Иначе система будет бесконечно хранить “почти готовый” материал в `retry_process`.
+
+Обязательный инвариант в stage checklist:
+```php
+private static function refresh_stage_checklist(array $payload): array {
+    $payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+
+    $uk_ready = self::payload_language_ready($payload, 'uk');
+    $en_ready = self::payload_language_ready($payload, 'en');
+    $ready_publish_fast = self::payload_is_publish_ready_fast($payload);
+
+    $completed = [
+        'de_master_ready' => self::de_master_ready_for_translation($payload),
+        'uk_ready' => $uk_ready,
+        'en_ready' => $en_ready,
+        'translations_ready' => $uk_ready && $en_ready && empty($payload['_meta']['translations_deferred']),
+        'publish_finish_ready' => self::de_master_ready_for_translation($payload),
+        'ready_publish' => $ready_publish_fast,
+    ];
+
+    $payload['_meta']['stage_checklist'] = $completed;
+
+    if (
+        $ready_publish_fast
+        && ! empty($completed['translations_ready'])
+        && ! empty($completed['publish_finish_ready'])
+    ) {
+        $payload['_meta']['pipeline_stage'] = '';
+    }
+
+    return $payload;
+}
+```
+
+Cheap normalization path тоже обязан это уважать:
+```php
+public static function normalize_existing_payload(array $payload, bool $allow_expensive = true): array {
+    if ($payload === []) {
+        return [];
+    }
+
+    if (! $allow_expensive) {
+        $payload = self::normalize_payload_quotes($payload);
+        $payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+        $payload = self::align_selection_with_payload_category($payload);
+        return self::refresh_stage_checklist($payload);
+    }
+
+    return self::finalize_payload_for_queue($payload);
+}
+```
+
+Final publish gate не должен резать terminal-ready payload только из-за stale stage tail:
+```php
+private static function payload_ready_for_publish(array $payload): bool {
+    $meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+    $stage_checklist = is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
+
+    $terminal_ready_despite_stale_stage =
+        ! empty($stage_checklist['ready_publish'])
+        && ! empty($stage_checklist['translations_ready'])
+        && ! empty($stage_checklist['publish_finish_ready'])
+        && empty($meta['translations_deferred']);
+
+    if (self::payload_pipeline_stage($payload) !== '' && ! $terminal_ready_despite_stale_stage) {
+        return false;
+    }
+
+    if (self::payload_next_required_stage($payload) !== '') {
+        return false;
+    }
+
+    // дальше quality/media/substance/language gates
+}
+```
+
+БЛОК F. WEAK CONTENT / REBUILD CONTRACT
+
+Цель:
+weak items не должны endlessly loop.
+Для любого weak item система обязана быстро выбрать одно:
+- recoverable retry
+- ready_review/manual
+- rejected
+
+Нельзя:
+- держать один weak item в lane десятками минут
+- rebuild без усиливающего прогресса
+- одинаковый `rebuild_bundle` без terminal decision
+
+Обязательный паттерн:
+- считать attempts
+- считать stagnation
+- если улучшения нет, давать terminal outcome
+
+Пример:
+```php
+if (self::maybe_cooldown_stagnated_rebuild($item, $old_payload, $new_payload, $next_stage)) {
+    $run_payload['result'] = 'stagnated_rebuild_cooldown';
+    break;
+}
+```
+
+Но этого недостаточно.
+Нужен ещё обязательный terminal split:
+- если контент не news-grade и не подлежит salvage -> `rejected`
+- если контент review-worthy, но не publish-grade -> `ready_review`
+- если есть реальный шанс -> `retry_process`
+
+БЛОК G. PUBLISH EXECUTION
+
+Цель:
+всё, что попало в `ready_publish`, должно автоматически публиковаться.
+
+Проверки:
+- due scheduling
+- publish lock
+- post creation
+- taxonomy write
+- featured image
+- multilingual post IDs
+- no global cache flush
+
+Запрещено:
+- `wp_cache_flush()` в publish path
+- full-site invalidation ради одной публикации
+
+Правильный подход:
+```php
+clean_post_cache($post_id);
+```
+
+а не глобальный flush.
+
+БЛОК H. FINAL QUALITY AUDIT
+
+Результат считается valid только если опубликованный пост проходит audit:
+
+Проверить:
+- title нормальный
+- excerpt нормальный
+- body не обрывается
+- нет shell content
+- нет смешения языков
+- SEO meta заполнены
+- featured image релевантна
+- taxonomies корректны
+- post status = publish
+- post реально существует и открывается
+
+Шаблон проверки:
+```sql
+SELECT ID, post_status, post_title, post_excerpt
+FROM wp_posts
+WHERE ID = {post_id};
+```
+
+и отдельно:
+- featured media meta
+- rank math / seo meta
+- post terms
+- translated variants
+
+БЛОК I. ОБЯЗАТЕЛЬНЫЕ ПРОВЕРКИ ПОСЛЕ КАЖДОГО БЛОКА
+
+После каждого блока выполнять без исключения:
+1. `php -l` для всех изменённых файлов
+2. `curl -I http://SITE`
+3. `systemctl status php8.3-fpm nginx`
+4. `ps -ef | rg 'wp cron|wp eval|php-fpm'`
+5. `wp cron event list`
+6. queue checks через `wp db query` / `wp eval`
+7. если был process fix:
+   - подтвердить, что fresh `new` реально выбран и вошёл в `processing`
+8. если был publish fix:
+   - подтвердить `ready_publish -> published`
+9. записать новый класс ошибки в:
+   - `docs/epv2-error-knowledge-base.md`
+   - `SESSION_HANDOFF.md`
+
+БЛОК J. DEFINITION OF DONE
+
+Задача не выполнена, пока нет всех пунктов:
+- сайт стабилен
+- php-fpm не падает
+- cron не штормит
+- новые материалы сами уходят в работу
+- обработанные сами доходят до `ready_publish`
+- публикации сами доходят до `published`
+- опубликованные посты проходят финальный audit
+- есть подтверждённая серия, а не единичный кейс
+- все классы ошибок занесены и классифицированы
+
+Финальный отчёт разрешён только такого вида:
+1. Какие системные классы ошибок закрыты
+2. Какие live-подтверждения получены
+3. Сколько автоматических publish-grade публикаций подтверждено
+4. Acceptance достигнут или нет
+
+Если acceptance не достигнут:
+не останавливаться, продолжать дальше по блокам.

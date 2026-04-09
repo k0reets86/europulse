@@ -1,0 +1,55 @@
+wing: europulse
+rooms:
+- name: worker
+  description: Files from worker/
+  keywords:
+  - worker
+  - worker
+- name: input
+  description: Files from input/
+  keywords:
+  - input
+  - input
+- name: documentation
+  description: Files from docs/
+  keywords:
+  - documentation
+  - docs
+- name: configuration
+  description: Files from config/
+  keywords:
+  - configuration
+  - config
+- name: screenshots
+  description: Files from screenshots/
+  keywords:
+  - screenshots
+  - screenshots
+- name: wp_plugins
+  description: Files from wp-plugins/
+  keywords:
+  - wp_plugins
+  - wp-plugins
+- name: scripts
+  description: Files from scripts/
+  keywords:
+  - scripts
+  - scripts
+- name: logs
+  description: Files from logs/
+  keywords:
+  - logs
+  - logs
+- name: backups
+  description: Files from backups/
+  keywords:
+  - backups
+  - backups
+- name: worker_v21
+  description: Files from worker-v21/
+  keywords:
+  - worker_v21
+  - worker-v21
+- name: general
+  description: Files that don't fit other rooms
+  keywords: []

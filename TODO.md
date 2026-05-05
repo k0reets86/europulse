@@ -1,5 +1,29 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-05 23:45 UTC Pulse Tuning + Plugin Hardening Pass 1
+
+- [x] Phase 0 routing fix verified live for row `1114`. `EPV2_Queue::workflow_v2_preview_selection(true)` returned `claim_oldest_new` with `item_id=1114`. One `EPV2_AI_Processor::process_scheduled(true, true)` tick advanced `updated_at` from `22:45:14` → `23:18:18` without falling into a `rebuild_bundle` quarantine loop. Selector correctly claims staged `new` rows; the deployed routing patch holds.
+- [x] Stale queue cleanup. DB backup `backups/epv21-db-pre-cleanup-20260505-231738.sql` (65 MB), then `DELETE FROM ep_epv2_queue WHERE id BETWEEN 1109 AND 1118` removed all 10 stale rows; `ep_epv2_queue` is now empty. `ep_epv2_selection_audit` retained (2085 analytics rows).
+- [x] Tuning limits temporarily lifted. Original `epv2_settings` snapshot saved in WP option `epv2_settings_pre_tuning_snapshot_20260505` (autoload=false). Active values: `enforce_daily_publish_target=false`, `daily_publish_target=999`, `max_collect_per_category=99`, `queue_new_max_per_category=99`, `queue_new_max_per_source=99`, `max_queue_batch=5`, `category_plans[*].min/target/max=0/0/99` (`upgrade_threshold` preserved). Restore: `update_option('epv2_settings', get_option('epv2_settings_pre_tuning_snapshot_20260505'))` then `delete_option('epv2_settings_pre_tuning_snapshot_20260505')`.
+- [x] Phase 1 repo↔live sync. Live → repo for `class-epv2-weekly-analysis.php`, `class-epv2-plugin.php`, `class-epv2-html-reader.php` (new `pick_language()`), `class-epv2-manual-mode.php` (lang-aware import), `class-epv2-deduplicator.php` (24h AI fingerprint window). Repo → live for `class-epv2-queue.php` and `class-epv2-ai-processor.php` (whitespace cleanup). Pre-sync backups in `backups/phase1-sync-20260505-2326/`. Legacy `worker/` tree, `config/epv3-*` defaults, archived pre-v21 handoff to `docs/archive/` removed in commit `6e0b242`.
+- [x] Phase 5 plugin hardening pass 1 (commit `cb1be09`):
+  - `ep_epv2_queue.pipeline_stage` STORED generated column over `ai_payload._meta.pipeline_stage` plus `idx_pipeline_stage` index, applied via `EPV2_Installer::ensure_queue_generated_columns()`. The three `LIKE %"pipeline_stage":"..."%` LONGTEXT scans in `repair_persisted_publish_finish_translation_contract` / `_media_blockers` now use indexed equality.
+  - `EPV2_Queue::guard_payload_field_sizes()` rejects `ai_payload`/`publish_payload` UPDATEs over 10 MB (default MariaDB `max_allowed_packet=16777216`); wired into `update_fields()` and `mark_state()`. Smoke-tested.
+  - `normalize_persisted_queue_contracts` and `queue_contract_regression_check` refactored to two-step pattern: select ids only, fetch each row's LONGTEXT individually, free between iterations. Memory bounded by single-row payload, not by `LIMIT`.
+  - `EPV2_Google_News::http_get_body/http_post_body` now log `curl_error()` via `EPV2_Logger::warning` so silent SSL/network failures during news ingestion are observable.
+- [x] Phase 6 prep — pulse-mode operator tooling (commit pending):
+  - `scripts/epv2_pulse_status.php` — read-only digest of pause flags, queue counts, pipeline stage distribution, recent runs, AI provider health, locks, cron, selection audit 24h window. Supports `--json` or `EPV2_PULSE_JSON=1`.
+  - `scripts/epv2_pulse.sh` — wrapper with `collect | process | publish | status | status-json | recent N | audit-summary` subcommands. Each pulse subcommand bypasses pause for one canonical handler call (`run_scheduled(true)` etc.) without touching the option flags.
+- [x] Phase 3 (per-category scoring) verified already implemented. `EPV2_Budget_Manager::category_scorecard()` carries A/B/C/publish_c thresholds and per-rubric `dimensions` for politik/welt/ukraine/europa/deutschland/wirtschaft/leben-in-deutschland/community/muenchen/bayern/kultur/sport. Was an open backlog item but already shipped.
+- [x] Phase 4 (source audit) — analyzed `ep_epv2_selection_audit` (2085 rows, span 2026-04-28..2026-05-03). All "100% reject" sources (15 feeds: Google News Європа UK, RIS München, Google News Politics EN, etc.) reject under `reject_class=stale`, not via fetch failures. Last fetch is recent and `last_error` is empty. The fix is freshness-window calibration per source type (institutional/slow-moving feeds need a longer window), not deactivation. Documented; no source rows changed.
+- [ ] Phase 2 (controlled pulse + media backlog) — execute when operator triggers a manual collect via `scripts/epv2_pulse.sh collect`. Then `process` and inspect output through `scripts/epv2_controlled_rebuild_quality_audit.php` before any `publish`. Then close the 4 remaining media backlog items: `1086` (Adidas/DFL), `1044` (UA open-for-business), `1027` (border ruling), `1047` (teacher-pay) — find source/editorial replacement; do not mask with stock.
+- [ ] Phase 5 hardening pass 2 (deferred; not all of the agent's audit is closed):
+  - `JSON_THROW_ON_ERROR` migration on `json_decode` calls in `class-epv2-media.php`, `class-epv2-ai-client.php` and other call sites.
+  - Wrap `wp_remote_post`/`wp_remote_get` calls in `class-epv2-ai-client.php` with consistent try/catch + structured logger output.
+  - Batched `get_post_meta` in `class-epv2-deduplicator.php` instead of per-post loop.
+  - REST `can_bridge()` token semantics review.
+- [ ] Phase 6 (resume + SLO) — only after Phase 2 produces clean pulses with acceptable text/media/category quality. SLO targets: `consecutive_autonomous_publish_grade>=10`, `error<5%`, `rejected<40%`, OpenAI cooldown free, swap usage stable.
+
 ## Current Runtime Status 2026-05-05 Routing/Selector Continuation
 
 - [x] Read current TODO/session/memory handoff and resumed from the blocker around rows `1109-1118`.

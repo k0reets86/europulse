@@ -32,7 +32,9 @@ final class EPV2_AI_Response_Validator {
 
 	public static function enrich_payload(array $payload, bool $resolve_media = true): array {
 		$categories = is_array($payload['categories'] ?? null) ? array_values(array_filter($payload['categories'])) : [];
-		$payload['tags'] = is_array($payload['tags'] ?? null) ? array_values(array_filter(array_map('sanitize_text_field', $payload['tags']))) : [];
+		$categories = EPV2_Review::normalize_categories(implode(',', $categories));
+		$payload['categories'] = $categories;
+		$payload['tags'] = self::sanitize_tags_for_language(is_array($payload['tags'] ?? null) ? $payload['tags'] : [], 'de', $categories);
 		$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 		$payload['_meta']['blocked_media_urls'] = self::normalize_blocked_media_urls((array) ($payload['_meta']['blocked_media_urls'] ?? []));
 		if (is_array($payload['_meta']['source_dossier'] ?? null)) {
@@ -113,10 +115,10 @@ final class EPV2_AI_Response_Validator {
 			$payload['languages'][$lang]['seo_title'] = sanitize_text_field($seo_title);
 			$payload['languages'][$lang]['meta_description'] = sanitize_textarea_field($meta_description);
 			$payload['languages'][$lang]['slug'] = $slug;
-			$payload['languages'][$lang]['focus_keywords'] = array_values(array_slice(array_filter(array_map('sanitize_text_field', $focus_keywords)), 0, 5));
+			$payload['languages'][$lang]['focus_keywords'] = self::sanitize_tags_for_language($focus_keywords, $lang, $categories, 5);
 			$payload['languages'][$lang]['excerpt'] = sanitize_textarea_field($excerpt);
 			$payload['languages'][$lang]['content'] = $normalized_content;
-			$payload['languages'][$lang]['tags'] = array_values(array_slice(array_unique(array_filter(array_map('sanitize_text_field', array_merge($lang_tags, $payload['languages'][$lang]['focus_keywords'])))), 0, 8));
+			$payload['languages'][$lang]['tags'] = self::sanitize_tags_for_language(array_merge($lang_tags, $payload['languages'][$lang]['focus_keywords']), $lang, $categories, 8);
 			$payload['languages'][$lang]['media_url'] = EPV2_Media::normalize_featured_candidate_url((string) ($payload['languages'][$lang]['media_url'] ?? ''));
 			if (self::media_url_is_blocked($payload, (string) ($payload['languages'][$lang]['media_url'] ?? ''))) {
 				$payload['languages'][$lang]['media_url'] = '';
@@ -167,14 +169,15 @@ final class EPV2_AI_Response_Validator {
 			$payload['media_url'] = '';
 		}
 		if ($payload['featured_media_url'] !== '') {
-			$mediaMeta = EPV2_Media::media_metadata((string) $payload['featured_media_url'], 'de');
+			$media_title = (string) ($payload['languages']['de']['title'] ?? '');
+			$mediaMeta = EPV2_Media::media_metadata((string) $payload['featured_media_url'], 'de', $media_title);
 			$payload['media_origin_url'] = (string) ($mediaMeta['origin_url'] ?? '');
 			$payload['media_credit'] = (string) ($mediaMeta['credit'] ?? '');
 			$payload['media_caption'] = (string) ($mediaMeta['caption'] ?? '');
 			foreach (['de', 'uk', 'en'] as $lang) {
 				if (is_array($payload['languages'][$lang] ?? null)) {
 					$payload['languages'][$lang]['media_url'] = $payload['featured_media_url'];
-					$langMeta = EPV2_Media::media_metadata((string) $payload['featured_media_url'], $lang);
+					$langMeta = EPV2_Media::media_metadata((string) $payload['featured_media_url'], $lang, (string) ($payload['languages'][$lang]['title'] ?? $media_title));
 					$payload['languages'][$lang]['media_origin_url'] = (string) ($langMeta['origin_url'] ?? '');
 					$payload['languages'][$lang]['media_credit'] = (string) ($langMeta['credit'] ?? '');
 					$payload['languages'][$lang]['media_caption'] = (string) ($langMeta['caption'] ?? '');
@@ -212,6 +215,187 @@ final class EPV2_AI_Response_Validator {
 		return $payload;
 	}
 
+	public static function sanitize_tags_for_language(array $tags, string $lang = 'de', array $categories = [], int $limit = 8): array {
+		$clean = [];
+		$deny = [
+			'nbsp', 'amp', 'quot', 'apos', 'lt', 'gt', 'html', 'source', 'quelle', 'bild', 'foto', 'photo',
+			'image', 'news', 'report', 'reports', 'reported', 'according', 'latest', 'update', 'updates',
+			'white', 'dinner', 'life', 'sucking', 'content', 'video', 'mehr', 'lesen', 'weiter',
+			'mittel', 'lebenswert', 'lebenswerte', 'steigt', 'menschen', 'unterstützung', 'unterstuetzung',
+			'fordert', 'geben', 'bestmöglich', 'bestmoeglich', 'bestmögliche', 'bestmoegliche',
+			'fördert', 'foerdert', 'höheres', 'hoeheres', 'stadt', 'städte', 'staedte', 'stadte',
+			'gemeinde', 'gemeinden',
+			'budget', 'budgets', 'euro', 'euros', 'mio', 'million', 'millions', 'millionen',
+			'milliarde', 'milliarden', 'billion', 'billions', 'billionen',
+			'give', 'people', 'support', 'development', 'federal', 'funding', 'urban', 'higher', 'question',
+			'city', 'cities', 'deal',
+			'бюджет', 'бюджету', 'вимагає', 'вимагають', 'вищого', 'питання', 'євро',
+			'надати', 'найкращу', 'входить', 'мільйонів', 'мільярд', 'міст', 'розвиток', 'щорічно',
+		];
+		$category_slugs = array_map(static fn($category): string => EPV2_Taxonomy_Map::normalize_slug((string) $category), $categories);
+
+		foreach ($tags as $tag) {
+			$tag = html_entity_decode(wp_strip_all_tags((string) $tag), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+			$tag = preg_replace('/[_]+/u', ' ', $tag) ?: $tag;
+			$tag = preg_replace('/\s+/u', ' ', trim($tag)) ?: $tag;
+			$tag = trim($tag, " \t\n\r\0\x0B.,;:!?\"'()[]{}<>#");
+			if ($tag === '') {
+				continue;
+			}
+
+			$slug = sanitize_title($tag);
+			$canonical_slug = EPV2_Taxonomy_Map::normalize_slug($slug);
+			$lower = mb_strtolower($tag);
+			if (
+				in_array($lower, $deny, true)
+				|| in_array($slug, $deny, true)
+				|| preg_match('/&(?:nbsp|amp|quot|apos|lt|gt);?/iu', $tag) === 1
+				|| preg_match('/^[\W_]+$/u', $tag) === 1
+			) {
+				continue;
+			}
+
+			if (mb_strlen($tag) < 3 && preg_match('/\d/u', $tag) !== 1) {
+				continue;
+			}
+			if (mb_strlen($tag) > 64) {
+				continue;
+			}
+
+			if ($lang === 'de' && preg_match('/\p{Cyrillic}/u', $tag) === 1) {
+				continue;
+			}
+			if ($lang === 'en' && preg_match('/\p{Cyrillic}/u', $tag) === 1) {
+				continue;
+			}
+			if ($lang === 'uk' && preg_match('/\p{Cyrillic}/u', $tag) !== 1 && ! in_array($canonical_slug, $category_slugs, true)) {
+					continue;
+				}
+
+				if (self::tag_is_generic_noise($tag, $canonical_slug, $lang) || self::tag_looks_wrong_for_language($tag, $canonical_slug, $lang)) {
+					continue;
+				}
+
+				if ($canonical_slug !== '' && in_array($canonical_slug, $category_slugs, true)) {
+					$tag = $canonical_slug;
+				}
+
+				$dedupe_key = $canonical_slug !== '' ? $canonical_slug : mb_strtolower($tag);
+				if (! isset($clean[$dedupe_key]) || self::tag_display_rank($tag) > self::tag_display_rank((string) $clean[$dedupe_key])) {
+					$clean[$dedupe_key] = $tag;
+				}
+				if (count($clean) >= max(1, $limit)) {
+					break;
+				}
+			}
+
+		return array_values($clean);
+	}
+
+	private static function tag_display_rank(string $tag): int {
+		$rank = 0;
+		if (preg_match('/\p{Lu}/u', $tag) === 1) {
+			$rank += 2;
+		}
+		if (preg_match('/\b[A-ZÄÖÜ]{2,}\b/u', $tag) === 1) {
+			$rank += 3;
+		}
+		if (str_contains($tag, ' ')) {
+			$rank += 1;
+		}
+		return $rank;
+	}
+
+	private static function tag_is_generic_noise(string $tag, string $canonical_slug, string $lang): bool {
+		$tag = trim($tag);
+		$canonical_slug = trim(mb_strtolower($canonical_slug));
+		if ($tag === '' || $canonical_slug === '') {
+			return true;
+		}
+
+		$generic = [
+			'budget', 'budgets', 'euro', 'euros', 'mio', 'million', 'millions', 'millionen',
+			'milliarde', 'milliarden', 'billion', 'billions', 'billionen', 'trillion', 'trillions',
+			'frage', 'question', 'deal', 'city', 'cities', 'stadt', 'staedte', 'stadte',
+			'gemeinde', 'gemeinden',
+			'mittel', 'funding', 'development', 'entwicklung', 'support', 'unterstuetzung',
+			'hoehere', 'hoeheres', 'higher', 'people', 'menschen',
+		];
+		$parts = array_values(array_filter(preg_split('/[\s-]+/u', $canonical_slug) ?: []));
+		$word_parts = array_values(array_filter($parts, static fn(string $part): bool => preg_match('/\d/u', $part) !== 1));
+		if (count($parts) === 1 && in_array($parts[0], $generic, true)) {
+			return true;
+		}
+		if ($word_parts !== [] && count($word_parts) <= 2) {
+			$generic_count = 0;
+			foreach ($word_parts as $part) {
+				if (in_array($part, $generic, true)) {
+					$generic_count++;
+				}
+			}
+			if ($generic_count === count($word_parts)) {
+				return true;
+			}
+		}
+		if (self::tag_is_currency_only_phrase($parts)) {
+			return true;
+		}
+		if (preg_match('/^(hoeheres|hoehere|higher)-(budget|funding)$/u', $canonical_slug) === 1) {
+			return true;
+		}
+		if ($lang === 'en' && preg_match('/^(stadt|staedte|stadte|foerderung|forderung|mittel)$/u', $canonical_slug) === 1) {
+			return true;
+		}
+		return false;
+	}
+
+	private static function tag_is_currency_only_phrase(array $parts): bool {
+		$parts = array_values(array_filter(array_map(static fn($part): string => trim((string) $part), $parts)));
+		if (count($parts) < 2) {
+			return false;
+		}
+		$allowed = [
+			'euro', 'euros', 'mio', 'million', 'millions', 'millionen', 'milliarde', 'milliarden',
+			'billion', 'billions', 'billionen', 'trillion', 'trillions', 'frage', 'question', 'deal',
+			'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
+			'ein', 'eine', 'zwei', 'drei', 'vier', 'fuenf', 'funf', 'sechs', 'sieben', 'acht', 'neun', 'zehn',
+		];
+		$has_currency = false;
+		foreach ($parts as $part) {
+			if (preg_match('/^\d+$/u', $part) === 1) {
+				continue;
+			}
+			if (in_array($part, ['euro', 'euros', 'mio', 'million', 'millions', 'millionen', 'milliarde', 'milliarden', 'billion', 'billions', 'billionen', 'trillion', 'trillions'], true)) {
+				$has_currency = true;
+			}
+			if (! in_array($part, $allowed, true)) {
+				return false;
+			}
+		}
+		return $has_currency;
+	}
+
+	private static function tag_looks_wrong_for_language(string $tag, string $canonical_slug, string $lang): bool {
+		if ($lang === 'uk') {
+			return preg_match('/\p{Cyrillic}/u', $tag) !== 1;
+		}
+		if ($lang === 'en') {
+			if (preg_match('/\p{Cyrillic}/u', $tag) === 1) {
+				return true;
+			}
+			$german_generic = [
+				'staedte', 'stadte', 'stadt', 'mittel', 'foerderung', 'forderung',
+				'staedtebaufoerderung', 'stadtebaufoerderung', 'unterstuetzung',
+				'hoehere', 'hoeheres', 'menschen',
+			];
+			return in_array($canonical_slug, $german_generic, true);
+		}
+		if ($lang === 'de') {
+			return preg_match('/\p{Cyrillic}/u', $tag) === 1;
+		}
+		return false;
+	}
+
 	public static function editorial_quality(array $payload): array {
 		$warnings = [];
 		$score = 100;
@@ -243,7 +427,7 @@ final class EPV2_AI_Response_Validator {
 			$source_count <= 1
 			&& ! $has_strong_primary
 			&& ! in_array($shape, ['preview', 'service_note', 'bulletin'], true)
-			&& in_array($primary_category, ['politik', 'world', 'sport', 'kultur', 'community', 'leben-in-deutschland'], true)
+			&& in_array($primary_category, ['politik', 'welt', 'sport', 'kultur', 'community', 'leben-in-deutschland'], true)
 		) {
 			$warnings['de'][] = 'слишком слабое досье источников для надёжной автопубликации';
 			$score -= 12;
@@ -302,6 +486,22 @@ final class EPV2_AI_Response_Validator {
 					$score -= 12;
 					break;
 				}
+			}
+
+			$filler_issue = self::filler_style_issue($combined_lower, $lang);
+			if ($filler_issue !== '') {
+				$lang_warnings[] = $filler_issue;
+				$score -= 16;
+			}
+			$repetition_issue = self::repetition_issue($content);
+			if ($repetition_issue !== '') {
+				$lang_warnings[] = $repetition_issue;
+				$score -= 12;
+			}
+			$density_issue = self::factual_density_issue($payload, $content, $lang);
+			if ($density_issue !== '') {
+				$lang_warnings[] = $density_issue;
+				$score -= 14;
 			}
 
 			$bureaucratic_terms = [
@@ -537,7 +737,7 @@ final class EPV2_AI_Response_Validator {
 			$warnings[] = 'generic stock featured media слишком слабое для конкретной темы материала';
 			$score -= 20;
 		} else {
-			$media_meta = EPV2_Media::media_metadata($featured, 'de');
+			$media_meta = EPV2_Media::media_metadata($featured, 'de', $de_title_reference);
 			if (trim((string) ($media_meta['origin_url'] ?? '')) === '') {
 				$warnings[] = 'не сохранён media origin url';
 				$score -= 6;
@@ -545,6 +745,11 @@ final class EPV2_AI_Response_Validator {
 			if (trim((string) ($media_meta['credit'] ?? '')) === '') {
 				$warnings[] = 'не сохранён media credit';
 				$score -= 8;
+			}
+			$caption_issue = self::caption_quality_issue($media_meta);
+			if ($caption_issue !== '') {
+				$warnings[] = $caption_issue;
+				$score -= 10;
 			}
 		}
 		$supporting_issue = self::supporting_context_issue($payload, $de_title_reference, $de_excerpt_reference, $categories);
@@ -757,7 +962,7 @@ final class EPV2_AI_Response_Validator {
 				preg_match('/\b(merz|friedrich merz|kanzler|regierungserklärung|regierungserklaerung|afd|europäische union|europaeische union)\b/u', $text) === 1
 				&& $primary !== 'politik'
 				&& ! ($primary === 'wirtschaft' && $economy_text)
-			&& ! ($primary === 'world' && $world_text)
+			&& ! ($primary === 'welt' && $world_text)
 			&& ! ($primary === 'europa' && $europe_text)
 		) {
 					return 'рубрика не соответствует политической теме материала';
@@ -774,7 +979,7 @@ final class EPV2_AI_Response_Validator {
 		}
 		if (
 			$world_text
-			&& ! in_array($primary, ['world', 'politik', 'ukraine', 'europa'], true)
+			&& ! in_array($primary, ['welt', 'politik', 'ukraine', 'europa'], true)
 			&& ! ($primary === 'wirtschaft' && $economy_text)
 		) {
 			return 'рубрика не соответствует международной теме материала';
@@ -801,10 +1006,27 @@ final class EPV2_AI_Response_Validator {
 		) {
 			return false;
 		}
-		if (in_array($primary, ['politik', 'kultur', 'sport', 'community', 'ukraine', 'world'], true)) {
+		if (in_array($primary, ['politik', 'kultur', 'sport', 'community', 'ukraine', 'welt'], true)) {
 			return true;
 		}
 		return preg_match('/\b(the voice|quizshow|tv-show|moderator|staffel|jury|schölermann|merz|friedrich merz|kanzler|bundestag|regierungserklärung|regierungserklaerung|afd|fc bayern|bundesliga|champions league|match|spieltag|community|verein|workshop|sprechstunde|bahnhofsmission|ukraine|krieg|angriff)\b/u', $text) === 1;
+	}
+
+	private static function caption_quality_issue(array $media_meta): string {
+		$caption = trim(wp_strip_all_tags((string) ($media_meta['caption'] ?? '')));
+		$credit = trim(wp_strip_all_tags((string) ($media_meta['credit'] ?? '')));
+		if ($caption === '') {
+			return 'у featured media нет редакционной подписи';
+		}
+		$normalized_caption = mb_strtolower(preg_replace('/\s+/u', ' ', $caption) ?: $caption);
+		$normalized_credit = mb_strtolower(preg_replace('/\s+/u', ' ', $credit) ?: $credit);
+		if ($normalized_credit !== '' && $normalized_caption === $normalized_credit) {
+			return 'подпись к featured media содержит только credit, без описания изображения';
+		}
+		if (preg_match('/^(bild|foto|photo|фото)\s*:\s*[\w.-]+\.[a-z]{2,}$/iu', $caption) === 1) {
+			return 'подпись к featured media слишком техническая';
+		}
+		return '';
 	}
 
 	public static function google_preflight_quality(array $payload): array {
@@ -953,6 +1175,100 @@ final class EPV2_AI_Response_Validator {
 		}
 		$sentences = preg_split('/(?<=[.!?])\s+/u', $text) ?: [];
 		return count(array_values(array_filter(array_map('trim', $sentences))));
+	}
+
+	private static function filler_style_issue(string $combined_lower, string $lang): string {
+		if ($combined_lower === '') {
+			return '';
+		}
+		$patterns = [
+			'/\b(es bleibt abzuwarten|bleibt abzuwarten|wird sich zeigen|weitere details werden|weitere informationen werden|die situation bleibt|lage bleibt angespannt|entwicklungen bleiben dynamisch|fans können sich freuen|fans duerfen sich freuen|steht im fokus|rückt in den fokus|sorgt weiter für gesprächsstoff)\b/u',
+			'/\b(the situation remains|it remains to be seen|further details are expected|fans can look forward|continues to draw attention|will be closely watched)\b/u',
+			'/\b(ситуація залишається|залишається побачити|подальші деталі|продовжує привертати увагу|вболівальники можуть чекати)\b/u',
+		];
+		$hits = 0;
+		foreach ($patterns as $pattern) {
+			$hits += (int) preg_match_all($pattern, $combined_lower);
+		}
+		if ($hits >= 2) {
+			return 'слишком много пустых редакционных формул вместо фактуры';
+		}
+		if ($hits === 1 && self::word_count($combined_lower) < 420) {
+			return 'короткий материал содержит пустую редакционную формулу';
+		}
+		return '';
+	}
+
+	private static function repetition_issue(string $content): string {
+		$content = trim(wp_strip_all_tags($content));
+		if ($content === '') {
+			return '';
+		}
+		$sentences = preg_split('/(?<=[.!?])\s+/u', $content) ?: [];
+		$seen = [];
+		$duplicates = 0;
+		foreach ($sentences as $sentence) {
+			$normalized = mb_strtolower(trim(preg_replace('/[^\p{L}\p{N}\s]+/u', ' ', (string) $sentence) ?: ''));
+			$normalized = preg_replace('/\s+/u', ' ', $normalized) ?: $normalized;
+			if (mb_strlen($normalized) < 70) {
+				continue;
+			}
+			$key = mb_substr($normalized, 0, 140);
+			if (isset($seen[$key])) {
+				$duplicates++;
+				continue;
+			}
+			$seen[$key] = true;
+		}
+		if ($duplicates > 0) {
+			return 'в тексте есть повторяющиеся смысловые фрагменты';
+		}
+
+		$paragraphs = preg_split('/\n\s*\n/u', $content) ?: [];
+		$starts = [];
+		foreach ($paragraphs as $paragraph) {
+			$plain = mb_strtolower(trim(wp_strip_all_tags((string) $paragraph)));
+			if ($plain === '') {
+				continue;
+			}
+			$words = array_slice(preg_split('/\s+/u', $plain) ?: [], 0, 4);
+			$key = implode(' ', $words);
+			if (mb_strlen($key) < 18) {
+				continue;
+			}
+			$starts[$key] = ($starts[$key] ?? 0) + 1;
+		}
+		foreach ($starts as $count) {
+			if ($count >= 3) {
+				return 'несколько абзацев начинаются одинаково и создают машинный ритм';
+			}
+		}
+		return '';
+	}
+
+	private static function factual_density_issue(array $payload, string $content, string $lang): string {
+		$content = trim(wp_strip_all_tags($content));
+		if ($content === '') {
+			return '';
+		}
+		$words = self::word_count($content);
+		if ($words < 360) {
+			return '';
+		}
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$shape = sanitize_key((string) (self::story_budget_profile($payload)['de']['shape'] ?? 'news'));
+		if (in_array($shape, ['analysis', 'developing'], true)) {
+			return '';
+		}
+		$digits = (int) preg_match_all('/\b\d{1,4}(?:[.,]\d+)?\b/u', $content);
+		$dates = (int) preg_match_all('/\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)\b/iu', $content);
+		$source_cues = (int) preg_match_all('/\b(berichtet|zufolge|nach angaben|teilte|erklärte|sagte|according to|said|reported|повідомляє|заявив|за даними)\b/iu', $content);
+		$source_count = max(1, (int) ($meta['source_count'] ?? 1));
+		$hard_facts = $digits + $dates + $source_cues + min(2, $source_count - 1);
+		if ($hard_facts < 3) {
+			return 'слишком низкая плотность проверяемых фактов для такой длины текста';
+		}
+		return '';
 	}
 
 	private static function headline_looks_generic(string $title): bool {

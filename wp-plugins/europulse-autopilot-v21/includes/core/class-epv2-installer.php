@@ -9,6 +9,7 @@ final class EPV2_Installer {
 		self::create_tables();
 		add_option('epv2_installed_at', current_time('mysql'));
 		update_option('epv2_version', EPV2_VERSION, false);
+		update_option('epv2_server_orchestrator_enabled', 1, false);
 		EPV2_Capabilities::maybe_grant_caps();
 		EPV2_Settings::set_all(EPV2_Settings::get_all());
 		EPV2_Jobs::schedule_recurring();
@@ -167,6 +168,41 @@ final class EPV2_Installer {
 			ai_cost DECIMAL(12,6) NOT NULL DEFAULT 0,
 			PRIMARY KEY (id),
 			UNIQUE KEY metric_date (metric_date)
+		) {$charset};";
+
+		$tables[] = "CREATE TABLE {$prefix}epv2_selection_audit (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			queue_id BIGINT UNSIGNED NULL,
+			source_id BIGINT UNSIGNED NULL,
+			candidate_hash CHAR(40) NOT NULL,
+			phase VARCHAR(32) NOT NULL DEFAULT 'stage',
+			outcome VARCHAR(64) NOT NULL DEFAULT '',
+			decision VARCHAR(32) NOT NULL DEFAULT '',
+			tier VARCHAR(8) NOT NULL DEFAULT '',
+			score INT NOT NULL DEFAULT 0,
+			category VARCHAR(64) NOT NULL DEFAULT '',
+			reject_class VARCHAR(64) NOT NULL DEFAULT '',
+			source_name VARCHAR(255) NOT NULL DEFAULT '',
+			source_type VARCHAR(32) NOT NULL DEFAULT '',
+			source_priority TINYINT NOT NULL DEFAULT 0,
+			source_risk VARCHAR(16) NOT NULL DEFAULT '',
+			original_url TEXT NULL,
+			original_title TEXT NOT NULL,
+			original_date DATETIME NULL,
+			reason TEXT NULL,
+			selection_json LONGTEXT NULL,
+			ai_gate_json LONGTEXT NULL,
+			planner_json LONGTEXT NULL,
+			context_json LONGTEXT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			KEY queue_id (queue_id),
+			KEY candidate_hash (candidate_hash),
+			KEY source_id (source_id),
+			KEY category (category),
+			KEY decision (decision),
+			KEY outcome (outcome),
+			KEY created_at (created_at)
 		) {$charset};";
 
 			$tables[] = "CREATE TABLE {$prefix}epv2_runs (

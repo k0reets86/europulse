@@ -99,16 +99,49 @@ final class EPV2_Breaking_Engine {
 			return 0;
 		}
 		$needle = mb_substr($title, 0, 42);
-		$like = '%' . $wpdb->esc_like($needle) . '%';
-		$count = (int) $wpdb->get_var($wpdb->prepare(
-			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue WHERE original_title LIKE %s AND created_at >= DATE_SUB(NOW(), INTERVAL 90 MINUTE)",
-			$like
-		));
+		$count = self::recent_title_mentions($needle, 90 * MINUTE_IN_SECONDS);
 		return match (true) {
 			$count >= 5 => 10,
 			$count >= 3 => 6,
 			$count >= 2 => 3,
 			default => 0,
 		};
+	}
+
+	private static function recent_title_mentions(string $needle, int $window_seconds): int {
+		global $wpdb;
+		$needle = trim(mb_strtolower($needle));
+		if ($needle === '') {
+			return 0;
+		}
+		static $cache = [];
+		$cache_key = md5($needle . '|' . $window_seconds);
+		if (array_key_exists($cache_key, $cache)) {
+			return (int) $cache[$cache_key];
+		}
+		$table = $wpdb->prefix . 'epv2_queue';
+		$max_id = (int) $wpdb->get_var("SELECT MAX(id) FROM {$table}");
+		if ($max_id <= 0) {
+			return 0;
+		}
+		$min_id = max(0, $max_id - 1000);
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT original_title, created_at FROM {$table} WHERE id >= %d ORDER BY id DESC LIMIT 250",
+			$min_id
+		));
+		$cutoff = time() - max(60, $window_seconds);
+		$count = 0;
+		foreach ((array) $rows as $row) {
+			$created = strtotime((string) ($row->created_at ?? ''));
+			if ($created && $created < $cutoff) {
+				continue;
+			}
+			$row_title = trim(mb_strtolower(wp_strip_all_tags((string) ($row->original_title ?? ''))));
+			if ($row_title !== '' && str_contains($row_title, $needle)) {
+				$count++;
+			}
+		}
+		$cache[$cache_key] = $count;
+		return (int) $cache[$cache_key];
 	}
 }

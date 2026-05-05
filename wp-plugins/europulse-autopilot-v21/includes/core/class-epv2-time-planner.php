@@ -139,6 +139,25 @@ final class EPV2_Time_Planner {
 		return $reset;
 	}
 
+	public static function next_publish_budget_slot_timestamp(): int {
+		if (! self::daily_publish_limit_enforced()) {
+			return time();
+		}
+		$count = self::published_today_count();
+		if ($count < self::allowed_publish_budget_now()) {
+			return time();
+		}
+
+		$reset = self::next_daily_budget_reset_timestamp();
+		$step = 5 * MINUTE_IN_SECONDS;
+		for ($candidate = EPV2_Jobs::next_publish_slot_after(time()); $candidate < $reset; $candidate += $step) {
+			if ($count < self::allowed_publish_budget_at($candidate)) {
+				return $candidate;
+			}
+		}
+		return $reset;
+	}
+
 	public static function next_daily_budget_reset_timestamp(): int {
 		$tz = new DateTimeZone((string) (EPV2_Settings::get('time_schedule_profile', self::defaults())['timezone'] ?? 'Europe/Berlin'));
 		$now = new DateTimeImmutable('now', $tz);

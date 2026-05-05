@@ -7,6 +7,7 @@ if (! defined('ABSPATH')) {
 final class EPV2_Resilience_Manager {
 	private const OPTION_PROVIDER_HEALTH = 'epv2_provider_health';
 	private const OPTION_SOURCE_HEALTH = 'epv2_source_health';
+	private const OPTION_WORKFLOW_STAGE_CIRCUIT = 'epv2_workflow_stage_circuit';
 
 	public static function cleanup(): void {
 		EPV2_Lock_Manager::cleanup();
@@ -15,10 +16,17 @@ final class EPV2_Resilience_Manager {
 		self::normalize_stalled_rebuild_cooldowns();
 		self::normalize_manual_confirmation_queue_states();
 		self::normalize_recoverable_manual_confirmations();
+		if (class_exists('EPV2_AI_Processor')) {
+			EPV2_AI_Processor::repair_stalled_translation_loops(50);
+			EPV2_AI_Processor::repair_stalled_publish_finish_loops(50);
+			EPV2_AI_Processor::repair_stranded_rebuild_outputs(50);
+		}
 		self::normalize_stale_error_items();
 		self::recover_worker_infra_errors();
 		self::restore_rejected_reviewable_items();
 		self::normalize_targeted_retry_windows();
+		self::deprioritize_pathological_workflow_loops();
+		EPV2_Queue::quarantine_pathological_workflow_loops(100);
 		self::wake_idle_recoverable_process_queue();
 		self::reclaim_stuck_items();
 	}
@@ -28,6 +36,48 @@ final class EPV2_Resilience_Manager {
 		self::normalize_terminal_review_candidates();
 		self::hydrate_review_payloads();
 		EPV2_Queue::normalize_terminal_retry_process_items();
+	}
+
+	private static function deprioritize_pathological_workflow_loops(int $limit = 25): void {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$limit = max(1, min(100, $limit));
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id FROM {$table}
+			WHERE state = 'new'
+				AND CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) >= 25
+				AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.retry_after')), ''), '') = ''
+			ORDER BY updated_at ASC
+			LIMIT %d",
+			$limit
+		));
+		$process_active = class_exists('EPV2_Lock_Manager') && EPV2_Lock_Manager::is_active('process');
+		foreach ((array) $rows as $row) {
+			$id = (int) ($row->id ?? 0);
+			$item = $id > 0 ? EPV2_Queue::get_item($id) : null;
+			if (! $item) {
+				continue;
+			}
+			$system = EPV2_Queue::workflow_system_payload($item);
+			$status = sanitize_key((string) ($system['workflow_step_status'] ?? ''));
+			if ($process_active && in_array($status, ['claimed', 'running'], true)) {
+				continue;
+			}
+			$not_before = gmdate('Y-m-d H:i:s', time() + 30 * MINUTE_IN_SECONDS);
+			EPV2_Queue::workflow_system_update($id, [
+				'workflow_step_status' => 'pending',
+				'workflow_owner_token' => '',
+				'workflow_heartbeat_at' => '',
+				'workflow_not_before' => $not_before,
+				'retry_after' => $not_before,
+				'deep_rework_deferred_at' => gmdate('Y-m-d H:i:s'),
+				'live_status' => 'Материал отложен для глубокой автоматической доводки, чтобы не блокировать очередь.',
+				'live_status_code' => 'deep_rework_deferred',
+			]);
+			EPV2_Queue::update_fields($id, [
+				'error_message' => 'Материал временно отложен для глубокой автоматической доводки; очередь продолжает обработку следующих новостей.',
+			]);
+		}
 	}
 
 	public static function provider_available(string $provider): bool {
@@ -75,6 +125,68 @@ final class EPV2_Resilience_Manager {
 			'last_failure_at' => time(),
 		];
 		update_option(self::OPTION_PROVIDER_HEALTH, $health, false);
+	}
+
+	public static function workflow_stage_available(string $stage): bool {
+		$stage = sanitize_key($stage);
+		if ($stage === '') {
+			return true;
+		}
+		$health = get_option(self::OPTION_WORKFLOW_STAGE_CIRCUIT, []);
+		$current = is_array($health[$stage] ?? null) ? $health[$stage] : [];
+		return (int) ($current['cooldown_until'] ?? 0) <= time();
+	}
+
+	public static function workflow_stage_cooldown_until(string $stage): int {
+		$stage = sanitize_key($stage);
+		if ($stage === '') {
+			return 0;
+		}
+		$health = get_option(self::OPTION_WORKFLOW_STAGE_CIRCUIT, []);
+		$current = is_array($health[$stage] ?? null) ? $health[$stage] : [];
+		return (int) ($current['cooldown_until'] ?? 0);
+	}
+
+	public static function workflow_stage_circuit_snapshot(): array {
+		$health = get_option(self::OPTION_WORKFLOW_STAGE_CIRCUIT, []);
+		return is_array($health) ? $health : [];
+	}
+
+	public static function register_workflow_stage_success(string $stage): void {
+		$stage = sanitize_key($stage);
+		if ($stage === '') {
+			return;
+		}
+		$health = get_option(self::OPTION_WORKFLOW_STAGE_CIRCUIT, []);
+		$health[$stage] = [
+			'consecutive_failures' => 0,
+			'cooldown_until' => 0,
+			'last_error' => '',
+			'last_success_at' => time(),
+		];
+		update_option(self::OPTION_WORKFLOW_STAGE_CIRCUIT, $health, false);
+	}
+
+	public static function register_workflow_stage_failure(string $stage, string $message): void {
+		$stage = sanitize_key($stage);
+		if ($stage === '') {
+			return;
+		}
+		$health = get_option(self::OPTION_WORKFLOW_STAGE_CIRCUIT, []);
+		$current = is_array($health[$stage] ?? null) ? $health[$stage] : [];
+		$failures = (int) ($current['consecutive_failures'] ?? 0) + 1;
+		$threshold = max(1, (int) EPV2_Settings::get('workflow_stage_circuit_failures', 2));
+		$cooldown_until = (int) ($current['cooldown_until'] ?? 0);
+		if ($failures >= $threshold) {
+			$cooldown_until = time() + (max(5, (int) EPV2_Settings::get('workflow_stage_circuit_cooldown_minutes', 30)) * MINUTE_IN_SECONDS);
+		}
+		$health[$stage] = [
+			'consecutive_failures' => $failures,
+			'cooldown_until' => $cooldown_until,
+			'last_error' => self::humanize_error($message),
+			'last_failure_at' => time(),
+		];
+		update_option(self::OPTION_WORKFLOW_STAGE_CIRCUIT, $health, false);
 	}
 
 	public static function source_on_cooldown(int $source_id): bool {
@@ -126,7 +238,8 @@ final class EPV2_Resilience_Manager {
 			if (self::should_keep_retrying_automatically($module, $message)) {
 				$delay = self::extended_retry_delay_seconds($attempt, $module, $message);
 				$system['retries'][$module] = $attempt;
-				$system['retry_after'] = gmdate('Y-m-d H:i:s', time() + $delay);
+				$system['workflow_not_before'] = gmdate('Y-m-d H:i:s', time() + $delay);
+				$system['retry_after'] = $system['workflow_not_before'];
 				$system['last_error_human'] = $human;
 				$notes['_system'] = $system;
 				$retry_state = $state === 'retry_publish' || $module === 'publish' ? 'retry_publish' : 'retry_process';
@@ -142,6 +255,16 @@ final class EPV2_Resilience_Manager {
 			$system['last_error_human'] = $human;
 			$notes['_system'] = $system;
 			$terminal = self::terminal_state_for_exhausted_retry($module, $message, $human);
+			if (($terminal['state'] ?? '') === 'ready_review') {
+				$manual_kind = (string) ($terminal['manual_kind'] ?? 'editorial');
+				$manual_reason = (string) ($terminal['manual_reason'] ?? 'review_required');
+				$fresh = clone $item;
+				$fresh->admin_notes = wp_json_encode($notes, JSON_UNESCAPED_UNICODE);
+				self::mark_manual_review_state($fresh, $manual_kind, $manual_reason, [
+					'error_message' => $terminal['message'],
+				]);
+				return;
+			}
 			EPV2_Queue::mark_state((int) $item->id, $terminal['state'], [
 				'error_message' => $terminal['message'],
 				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
@@ -151,7 +274,8 @@ final class EPV2_Resilience_Manager {
 
 		$delay = self::retry_delay_seconds($attempt, $module, $message);
 		$system['retries'][$module] = $attempt;
-		$system['retry_after'] = gmdate('Y-m-d H:i:s', time() + $delay);
+		$system['workflow_not_before'] = gmdate('Y-m-d H:i:s', time() + $delay);
+		$system['retry_after'] = $system['workflow_not_before'];
 		$system['last_error_human'] = $human;
 		$notes['_system'] = $system;
 		$extra = [
@@ -186,6 +310,13 @@ final class EPV2_Resilience_Manager {
 	public static function retry_due($item): bool {
 		if (! is_object($item)) {
 			return false;
+		}
+		if (class_exists('EPV2_Queue')) {
+			$not_before = EPV2_Queue::workflow_not_before_timestamp($item);
+			if ($not_before <= 0) {
+				return true;
+			}
+			return $not_before <= time();
 		}
 		$notes = self::item_notes($item);
 		$retryAfter = (string) (($notes['_system']['retry_after'] ?? ''));
@@ -224,7 +355,7 @@ final class EPV2_Resilience_Manager {
 		}
 		if (
 			$module === 'process'
-			&& preg_match('/publish threshold|minimum review threshold|minimum DE master quality|heuristic payload|broken multilingual/i', $message)
+			&& preg_match('/publish threshold|minimum review threshold|minimum DE master quality|heuristic payload|broken multilingual|featured image|featured media/i', $message)
 		) {
 			return match (true) {
 				$attempt <= 1 => MINUTE_IN_SECONDS,
@@ -246,10 +377,12 @@ final class EPV2_Resilience_Manager {
 		$message = wp_strip_all_tags((string) $message);
 		if (
 			$module === 'process'
-			&& preg_match('/publish threshold|minimum review threshold|heuristic payload|broken multilingual/i', $message)
+			&& preg_match('/publish threshold|minimum review threshold|heuristic payload|broken multilingual|featured image|featured media/i', $message)
 		) {
 			return [
 				'state' => 'ready_review',
+				'manual_kind' => 'editorial',
+				'manual_reason' => 'publish_grade_exhausted',
 				'message' => 'Материал не достиг полного publish-grade автоматически и переведён в ручную редакционную доработку, а не удалён.',
 			];
 		}
@@ -259,6 +392,8 @@ final class EPV2_Resilience_Manager {
 		) {
 			return [
 				'state' => 'ready_review',
+				'manual_kind' => 'media',
+				'manual_reason' => 'featured_media_exhausted',
 				'message' => 'Материал снят с автопубликации: после нескольких попыток не удалось подготовить корректное featured image.',
 			];
 		}
@@ -272,6 +407,21 @@ final class EPV2_Resilience_Manager {
 			'state' => 'error',
 			'message' => $human,
 		];
+	}
+
+	private static function mark_manual_review_state(object $item, string $kind, string $reason, array $extra = []): void {
+		$notes = self::item_notes($item);
+		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$notes['_system']['manual_confirmation_required'] = sanitize_key($kind);
+		$notes['_system']['manual_confirmation_reason'] = sanitize_key($reason);
+		unset($notes['_system']['retry_after'], $notes['_system']['workflow_not_before']);
+		$fields = [
+			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+		];
+		if ($extra !== []) {
+			$fields = array_replace($fields, $extra);
+		}
+		EPV2_Queue::mark_state((int) $item->id, 'ready_review', $fields);
 	}
 
 	private static function should_keep_retrying_automatically(string $module, string $message): bool {
@@ -289,7 +439,7 @@ final class EPV2_Resilience_Manager {
 	private static function extended_retry_delay_seconds(int $attempt, string $module, string $message): int {
 		if (
 			sanitize_key($module) === 'process'
-			&& preg_match('/publish threshold|minimum review threshold|minimum DE master quality|heuristic payload|broken multilingual/i', wp_strip_all_tags((string) $message)) === 1
+			&& preg_match('/publish threshold|minimum review threshold|minimum DE master quality|heuristic payload|broken multilingual|featured image|featured media/i', wp_strip_all_tags((string) $message)) === 1
 		) {
 			return match (true) {
 				$attempt <= 4 => 5 * MINUTE_IN_SECONDS,
@@ -437,7 +587,7 @@ final class EPV2_Resilience_Manager {
 			if ($payload !== []) {
 				$extra['ai_payload'] = wp_json_encode($payload, JSON_UNESCAPED_UNICODE);
 			}
-			EPV2_Queue::mark_state((int) $item->id, 'ready_review', $extra);
+			self::mark_manual_review_state($item, 'editorial', 'publish_grade_exhausted', $extra);
 		}
 		$review_rows = EPV2_Queue::get_queue_items_summary([
 			'states' => ['ready_review'],
@@ -711,7 +861,7 @@ final class EPV2_Resilience_Manager {
 			if (! is_array($payload) || $payload === []) {
 				continue;
 			}
-			EPV2_Queue::mark_state((int) $item->id, 'ready_review', [
+			self::mark_manual_review_state($item, 'editorial', 'review_payload_prepared', [
 				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
 				'error_message' => (string) ($item->error_message ?: 'Материал переведён в редакционную доработку с подготовленным базовым пакетом.'),
@@ -775,13 +925,14 @@ final class EPV2_Resilience_Manager {
 			$notes['_system']['manual_confirmation_reason'] = '';
 			$notes['_system']['translation_manual_lang'] = '';
 			$notes['_system']['translation_no_progress_attempts'] = 0;
-			if (EPV2_AI_Processor::payload_is_publish_ready($payload)) {
-				EPV2_Queue::mark_state((int) $item->id, 'ready_publish', [
-					'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
-					'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
-					'error_message' => '',
-					'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
-				]);
+			if (in_array((string) ($notes['_system']['workflow_step'] ?? ''), ['translate_uk', 'translate_en'], true)) {
+				$notes['_system']['workflow_step_attempts'] = 0;
+				$notes['_system']['workflow_last_error'] = '';
+			}
+			if (EPV2_AI_Processor::transition_item_to_ready_publish((int) $item->id, $payload, [
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+				'error_message' => '',
+			])) {
 				continue;
 			}
 			$required_stage = EPV2_AI_Processor::payload_required_stage($payload);
@@ -818,12 +969,9 @@ final class EPV2_Resilience_Manager {
 			}
 			$payload = json_decode((string) ($item->ai_payload ?? ''), true);
 			$payload = is_array($payload) ? $payload : [];
-			if ($payload !== [] && EPV2_AI_Processor::payload_is_publish_ready($payload)) {
-				EPV2_Queue::mark_state((int) $item->id, 'ready_publish', [
-					'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
-					'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
-					'error_message' => '',
-				]);
+			if ($payload !== [] && EPV2_AI_Processor::transition_item_to_ready_publish((int) $item->id, $payload, [
+				'error_message' => '',
+			])) {
 				$publishQueued = true;
 				continue;
 			}
@@ -970,14 +1118,18 @@ final class EPV2_Resilience_Manager {
 						'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 					]);
 				} else {
-					EPV2_Queue::mark_state((int) $item->id, 'ready_review', [
+					self::mark_manual_review_state($item, 'editorial', 'external_service_repeated_errors', [
 						'error_message' => 'Материал снят с автоматического цикла после повторяющихся ошибок внешнего сервиса и ждёт ручной проверки.',
 					]);
 				}
 				continue;
 			}
-			EPV2_Queue::mark_state((int) $item->id, 'rejected', [
-				'error_message' => 'Материал снят из автоматической очереди после повторяющихся устаревших ошибок внешнего сервиса.',
+			$notes = self::item_notes($item);
+			$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$notes['_system']['workflow_terminal_reason'] = 'external_service_stale_error';
+			EPV2_Queue::mark_state((int) $item->id, 'error', [
+				'error_message' => 'Материал переведён в error после повторяющихся устаревших ошибок внешнего сервиса; это технический terminal-state, а не редакционный reject.',
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 			]);
 		}
 	}
@@ -1049,12 +1201,17 @@ final class EPV2_Resilience_Manager {
 				continue;
 			}
 			$state = self::automation_is_auto() ? 'retry_process' : 'ready_review';
-			EPV2_Queue::mark_state((int) $item->id, $state, [
-				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
-				'error_message' => self::automation_is_auto()
-					? 'Материал восстановлен после ошибочного terminal-state и возвращён в автоматическую доработку.'
-					: 'Материал восстановлен после ошибочного terminal-state и возвращён в редакционную проверку.',
-			]);
+			if ($state === 'ready_review') {
+				self::mark_manual_review_state($item, 'editorial', 'restored_from_terminal_state', [
+					'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+					'error_message' => 'Материал восстановлен после ошибочного terminal-state и возвращён в редакционную проверку.',
+				]);
+			} else {
+				EPV2_Queue::mark_state((int) $item->id, $state, [
+					'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+					'error_message' => 'Материал восстановлен после ошибочного terminal-state и возвращён в автоматическую доработку.',
+				]);
+			}
 		}
 	}
 

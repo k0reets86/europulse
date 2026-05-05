@@ -285,12 +285,12 @@ final class EPV2_Queue {
 	}
 
 	public static function next_item_for_processing(bool $ignore_retry_after = false): ?object {
-		self::promote_live_published_rows(20);
-		self::reactivate_media_recoverable_rows(5);
 		if (self::orchestrator_v2_enabled()) {
 			self::log_selector_step('enter_v2', ['ignore_retry_after' => $ignore_retry_after ? 1 : 0]);
 			return self::resume_or_claim_item($ignore_retry_after);
 		}
+		self::promote_live_published_rows(20);
+		self::reactivate_media_recoverable_rows(5);
 		self::log_selector_step('enter', ['ignore_retry_after' => $ignore_retry_after ? 1 : 0]);
 		$focused_item = self::focused_automation_item($ignore_retry_after);
 		self::log_selector_step('after_focused_item', ['found' => $focused_item instanceof stdClass ? 1 : 0]);
@@ -415,7 +415,16 @@ final class EPV2_Queue {
 			self::log_selector_step('active_owner_waiting_retry', ['item_id' => (int) $item->id]);
 			return null;
 		}
-		if (! self::item_is_processable_read_only($item, $ignore_retry_after)) {
+		if (self::item_requires_manual_confirmation_state($item)) {
+			self::log_selector_step('active_owner_manual_confirmation', ['item_id' => (int) $item->id]);
+			return null;
+		}
+		if (self::row_has_live_published_posts($item)) {
+			self::log_selector_step('active_owner_already_published', ['item_id' => (int) $item->id]);
+			return null;
+		}
+		$state = self::normalize_legacy_publish_state((string) ($item->state ?? ''));
+		if (self::workflow_is_terminal_state($state) || in_array($state, ['ready_publish', 'retry_publish', 'publishing'], true)) {
 			self::log_selector_step('active_owner_not_processable', ['item_id' => (int) $item->id]);
 			return null;
 		}
@@ -434,49 +443,63 @@ final class EPV2_Queue {
 				return null;
 			}
 		}
-		$items = self::get_queue_items_summary(['states' => ['new'], 'limit' => 100]);
-		$items = array_values(array_filter($items, static function ($item) use ($ignore_retry_after): bool {
-			return self::item_is_processable_read_only($item, $ignore_retry_after);
-		}));
-		if ($items === []) {
+		$candidate = self::preview_next_claimable_new_item($ignore_retry_after);
+		if (! ($candidate instanceof stdClass)) {
 			self::log_selector_step('no_claimable_new_items');
 			return null;
 		}
-		usort($items, static function ($a, $b): int {
-			return strcmp((string) ($a->created_at ?? ''), (string) ($b->created_at ?? ''));
-		});
-		foreach ($items as $item) {
-			$item_id = (int) ($item->id ?? 0);
-			if ($item_id <= 0) {
-				continue;
-			}
-			if (! self::active_owner_claim($item_id)) {
-				continue;
-			}
-			self::workflow_system_update($item_id, [
-				'workflow_step_status' => 'claimed',
-				'workflow_last_error' => '',
-				'workflow_terminal_reason' => '',
-			]);
-			self::log_selector_step('claim_new_item', ['item_id' => $item_id]);
-			return self::get_item_summary($item_id);
+		$item_id = (int) ($candidate->id ?? 0);
+		if ($item_id <= 0) {
+			self::log_selector_step('claim_new_item_failed_invalid_candidate');
+			return null;
 		}
-		self::log_selector_step('claim_new_item_failed');
-		return null;
+		if (! self::active_owner_claim($item_id)) {
+			self::log_selector_step('claim_new_item_failed');
+			return null;
+		}
+		self::workflow_system_update($item_id, [
+			'workflow_step_status' => 'claimed',
+			'workflow_last_error' => '',
+			'workflow_terminal_reason' => '',
+		]);
+		self::log_selector_step('claim_new_item', ['item_id' => $item_id]);
+		return self::get_item_summary($item_id);
 	}
 
 	private static function preview_next_claimable_new_item(bool $ignore_retry_after = false): ?object {
-		$items = self::get_queue_items_summary(['states' => ['new'], 'limit' => 100]);
-		$items = array_values(array_filter($items, static function ($item) use ($ignore_retry_after): bool {
-			return self::item_is_processable_read_only($item, $ignore_retry_after);
-		}));
-		if ($items === []) {
+		$candidate = self::bridge_next_processable_row('new');
+		if (! ($candidate instanceof stdClass)) {
 			return null;
 		}
-		usort($items, static function ($a, $b): int {
-			return strcmp((string) ($a->created_at ?? ''), (string) ($b->created_at ?? ''));
-		});
-		return $items[0] ?? null;
+		$item_id = (int) ($candidate->id ?? 0);
+		if ($item_id <= 0) {
+			return null;
+		}
+		$item = self::get_item_summary($item_id);
+		if (! ($item instanceof stdClass)) {
+			return null;
+		}
+		if ((string) ($item->state ?? '') !== 'new') {
+			return null;
+		}
+		if (! self::selector_allows_new_candidate($item)) {
+			return null;
+		}
+		if (! $ignore_retry_after && self::workflow_waiting_not_before($item)) {
+			return null;
+		}
+		return $item;
+	}
+
+	private static function selector_allows_new_candidate(object $item): bool {
+		if (
+			self::row_has_non_publish_grade_selection($item)
+			&& self::workflow_owner_token($item) === ''
+			&& self::workflow_step($item) === ''
+		) {
+			return false;
+		}
+		return true;
 	}
 
 	private static function resume_or_claim_item(bool $ignore_retry_after = false): ?object {
@@ -493,8 +516,6 @@ final class EPV2_Queue {
 	}
 
 	public static function workflow_v2_preview_selection(bool $ignore_retry_after = false): array {
-		self::promote_live_published_rows(20);
-		self::reactivate_media_recoverable_rows(5);
 		$active = self::active_owner_get();
 		if ($active && ! $ignore_retry_after && self::active_owner_waiting_on_retry($active)) {
 			return [
@@ -707,11 +728,11 @@ final class EPV2_Queue {
 			if (! self::workflow_payload_is_ready_like($normalized)) {
 				continue;
 			}
-			self::mark_state((int) $item->id, 'ready_publish', [
-				'ai_payload' => wp_json_encode($normalized, JSON_UNESCAPED_UNICODE),
+			if (EPV2_AI_Processor::transition_item_to_ready_publish((int) $item->id, $normalized, [
 				'error_message' => '',
-			]);
-			$promoted++;
+			])) {
+				$promoted++;
+			}
 		}
 		return $promoted;
 	}
@@ -761,12 +782,8 @@ final class EPV2_Queue {
 		if (self::row_is_low_grade_new_candidate($item)) {
 			return false;
 		}
-		if (! $ignore_retry_after) {
-			$notes = self::row_notes($item);
-			$retry_after = (string) (($notes['_system']['retry_after'] ?? ''));
-			if ($retry_after !== '' && strtotime($retry_after) > time()) {
-				return false;
-			}
+		if (! $ignore_retry_after && self::workflow_waiting_not_before($item)) {
+			return false;
 		}
 		if (self::row_has_live_published_posts($item)) {
 			return false;
@@ -842,7 +859,45 @@ final class EPV2_Queue {
 				return false;
 			}
 		}
+		if (self::planner_soft_candidate_is_noise($item)) {
+			return true;
+		}
+		if (self::planner_selected_soft_candidate($item)) {
+			return false;
+		}
 		return in_array(self::row_selection_decision($item), ['low', 'reject'], true);
+	}
+
+	private static function row_has_blocking_publish_selection(object $item): bool {
+		$payload = self::row_payload($item);
+		if ($payload !== []) {
+			$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
+			if (self::payload_has_publish_limit_override($payload, $item)) {
+				return false;
+			}
+		}
+		return in_array(self::row_selection_decision($item), ['low', 'reject'], true);
+	}
+
+	private static function planner_selected_soft_candidate(object $item): bool {
+		$notes = self::row_notes($item);
+		$planner = is_array($notes['planner'] ?? null) ? $notes['planner'] : [];
+		$selection = self::row_selection_analysis($item);
+		$planner_action = sanitize_key((string) ($planner['action'] ?? ''));
+		$reject_class = sanitize_key((string) ($selection['reject_class'] ?? ''));
+		$score = (int) ($selection['score'] ?? 0);
+		return in_array($planner_action, ['select', 'replace'], true)
+			&& $score >= 30
+			&& ! self::planner_soft_candidate_is_noise($item)
+			&& in_array($reject_class, ['', 'low_score'], true);
+	}
+
+	private static function planner_soft_candidate_is_noise(object $item): bool {
+		$text = mb_strtolower(trim((string) (($item->original_title ?? '') . ' ' . ($item->original_excerpt ?? '') . ' ' . ($item->original_url ?? ''))));
+		if ($text === '') {
+			return false;
+		}
+		return preg_match('/\b(let.?s dance|dschungelcamp|promi|celebrity|stalker|llambi|gammour|geweint|horoskop|sternzeichen|ranking|die besten|tv und stream)\b/u', $text) === 1;
 	}
 
 	private static function row_is_low_grade_new_candidate(object $item): bool {
@@ -859,7 +914,74 @@ final class EPV2_Queue {
 	}
 
 	public static function sanitize_non_publish_grade_new_items(int $limit = 100): int {
-		return 0;
+		$items = self::get_queue_items_summary(['states' => ['new'], 'limit' => max(1, min(500, $limit))]);
+		if ($items === []) {
+			return 0;
+		}
+
+		$changed = 0;
+		foreach ($items as $item) {
+			if (! ($item instanceof stdClass)) {
+				continue;
+			}
+			if ((string) ($item->state ?? '') !== 'new') {
+				continue;
+			}
+			if (! self::row_has_blocking_publish_selection($item)) {
+				continue;
+			}
+			if (self::workflow_owner_token($item) !== '' || self::workflow_step($item) !== '') {
+				continue;
+			}
+			$decision = self::row_selection_decision($item);
+			self::mark_state((int) $item->id, 'rejected', [
+				'error_message' => 'Материал снят из автоматической очереди: предварительный publish-priority "' . ($decision !== '' ? $decision : 'unknown') . '" не допускает автономную обработку.',
+			]);
+			$changed++;
+		}
+
+		return $changed;
+	}
+
+	public static function reactivate_planner_selected_soft_rejected_items(int $limit = 50): int {
+		if (self::automation_requires_publish_grade()) {
+			return 0;
+		}
+		$items = self::get_queue_items_summary(['states' => ['rejected'], 'limit' => max(1, min(200, $limit))]);
+		if ($items === []) {
+			return 0;
+		}
+
+		$changed = 0;
+		foreach ($items as $item) {
+			if (! ($item instanceof stdClass) || (string) ($item->state ?? '') !== 'rejected') {
+				continue;
+			}
+			if (! self::planner_selected_soft_candidate($item)) {
+				continue;
+			}
+			$created_at = strtotime((string) ($item->created_at ?? '')) ?: 0;
+			if ($created_at <= 0 || $created_at < (time() - DAY_IN_SECONDS)) {
+				continue;
+			}
+			$error = mb_strtolower((string) ($item->error_message ?? ''));
+			if (! str_contains($error, 'предварительный publish-priority') && ! str_contains($error, 'selection decision')) {
+				continue;
+			}
+			$notes = self::row_notes($item);
+			$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			unset($notes['_system']['workflow_not_before'], $notes['_system']['retry_after']);
+			self::mark_state((int) $item->id, 'new', [
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+				'error_message' => 'Возвращено автоматикой: planner выбрал материал, soft low-score больше не считается причиной для отклонения.',
+			]);
+			self::update_fields((int) $item->id, [
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+			]);
+			$changed++;
+		}
+
+		return $changed;
 	}
 
 	public static function sanitize_low_grade_ready_publish_items(int $limit = 50): int {
@@ -935,6 +1057,82 @@ final class EPV2_Queue {
 		return $changed;
 	}
 
+	public static function quarantine_pathological_workflow_loops(int $limit = 100): array {
+		$items = self::get_queue_items_summary([
+			'states' => ['new', 'retry_process'],
+			'limit' => max(1, min(500, $limit)),
+		]);
+		$result = [
+			'checked' => 0,
+			'changed' => 0,
+			'items' => [],
+		];
+		foreach ($items as $item) {
+			if (! ($item instanceof stdClass)) {
+				continue;
+			}
+			$result['checked']++;
+			$system = self::workflow_system_payload($item);
+			$status = sanitize_key((string) ($system['workflow_step_status'] ?? ''));
+			if (in_array($status, ['claimed', 'running'], true) && self::workflow_owner_token($item) !== '') {
+				continue;
+			}
+			$payload = self::row_payload($item);
+			if ($payload !== []) {
+				$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
+			}
+			$gate = EPV2_Publish_Gate::evaluate($item, $payload, [
+				'context' => 'ready_publish',
+			]);
+			$stage = sanitize_key((string) ($system['workflow_step'] ?? ''));
+			if ($stage === '') {
+				$stage = self::row_processing_stage($item);
+			}
+			$attempts = max(
+				(int) ($system['workflow_step_attempts'] ?? 0),
+				self::recent_process_attempt_count((int) $item->id, $stage, 24 * HOUR_IN_SECONDS)
+			);
+			$selection_blocked = empty($gate['selection_publishable']);
+			$limit_for_stage = self::workflow_stage_attempt_limit($stage);
+			$retry_exhausted = $stage !== '' && $attempts >= $limit_for_stage;
+			$retry_at = self::workflow_not_before_timestamp($item);
+			$stale_retry = $retry_at > 0 && $retry_at < (time() - 15 * MINUTE_IN_SECONDS);
+			if (! $selection_blocked && ! $retry_exhausted && ! $stale_retry) {
+				continue;
+			}
+			$notes = self::row_notes($item);
+			$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$notes['_system']['workflow_terminal_reason'] = $selection_blocked ? 'selection_publish_blocked' : 'workflow_quarantine';
+			$notes['_system']['quarantine_reason'] = $selection_blocked
+				? 'selection_' . sanitize_key((string) ($gate['selection_decision'] ?? 'blocked'))
+				: 'stage_attempt_limit_' . ($stage !== '' ? $stage : 'unknown');
+			$notes['_system']['last_stage_blocker'] = implode(',', array_values((array) ($gate['blockers'] ?? [])));
+			$notes['_system']['next_operator_action'] = $selection_blocked ? 'review_source_or_restore_manually' : 'inspect_payload_or_reset_stage_after_fix';
+			$notes['_system']['workflow_step_status'] = 'terminal';
+			$notes['_system']['workflow_owner_token'] = '';
+			$notes['_system']['workflow_heartbeat_at'] = '';
+			unset($notes['_system']['retry_after'], $notes['_system']['workflow_not_before']);
+			$state = $selection_blocked ? 'rejected' : 'error';
+			$message = $selection_blocked
+				? 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($gate['selection_decision'] ?? 'unknown') . '".'
+				: 'Материал помещён в технический quarantine: стадия "' . ($stage !== '' ? $stage : 'unknown') . '" превысила лимит попыток (' . (string) $attempts . '/' . (string) $limit_for_stage . ').';
+			self::mark_state((int) $item->id, $state, [
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+				'error_message' => $message,
+			]);
+			self::clear_active_automation_item((int) $item->id);
+			$result['changed']++;
+			$result['items'][] = [
+				'id' => (int) $item->id,
+				'state' => $state,
+				'stage' => $stage,
+				'attempts' => $attempts,
+				'reason' => $notes['_system']['quarantine_reason'],
+			];
+		}
+		return $result;
+	}
+
 	public static function next_item_for_publish(bool $force = false): ?object {
 		self::promote_live_published_rows(20);
 		$active_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
@@ -975,7 +1173,7 @@ final class EPV2_Queue {
 		);
 		foreach ((array) $ids as $id) {
 			$item = self::get_item((int) $id);
-			if (is_object($item) && (string) ($item->state ?? '') === 'ready_publish') {
+			if (is_object($item) && (string) ($item->state ?? '') === 'ready_publish' && self::item_is_publishable_read_only($item, $force)) {
 				return $item;
 			}
 		}
@@ -986,17 +1184,15 @@ final class EPV2_Queue {
 		if (self::row_has_live_published_posts($item)) {
 			return false;
 		}
-		if (self::row_has_non_publish_grade_selection($item)) {
-			return false;
-		}
-		if (EPV2_AI_Processor::item_has_expired_live_angle($item)) {
-			return false;
-		}
 		$payload = self::row_payload($item);
 		if ($payload !== []) {
 			$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
 		}
-		if ($payload !== [] && ! self::workflow_payload_is_ready_like($payload)) {
+		$gate = EPV2_Publish_Gate::evaluate($item, $payload, [
+			'context' => 'publish',
+			'force' => $force,
+		]);
+		if (empty($gate['allowed'])) {
 			return false;
 		}
 		// Keep the timer path cheap. The worker has already produced the
@@ -1005,10 +1201,7 @@ final class EPV2_Queue {
 		if ((string) ($item->state ?? '') === 'retry_publish' && ! EPV2_Resilience_Manager::retry_due($item)) {
 			return false;
 		}
-		if ($force) {
-			return true;
-		}
-		return self::publish_due($item);
+		return true;
 	}
 
 	private static function row_selection_analysis(object $item): array {
@@ -1032,7 +1225,10 @@ final class EPV2_Queue {
 			$notes = self::row_notes($item);
 			if (
 				! $includeDeferredByDailyLimit
-				&& ! empty($notes['_system']['publish_deferred_by_daily_limit'])
+				&& (
+					! empty($notes['_system']['publish_deferred_by_daily_limit'])
+					|| self::row_is_waiting_on_category_budget($item, $notes)
+				)
 			) {
 				continue;
 			}
@@ -1093,12 +1289,11 @@ final class EPV2_Queue {
 			if ($payload !== []) {
 				$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
 			}
-			self::mark_state((int) $row->id, 'ready_publish', [
-				'ai_payload' => $payload !== [] ? wp_json_encode($payload, JSON_UNESCAPED_UNICODE) : (string) ($row->ai_payload ?? ''),
-				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($row->category_final ?: $row->category_proposed),
+			if (EPV2_AI_Processor::transition_item_to_ready_publish((int) $row->id, $payload !== [] ? $payload : (array) json_decode((string) ($row->ai_payload ?? ''), true), [
 				'error_message' => '',
-			]);
-			$promoted++;
+			])) {
+				$promoted++;
+			}
 		}
 		return $promoted;
 	}
@@ -1180,19 +1375,52 @@ final class EPV2_Queue {
 				unset($notes['_system']['publish_deferred_by_daily_limit']);
 				$current = 0;
 			}
-			$isDue = $current > 0 && $current <= time();
+			if (! empty($notes['_system']['publish_deferred_by_daily_limit'])) {
+				$deferred_slot = EPV2_Jobs::next_publish_slot_after(EPV2_Time_Planner::next_publish_budget_slot_timestamp());
+				if ($current !== $deferred_slot) {
+					$notes['_system']['ready_publish_at'] = ! empty($notes['_system']['ready_publish_at'])
+						? (string) $notes['_system']['ready_publish_at']
+						: ((string) ($item->updated_at ?? '') !== '' ? (string) $item->updated_at : gmdate('Y-m-d H:i:s'));
+					$notes['_system']['publish_not_before'] = $deferred_slot;
+					self::update_fields((int) $item->id, [
+						'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+					]);
+				}
+				$current = $deferred_slot;
+			}
+			if (
+				! empty($notes['_system']['publish_deferred_by_category_limit'])
+				&& EPV2_Time_Planner::publish_category_budget_allows_item(self::row_primary_category($item, $payload), $publish_limit_override)
+			) {
+				unset($notes['_system']['publish_deferred_by_category_limit']);
+				$current = 0;
+			}
+			if (! empty($notes['_system']['publish_deferred_by_category_limit'])) {
+				$deferred_slot = EPV2_Jobs::next_publish_slot_after(
+					EPV2_Time_Planner::next_category_budget_slot_timestamp(self::row_primary_category($item, $payload))
+				);
+				if ($current !== $deferred_slot) {
+					$notes['_system']['ready_publish_at'] = ! empty($notes['_system']['ready_publish_at'])
+						? (string) $notes['_system']['ready_publish_at']
+						: ((string) ($item->updated_at ?? '') !== '' ? (string) $item->updated_at : gmdate('Y-m-d H:i:s'));
+					$notes['_system']['publish_not_before'] = $deferred_slot;
+					self::update_fields((int) $item->id, [
+						'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+					]);
+				}
+				continue;
+			}
 			$earliest_slot = self::earliest_publish_slot_from_ready_at($ready_at);
-			$minimum_slot = $previous_slot > 0
-				? max($previous_slot + $interval, $earliest_slot)
-				: max($earliest_slot, $first_slot);
-			$scheduled_slot = $anchored
-				? $minimum_slot
-				: ($current > 0 ? max($current, $minimum_slot) : $minimum_slot);
-			$needsRepair = $anchored || (! $isDue && (
-				$current <= 0
-				|| $current > $maxReasonable
-				|| $current < $minimum_slot
-			));
+			if ($previous_slot <= 0 && $current > 0 && ! $anchored) {
+				$scheduled_slot = $current;
+				$needsRepair = false;
+			} else {
+				$minimum_slot = $previous_slot > 0
+					? max($previous_slot + $interval, $earliest_slot)
+					: max($earliest_slot, $first_slot);
+				$needsRepair = $anchored || $current <= 0 || $current < $minimum_slot;
+				$scheduled_slot = $needsRepair ? $minimum_slot : $current;
+			}
 			if ($needsRepair) {
 				$notes['_system']['ready_publish_at'] = ! empty($notes['_system']['ready_publish_at'])
 					? (string) $notes['_system']['ready_publish_at']
@@ -1220,6 +1448,19 @@ final class EPV2_Queue {
 			foreach ($items as $item) {
 				$notes = self::row_notes($item);
 				$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+				if (self::row_is_waiting_on_category_budget($item, $notes)) {
+					$payload = self::row_payload($item);
+					$notes['_system']['ready_publish_at'] = ! empty($notes['_system']['ready_publish_at'])
+						? (string) $notes['_system']['ready_publish_at']
+						: ((string) ($item->updated_at ?? '') !== '' ? (string) $item->updated_at : gmdate('Y-m-d H:i:s'));
+					$notes['_system']['publish_not_before'] = EPV2_Jobs::next_publish_slot_after(
+						EPV2_Time_Planner::next_category_budget_slot_timestamp(self::row_primary_category($item, $payload))
+					);
+					self::update_fields((int) $item->id, [
+						'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+					]);
+					continue;
+				}
 				$notes['_system']['ready_publish_at'] = ! empty($notes['_system']['ready_publish_at'])
 					? (string) $notes['_system']['ready_publish_at']
 					: ((string) ($item->updated_at ?? '') !== '' ? (string) $item->updated_at : gmdate('Y-m-d H:i:s'));
@@ -1246,37 +1487,36 @@ final class EPV2_Queue {
 					$payload = EPV2_AI_Processor::force_payload_pipeline_stage($payload, '');
 					$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
 				}
-				$payload_decision = sanitize_key((string) ($payload['_meta']['selection']['decision'] ?? ''));
 				$incoming_notes = [];
 				if (! empty($extra['admin_notes'])) {
 					$incoming_notes = json_decode((string) $extra['admin_notes'], true);
 					$incoming_notes = is_array($incoming_notes) ? $incoming_notes : [];
 				}
-				$incoming_decision = sanitize_key((string) ($incoming_notes['selection']['decision'] ?? ''));
-				$current_notes = self::row_notes($current);
-				$stored_decision = sanitize_key((string) ($current_notes['selection']['decision'] ?? ''));
-				$ready_like_payload = $payload !== [] && self::workflow_payload_is_ready_like($payload);
-				$intake_decision = $incoming_decision !== '' ? $incoming_decision : $stored_decision;
-				$intake_allows_publish = in_array($intake_decision, ['review', 'strong', 'priority'], true);
-				$selection_blocks_publish = ! ($ready_like_payload && $intake_allows_publish) && (
-					in_array($payload_decision, ['low', 'reject'], true)
-					|| ($payload_decision === '' && in_array($incoming_decision, ['low', 'reject'], true))
-					|| ($payload_decision === '' && $incoming_decision === '' && self::row_has_non_publish_grade_selection($current))
-				);
-				if ($selection_blocks_publish) {
-					$state = 'new';
-					$extra['error_message'] = 'Отложено финальной страховкой: кандидат не проходит publish-priority сейчас; остаётся в очереди, а не в отклонённых.';
+				$gate = EPV2_Publish_Gate::evaluate($current, $payload, [
+					'context' => 'ready_publish',
+				]);
+				if (empty($gate['allowed'])) {
 					$incoming_notes = is_array($incoming_notes ?? null) ? $incoming_notes : [];
 					$incoming_notes['_system'] = is_array($incoming_notes['_system'] ?? null) ? $incoming_notes['_system'] : [];
-					$incoming_notes['_system']['retry_after'] = time() + (2 * HOUR_IN_SECONDS);
+					$incoming_notes['_system']['last_publish_gate_blockers'] = array_values((array) ($gate['blockers'] ?? []));
 					$incoming_notes['_system']['workflow_step'] = '';
 					$incoming_notes['_system']['workflow_step_status'] = '';
+					if (empty($gate['selection_publishable'])) {
+						$state = 'rejected';
+						$incoming_notes['_system']['workflow_terminal_reason'] = 'selection_publish_blocked';
+						$incoming_notes['_system']['quarantine_reason'] = 'selection_' . sanitize_key((string) ($gate['selection_decision'] ?? 'blocked'));
+						$incoming_notes['_system']['next_operator_action'] = 'review_source_or_restore_manually';
+						$extra['error_message'] = 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($gate['selection_decision'] ?? 'unknown') . '".';
+					} else {
+						$state = 'retry_process';
+						$incoming_notes['_system']['retry_after'] = gmdate('Y-m-d H:i:s', time() + (30 * MINUTE_IN_SECONDS));
+						$incoming_notes['_system']['workflow_not_before'] = $incoming_notes['_system']['retry_after'];
+						$incoming_notes['_system']['last_stage_blocker'] = implode(',', array_values((array) ($gate['blockers'] ?? [])));
+						$extra['error_message'] = 'Пакет снят из ready_publish: canonical publish gate не пройден (' . implode(', ', array_values((array) ($gate['blockers'] ?? []))) . ').';
+					}
+					$extra['category_final'] = implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($current->category_final ?? $current->category_proposed ?? '');
 					$extra['admin_notes'] = wp_json_encode($incoming_notes, JSON_UNESCAPED_UNICODE);
-				} elseif ($payload !== [] && ! self::workflow_payload_is_ready_like($payload)) {
-				$state = 'retry_process';
-				$extra['error_message'] = 'Пакет снят из ready_publish: финальная publish-grade проверка не пройдена.';
-				$extra['category_final'] = implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($current->category_final ?? $current->category_proposed ?? '');
-				$extra['ai_payload'] = wp_json_encode($payload, JSON_UNESCAPED_UNICODE);
+					$extra['ai_payload'] = wp_json_encode($payload, JSON_UNESCAPED_UNICODE);
 			} elseif ($payload !== []) {
 				$extra['ai_payload'] = wp_json_encode($payload, JSON_UNESCAPED_UNICODE);
 			}
@@ -1319,7 +1559,7 @@ final class EPV2_Queue {
 			$publish_limit_override = self::payload_has_publish_limit_override($incoming_payload, $current);
 			if (! $is_existing_ready && ! EPV2_Time_Planner::publish_budget_allows_item($publish_limit_override)) {
 				$notes['_system']['ready_publish_at'] = gmdate('Y-m-d H:i:s');
-				$notes['_system']['publish_not_before'] = EPV2_Jobs::next_publish_slot_after(EPV2_Time_Planner::next_daily_budget_reset_timestamp());
+				$notes['_system']['publish_not_before'] = EPV2_Jobs::next_publish_slot_after(EPV2_Time_Planner::next_publish_budget_slot_timestamp());
 				$notes['_system']['publish_deferred_by_daily_limit'] = true;
 			} elseif (
 				! $is_existing_ready
@@ -1368,7 +1608,9 @@ final class EPV2_Queue {
 			$notes['_system']['workflow_owner_token'] = '';
 			$notes['_system']['workflow_heartbeat_at'] = '';
 			if (in_array($state, ['published', 'rejected', 'error', 'duplicate'], true)) {
-				$notes['_system']['workflow_terminal_reason'] = $state;
+				$notes['_system']['workflow_terminal_reason'] = ! empty($notes['_system']['workflow_terminal_reason'])
+					? sanitize_key((string) $notes['_system']['workflow_terminal_reason'])
+					: $state;
 			}
 		}
 		$active_live_states = ['processing_de', 'publishing'];
@@ -1406,7 +1648,6 @@ final class EPV2_Queue {
 			]);
 		}
 		update_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, $id, false);
-		self::normalize_non_active_recoverable_items();
 	}
 
 	public static function clear_active_automation_item(int $id = 0): void {
@@ -1422,56 +1663,25 @@ final class EPV2_Queue {
 			]);
 		}
 		delete_option(self::OPTION_ACTIVE_AUTOMATION_ITEM);
-		self::normalize_non_active_recoverable_items();
 	}
 
 	public static function active_owner_get(): ?object {
-		self::normalize_active_automation_pointer();
-		$active_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
-		if ($active_id > 0) {
-			$item = self::get_item_summary($active_id);
-			if ($item && self::workflow_owner_token($item) !== '') {
-				if (self::workflow_user_state_for_row($item) === 'ready_publish') {
-					$payload = self::row_payload($item);
-					if ($payload !== []) {
-						$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
-					}
-					self::mark_state((int) $item->id, 'ready_publish', [
-						'ai_payload' => $payload !== [] ? wp_json_encode($payload, JSON_UNESCAPED_UNICODE) : (string) ($item->ai_payload ?? ''),
-						'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($item->category_final ?: $item->category_proposed),
-						'error_message' => '',
-					]);
-					self::active_owner_release((int) $item->id, 'ready_publish');
-					$item = null;
-				}
-			}
-			if ($item && self::workflow_owner_token($item) !== '') {
-				return $item;
-			}
+		$item = self::active_owner_pointer_item();
+		if ($item instanceof stdClass) {
+			return $item;
 		}
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 		$item = $wpdb->get_row(
 			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
 			WHERE JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_owner_token')) <> ''
-			AND state IN ('new','processing_de','retry_process','ready_review','reserve')
 			ORDER BY updated_at DESC
 			LIMIT 1"
 		);
-		if ($item && self::workflow_owner_token($item) !== '') {
-			if (self::workflow_user_state_for_row($item) === 'ready_publish') {
-				$payload = self::row_payload($item);
-				if ($payload !== []) {
-					$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
-				}
-				self::mark_state((int) $item->id, 'ready_publish', [
-					'ai_payload' => $payload !== [] ? wp_json_encode($payload, JSON_UNESCAPED_UNICODE) : (string) ($item->ai_payload ?? ''),
-					'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($item->category_final ?: $item->category_proposed),
-					'error_message' => '',
-				]);
-				self::active_owner_release((int) $item->id, 'ready_publish');
-				return null;
-			}
+		if ($item && self::finalize_ready_publish_owned_row($item)) {
+			return null;
+		}
+		if ($item && self::current_row_should_keep_active_pointer($item)) {
 			update_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, (int) $item->id, false);
 			return $item;
 		}
@@ -1483,7 +1693,7 @@ final class EPV2_Queue {
 		if (! $item) {
 			return false;
 		}
-		$current = self::active_owner_get();
+		$current = self::active_owner_pointer_item();
 		if ($current && (int) ($current->id ?? 0) !== $item_id) {
 			return false;
 		}
@@ -1529,17 +1739,52 @@ final class EPV2_Queue {
 	}
 
 	public static function active_owner_recover_stale(): int {
-		$item = self::active_owner_get();
+		$item = self::active_owner_pointer_item();
 		if (! $item || ! self::active_owner_is_stale($item)) {
 			return 0;
 		}
+		$system = self::workflow_system_payload($item);
+		$workflow_step = sanitize_key((string) ($system['workflow_step'] ?? ''));
+		$heartbeat = (string) ($system['workflow_heartbeat_at'] ?? '');
 		self::workflow_system_update((int) $item->id, [
 			'workflow_owner_token' => '',
+			'workflow_step' => $workflow_step,
 			'workflow_step_status' => 'stale_recovered',
 			'workflow_heartbeat_at' => '',
+			'workflow_recovered_at' => gmdate('Y-m-d H:i:s'),
+			'workflow_recovery_reason' => 'stale_owner',
+			'workflow_last_error' => $heartbeat !== ''
+				? 'Active owner was recovered after stale heartbeat at ' . $heartbeat . '.'
+				: 'Active owner was recovered after missing workflow heartbeat.',
 		]);
 		delete_option(self::OPTION_ACTIVE_AUTOMATION_ITEM);
 		return (int) $item->id;
+	}
+
+	private static function active_owner_pointer_item(): ?object {
+		$active_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
+		if ($active_id <= 0) {
+			return null;
+		}
+		$item = self::get_item_summary($active_id);
+		if (! ($item instanceof stdClass)) {
+			delete_option(self::OPTION_ACTIVE_AUTOMATION_ITEM);
+			return null;
+		}
+		if (self::workflow_owner_token($item) === '') {
+			delete_option(self::OPTION_ACTIVE_AUTOMATION_ITEM);
+			return null;
+		}
+		if (self::row_has_live_published_posts($item)) {
+			delete_option(self::OPTION_ACTIVE_AUTOMATION_ITEM);
+			return null;
+		}
+		$state = self::normalize_legacy_publish_state((string) ($item->state ?? ''));
+		if (self::workflow_is_terminal_state($state) || in_array($state, ['ready_publish', 'retry_publish', 'publishing'], true)) {
+			delete_option(self::OPTION_ACTIVE_AUTOMATION_ITEM);
+			return null;
+		}
+		return $item;
 	}
 
 	public static function normalize_non_active_recoverable_items(): void {
@@ -1550,10 +1795,10 @@ final class EPV2_Queue {
 		self::normalize_duplicate_recoverable_original_urls();
 		$active_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
 		$table = $wpdb->prefix . 'epv2_queue';
-		$states = ['processing_de', 'reserve'];
+		$states = ['processing_de', 'reserve', 'retry_process', 'ready_review'];
 		$placeholders = implode(',', array_fill(0, count($states), '%s'));
 		$params = $states;
-		$sql = "SELECT id, admin_notes FROM {$table} WHERE state IN ({$placeholders})";
+		$sql = "SELECT " . self::SUMMARY_FIELDS . " FROM {$table} WHERE state IN ({$placeholders})";
 		if ($active_id > 0) {
 			$sql .= " AND id != %d";
 			$params[] = $active_id;
@@ -1561,6 +1806,9 @@ final class EPV2_Queue {
 		$rows = $wpdb->get_results($wpdb->prepare($sql, ...$params));
 		foreach ((array) $rows as $row) {
 			if (self::row_notes_require_manual_confirmation($row)) {
+				continue;
+			}
+			if (self::workflow_user_state_for_row($row) !== 'new') {
 				continue;
 			}
 			$notes = json_decode((string) ($row->admin_notes ?? ''), true);
@@ -1606,6 +1854,9 @@ final class EPV2_Queue {
 				continue;
 			}
 			$notes = self::row_notes($item);
+			if (self::row_is_waiting_on_category_budget($item, $notes)) {
+				continue;
+			}
 			$not_before = (int) ($notes['_system']['publish_not_before'] ?? 0);
 			if ($not_before > $latest_not_before) {
 				$latest_not_before = $not_before;
@@ -1614,8 +1865,7 @@ final class EPV2_Queue {
 		if ($latest_not_before <= 0) {
 			return $base_slot;
 		}
-		$queued = max($base_slot, $latest_not_before + ($interval_minutes * MINUTE_IN_SECONDS));
-		return max($base_slot, EPV2_Jobs::next_publish_slot_after($queued - 1));
+		return max($base_slot, $latest_not_before + ($interval_minutes * MINUTE_IN_SECONDS));
 	}
 
 	private static function canonicalize_single_workflow_state(int $id, string $state, ?object $current = null, array $extra = []): string {
@@ -1623,12 +1873,6 @@ final class EPV2_Queue {
 		$state = self::normalize_legacy_publish_state($state);
 		if ($current instanceof stdClass && self::row_has_live_published_posts($current)) {
 			return 'published';
-		}
-		if (
-			self::orchestrator_v2_enabled()
-			&& in_array($state, ['processing_de', 'retry_process', 'ready_review', 'reserve'], true)
-		) {
-			return 'new';
 		}
 		if ($current instanceof stdClass && $state === 'ready_review') {
 			$notes = json_decode((string) ($current->admin_notes ?? ''), true);
@@ -1641,6 +1885,9 @@ final class EPV2_Queue {
 			}
 			$is_auto = (string) ($current->mode ?? '') === 'auto';
 			$manual = (string) ($notes['_system']['manual_confirmation_required'] ?? '');
+			if ($manual !== '') {
+				return 'ready_review';
+			}
 			if ($is_auto && $manual === '') {
 				$payload_json = array_key_exists('ai_payload', $extra) ? (string) $extra['ai_payload'] : (string) ($current->ai_payload ?? '');
 				$payload = json_decode($payload_json, true);
@@ -1653,6 +1900,12 @@ final class EPV2_Queue {
 				}
 				return 'retry_process';
 			}
+		}
+		if (
+			self::orchestrator_v2_enabled()
+			&& in_array($state, ['processing_de', 'retry_process', 'ready_review', 'reserve'], true)
+		) {
+			return 'new';
 		}
 		if (! self::is_single_workflow_state($state)) {
 			return $state;
@@ -1680,11 +1933,7 @@ final class EPV2_Queue {
 
 	private static function first_waiting_publish_slot(): int {
 		$interval = max(5, (int) EPV2_Settings::get('publish_interval_minutes', 5)) * MINUTE_IN_SECONDS;
-		$next_publish = EPV2_Jobs::next_publish_timestamp();
-		if (is_int($next_publish) && $next_publish > time()) {
-			return EPV2_Jobs::next_publish_slot_after($next_publish + 1);
-		}
-		return EPV2_Jobs::next_publish_slot_after(time() + $interval);
+		return time() + $interval;
 	}
 
 	private static function earliest_publish_slot_from_ready_at(string $readyAt): int {
@@ -1693,7 +1942,7 @@ final class EPV2_Queue {
 		if ($readyTs === false || $readyTs <= 0) {
 			return self::first_waiting_publish_slot();
 		}
-		return EPV2_Jobs::next_publish_slot_after($readyTs + $interval);
+		return $readyTs + $interval;
 	}
 
 	private static function compare_publish_queue_order(object $a, object $b): int {
@@ -1916,7 +2165,7 @@ final class EPV2_Queue {
 		}
 		$state = (string) ($row->state ?? '');
 		$message = mb_strtolower((string) ($row->error_message ?? ''));
-		if ($state === 'retry_process' && preg_match('/featured image|featured media|publish threshold|minimum review threshold|broken multilingual/u', $message) === 1) {
+		if ($state === 'retry_process' && preg_match('/publish threshold|minimum review threshold|broken multilingual/u', $message) === 1) {
 			return 260;
 		}
 		if ($state === 'retry_process') {
@@ -2201,6 +2450,17 @@ final class EPV2_Queue {
 		return self::item_has_publish_limit_override($row);
 	}
 
+	private static function row_is_waiting_on_category_budget(object $row, ?array $notes = null): bool {
+		$notes = is_array($notes) ? $notes : self::row_notes($row);
+		$system = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		if (empty($system['publish_deferred_by_category_limit'])) {
+			return false;
+		}
+		$payload = self::row_payload($row);
+		$override = self::payload_has_publish_limit_override($payload, $row);
+		return ! EPV2_Time_Planner::publish_category_budget_allows_item(self::row_primary_category($row, $payload), $override);
+	}
+
 	private static function row_primary_category(object $row, array $payload = []): string {
 		$payload_categories = array_values(array_filter(array_map('strval', (array) ($payload['categories'] ?? []))));
 		if ($payload_categories !== []) {
@@ -2253,10 +2513,24 @@ final class EPV2_Queue {
 
 	private static function publish_due(object $row): bool {
 		$notes = self::row_notes($row);
+		if (self::row_is_waiting_on_category_budget($row, $notes)) {
+			$payload = self::row_payload($row);
+			$next = EPV2_Jobs::next_publish_slot_after(
+				EPV2_Time_Planner::next_category_budget_slot_timestamp(self::row_primary_category($row, $payload))
+			);
+			if ((int) ($notes['_system']['publish_not_before'] ?? 0) !== $next) {
+				$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+				$notes['_system']['publish_not_before'] = $next;
+				self::update_fields((int) ($row->id ?? 0), [
+					'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+				]);
+			}
+			return false;
+		}
 		$notBefore = (int) ($notes['_system']['publish_not_before'] ?? 0);
 		if ($notBefore <= 0 && (string) ($row->state ?? '') === 'ready_publish') {
-			self::backfill_publish_schedule((int) ($row->id ?? 0), $notes, true, (string) ($row->updated_at ?? ''));
-			return true;
+			self::backfill_publish_schedule((int) ($row->id ?? 0), $notes, false, (string) ($row->updated_at ?? ''));
+			return false;
 		}
 		return $notBefore > 0 && $notBefore <= time();
 	}
@@ -2303,9 +2577,7 @@ final class EPV2_Queue {
 	}
 
 	private static function active_owner_waiting_on_retry(object $item): bool {
-		$notes = self::row_notes($item);
-		$retry_after = (string) ($notes['_system']['retry_after'] ?? '');
-		return $retry_after !== '' && strtotime($retry_after) > time();
+		return self::workflow_waiting_not_before($item);
 	}
 
 	public static function promote_live_published_rows(int $limit = 50): int {
@@ -2521,8 +2793,8 @@ final class EPV2_Queue {
 	}
 
 	private static function sync_active_automation_item(int $id, string $state): void {
-		$state = sanitize_key($state);
-		if (in_array($state, ['processing_de', 'retry_process', 'ready_review', 'reserve', 'new'], true)) {
+		$row = self::get_item_summary($id);
+		if ($row && self::current_row_should_keep_active_pointer($row)) {
 			self::set_active_automation_item($id);
 			return;
 		}
@@ -2543,9 +2815,19 @@ final class EPV2_Queue {
 		$owned_rows = $wpdb->get_results(
 			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
 			WHERE JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_owner_token')) <> ''
-			AND state IN ('new','processing_de','retry_process','ready_review','reserve')
 			ORDER BY updated_at DESC, id DESC"
 		);
+		$owned_rows = array_values(array_filter((array) $owned_rows, static function ($row): bool {
+			return $row instanceof stdClass;
+		}));
+		foreach ($owned_rows as $row) {
+			if (self::finalize_ready_publish_owned_row($row)) {
+				continue;
+			}
+		}
+		$owned_rows = array_values(array_filter($owned_rows, static function ($row): bool {
+			return self::current_row_should_keep_active_pointer($row);
+		}));
 		if (is_array($owned_rows) && count($owned_rows) > 1) {
 			usort($owned_rows, static function ($a, $b): int {
 				$aPriority = self::duplicate_survivor_priority($a);
@@ -2576,14 +2858,52 @@ final class EPV2_Queue {
 			delete_option(self::OPTION_ACTIVE_AUTOMATION_ITEM);
 			return;
 		}
-		$state = (string) ($item->state ?? '');
-		if (! in_array($state, ['processing_de', 'retry_process', 'ready_review', 'reserve', 'new'], true)) {
+		if (! self::current_row_should_keep_active_pointer($item)) {
 			delete_option(self::OPTION_ACTIVE_AUTOMATION_ITEM);
-			return;
+		}
+	}
+
+	private static function finalize_ready_publish_owned_row(object $item): bool {
+		if (self::workflow_owner_token($item) === '') {
+			return false;
+		}
+		if (self::workflow_user_state_for_row($item) !== 'ready_publish') {
+			return false;
+		}
+		$payload = self::row_payload($item);
+		if ($payload !== []) {
+			$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
+		}
+		if (! EPV2_AI_Processor::transition_item_to_ready_publish((int) $item->id, $payload !== [] ? $payload : (array) json_decode((string) ($item->ai_payload ?? ''), true), [
+			'error_message' => '',
+		])) {
+			return false;
+		}
+		self::active_owner_release((int) $item->id, 'ready_publish');
+		return true;
+	}
+
+	private static function current_row_should_keep_active_pointer(object $row): bool {
+		if (self::workflow_owner_token($row) === '') {
+			return false;
+		}
+		if (self::row_has_live_published_posts($row)) {
+			return false;
+		}
+		$state = self::normalize_legacy_publish_state((string) ($row->state ?? ''));
+		if (self::workflow_is_terminal_state($state)) {
+			return false;
+		}
+		if (in_array($state, ['ready_publish', 'retry_publish', 'publishing'], true)) {
+			return false;
+		}
+		if (! in_array($state, ['new', 'processing_de', 'retry_process', 'ready_review', 'reserve'], true)) {
+			return false;
 		}
 		if ($state === 'processing_de' && ! self::process_lock_is_live()) {
-			delete_option(self::OPTION_ACTIVE_AUTOMATION_ITEM);
+			return false;
 		}
+		return true;
 	}
 
 	private static function normalize_staged_new_items(): void {
@@ -2684,8 +3004,7 @@ final class EPV2_Queue {
 	}
 
 	private static function workflow_payload_ready_publish_checklist(array $payload): bool {
-		$primary_media = (string) ($payload['featured_media_url'] ?? $payload['media_url'] ?? '');
-		if ($primary_media === '' || EPV2_Media::is_generated_story_cover_url($primary_media)) {
+		if (! EPV2_AI_Processor::payload_media_contract_passes($payload)) {
 			return false;
 		}
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
@@ -2722,11 +3041,13 @@ final class EPV2_Queue {
 			self::workflow_system_update((int) $item->id, [
 				'workflow_step' => 'finalize_media',
 				'workflow_step_status' => 'pending',
+				'workflow_recovery_reason' => 'generated_cover_demoted',
+				'workflow_last_error' => 'Ready-publish item was demoted because only a generated cover remained.',
 			]);
 			self::mark_state((int) $item->id, 'new', [
 				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($item->category_final ?? $item->category_proposed ?? ''),
-				'error_message' => 'Материал снят из ready_publish: нужен реальный featured media вместо generated cover.',
+				'error_message' => 'Материал возвращён в finalize_media: generated cover не считается publish-grade.',
 			]);
 			$resolved[] = [
 				'id' => (int) $item->id,
@@ -2769,8 +3090,7 @@ final class EPV2_Queue {
 			return 'translate_en';
 		}
 
-		$primary_media = (string) ($payload['featured_media_url'] ?? $payload['media_url'] ?? '');
-		if ($primary_media === '' || EPV2_Media::is_generated_story_cover_url($primary_media)) {
+		if (! EPV2_AI_Processor::payload_media_contract_passes($payload)) {
 			return 'finalize_media';
 		}
 
@@ -2804,6 +3124,450 @@ final class EPV2_Queue {
 		}
 
 		return 'new';
+	}
+
+	public static function user_facing_state_for_row(object $row): string {
+		$state = self::normalize_legacy_publish_state((string) ($row->state ?? ''));
+		if ($state === 'publishing') {
+			return 'publishing';
+		}
+		$user_state = self::workflow_user_state_for_row($row);
+		if ($user_state !== 'new') {
+			return $user_state;
+		}
+		$active_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
+		$row_id = (int) ($row->id ?? 0);
+		if ($row_id > 0 && $row_id === $active_id && ! self::workflow_is_terminal_state($user_state)) {
+			return 'active';
+		}
+		if ($row_id > 0 && self::workflow_owner_token($row) !== '' && ! self::workflow_is_terminal_state($user_state)) {
+			return 'active';
+		}
+		return $user_state;
+	}
+
+	public static function workflow_classification_for_row(object $row): array {
+		$user_state = self::user_facing_state_for_row($row);
+		$notes = self::row_notes($row);
+		$system = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$manual_kind = sanitize_key((string) ($system['manual_confirmation_required'] ?? ''));
+		$manual_reason = sanitize_key((string) ($system['manual_confirmation_reason'] ?? ''));
+		$terminal_reason = sanitize_key((string) ($system['workflow_terminal_reason'] ?? ''));
+		if ($manual_kind !== '' || $user_state === 'ready_review') {
+			return [
+				'class' => 'manual',
+				'reason' => $manual_reason !== '' ? $manual_reason : ($manual_kind !== '' ? $manual_kind : 'manual_review'),
+				'manual_kind' => $manual_kind !== '' ? $manual_kind : 'editorial',
+				'user_state' => $user_state,
+			];
+		}
+		if (in_array($user_state, ['new', 'active', 'ready_publish', 'publishing'], true)) {
+			return [
+				'class' => 'recoverable',
+				'reason' => $user_state,
+				'manual_kind' => '',
+				'user_state' => $user_state,
+			];
+		}
+		if (in_array($user_state, ['published', 'duplicate', 'rejected', 'error'], true)) {
+			return [
+				'class' => 'terminal',
+				'reason' => $terminal_reason !== '' ? $terminal_reason : $user_state,
+				'manual_kind' => '',
+				'user_state' => $user_state,
+			];
+		}
+		return [
+			'class' => 'recoverable',
+			'reason' => $user_state !== '' ? $user_state : 'unknown',
+			'manual_kind' => '',
+			'user_state' => $user_state,
+		];
+	}
+
+	public static function queue_items_user_facing_summary(array $items): array {
+		$summary = [];
+		foreach ($items as $item) {
+			if (! $item instanceof stdClass) {
+				continue;
+			}
+			$clone = clone $item;
+			$clone->state = self::user_facing_state_for_row($item);
+			$summary[] = $clone;
+		}
+		return $summary;
+	}
+
+	public static function user_facing_queue_state_counts(): array {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$raw_rows = $wpdb->get_results("SELECT state, COUNT(*) AS qty FROM {$table} GROUP BY state", ARRAY_A);
+		if (! is_array($raw_rows) || $raw_rows === []) {
+			return [];
+		}
+		$raw_counts = [];
+		foreach ($raw_rows as $row) {
+			$raw_state = sanitize_key((string) ($row['state'] ?? ''));
+			if ($raw_state === '') {
+				continue;
+			}
+			$raw_counts[$raw_state] = (int) ($row['qty'] ?? 0);
+		}
+		$recoverable_count =
+			(int) ($raw_counts['new'] ?? 0)
+			+ (int) ($raw_counts['processing_de'] ?? 0)
+			+ (int) ($raw_counts['retry_process'] ?? 0)
+			+ (int) ($raw_counts['ready_review'] ?? 0)
+			+ (int) ($raw_counts['reserve'] ?? 0);
+		$active_count = 0;
+		$active_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
+		if ($active_id > 0) {
+			$active_item = self::get_item_summary($active_id);
+			if ($active_item instanceof stdClass) {
+				$active_state = sanitize_key((string) ($active_item->state ?? ''));
+				if (in_array($active_state, ['new', 'processing_de', 'retry_process', 'ready_review', 'reserve'], true)) {
+					$active_count = 1;
+				}
+			}
+		}
+		$counts = [
+			'new' => max(0, $recoverable_count - $active_count),
+			'active' => $active_count,
+			'ready_publish' => (int) ($raw_counts['ready_publish'] ?? 0) + (int) ($raw_counts['retry_publish'] ?? 0),
+			'publishing' => (int) ($raw_counts['publishing'] ?? 0),
+			'published' => (int) ($raw_counts['published'] ?? 0),
+			'duplicate' => (int) ($raw_counts['duplicate'] ?? 0),
+			'rejected' => (int) ($raw_counts['rejected'] ?? 0),
+			'error' => (int) ($raw_counts['error'] ?? 0),
+		];
+		$rows = [];
+		foreach ($counts as $state => $count) {
+			if ($count <= 0) {
+				continue;
+			}
+			$rows[] = [
+				'state' => $state,
+				'c' => $count,
+			];
+		}
+		usort($rows, static function (array $a, array $b): int {
+			$count_order = (int) ($b['c'] ?? 0) <=> (int) ($a['c'] ?? 0);
+			if ($count_order !== 0) {
+				return $count_order;
+			}
+			return strcmp((string) ($a['state'] ?? ''), (string) ($b['state'] ?? ''));
+		});
+		return $rows;
+	}
+
+	public static function bridge_runtime_snapshot(): array {
+		return [
+			'active_automation_item' => self::bridge_active_automation_item_id(),
+			'has_processable_items' => self::bridge_has_processable_items(),
+			'next_ready_publish' => self::bridge_next_ready_publish_timestamp(),
+			'queue_states' => self::user_facing_queue_state_counts(),
+		];
+	}
+
+	public static function bridge_health_snapshot(): array {
+		$runtime = self::bridge_runtime_snapshot();
+		$active = self::bridge_active_owner_row();
+		$contract = self::cached_queue_contract_health();
+		$acceptance = self::bridge_acceptance_snapshot();
+
+		return [
+			'active_automation_item' => (int) ($runtime['active_automation_item'] ?? 0),
+			'active_workflow_step' => $active ? self::workflow_step($active) : '',
+			'active_workflow_status' => $active ? self::workflow_step_status($active) : '',
+			'has_processable_items' => ! empty($runtime['has_processable_items']),
+			'next_ready_publish' => (int) ($runtime['next_ready_publish'] ?? 0),
+			'queue_states' => is_array($runtime['queue_states'] ?? null) ? $runtime['queue_states'] : [],
+			'queue_contract' => $contract,
+			'acceptance' => $acceptance,
+			'workflow_stage_circuit' => EPV2_Resilience_Manager::workflow_stage_circuit_snapshot(),
+			'incident_counters' => self::bridge_incident_counters(),
+		];
+	}
+
+	private static function bridge_incident_counters(): array {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$since = gmdate('Y-m-d H:i:s', time() - DAY_IN_SECONDS);
+		$low_reject_published = (int) $wpdb->get_var($wpdb->prepare(
+			"SELECT COUNT(*)
+			FROM {$table}
+			WHERE state = 'published'
+				AND updated_at >= %s
+				AND JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.selection.decision')) IN ('low','reject')",
+			$since
+		));
+		$terminal_quarantine = (int) $wpdb->get_var(
+			"SELECT COUNT(*)
+			FROM {$table}
+			WHERE state IN ('error','rejected')
+				AND JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.quarantine_reason')) <> ''"
+		);
+		$stale_retry = (int) $wpdb->get_var($wpdb->prepare(
+			"SELECT COUNT(*)
+			FROM {$table}
+			WHERE state IN ('new','retry_process')
+				AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.retry_after')), ''), '') <> ''
+				AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.retry_after')), '%%Y-%%m-%%d %%H:%%i:%%s') < %s",
+			gmdate('Y-m-d H:i:s', time() - 15 * MINUTE_IN_SECONDS)
+		));
+		return [
+			'low_reject_published_24h' => $low_reject_published,
+			'terminal_quarantine_rows' => $terminal_quarantine,
+			'stale_retry_rows' => $stale_retry,
+		];
+	}
+
+	private static function bridge_active_automation_item_id(): int {
+		$active = self::bridge_active_owner_row();
+		return $active ? (int) ($active->id ?? 0) : 0;
+	}
+
+	private static function bridge_has_processable_items(): bool {
+		$active = self::bridge_active_owner_row();
+		if ($active && ! self::workflow_waiting_not_before($active) && ! self::item_requires_manual_confirmation_state($active)) {
+			return true;
+		}
+
+		foreach (['new', 'retry_process', 'ready_review', 'reserve'] as $state) {
+			if (self::bridge_next_processable_row($state) instanceof stdClass) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static function bridge_next_ready_publish_timestamp(): ?int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$rows = $wpdb->get_results(
+			"SELECT id, state, admin_notes, created_at, updated_at
+			FROM {$table}
+			WHERE state IN ('ready_publish','retry_publish')
+			ORDER BY updated_at ASC, id ASC
+			LIMIT 30"
+		);
+		if (! is_array($rows) || $rows === []) {
+			return null;
+		}
+
+		$earliest_wait = 0;
+		foreach ($rows as $row) {
+			if (! ($row instanceof stdClass)) {
+				continue;
+			}
+			$notes = self::row_notes($row);
+			$not_before = (int) ($notes['_system']['publish_not_before'] ?? 0);
+			if ($not_before <= 0 || $not_before <= time()) {
+				return time();
+			}
+			if ($earliest_wait <= 0 || $not_before < $earliest_wait) {
+				$earliest_wait = $not_before;
+			}
+		}
+
+		return $earliest_wait > 0 ? $earliest_wait : null;
+	}
+
+	private static function cached_queue_contract_health(): array {
+		$cache_key = 'epv2_bridge_queue_contract_health';
+		$cached = get_transient($cache_key);
+		if (is_array($cached)) {
+			return $cached;
+		}
+		if (class_exists('EPV2_AI_Processor') && method_exists('EPV2_AI_Processor', 'queue_contract_regression_check')) {
+			$check = EPV2_AI_Processor::queue_contract_regression_check(300);
+			$violations = is_array($check['violations'] ?? null) ? $check['violations'] : [];
+			$issue_counts = [];
+			foreach ($violations as $violation) {
+				foreach ((array) ($violation['issues'] ?? []) as $issue) {
+					$issue = sanitize_key((string) $issue);
+					if ($issue === '') {
+						continue;
+					}
+					$issue_counts[$issue] = ($issue_counts[$issue] ?? 0) + 1;
+				}
+			}
+			arsort($issue_counts);
+			$snapshot = [
+				'checked' => (int) ($check['checked'] ?? 0),
+				'violations_count' => count($violations),
+				'top_issues' => array_slice($issue_counts, 0, 5, true),
+				'status' => $violations === [] ? 'ok' : 'warn',
+				'checked_at' => gmdate('Y-m-d H:i:s'),
+			];
+			set_transient($cache_key, $snapshot, 60);
+			return $snapshot;
+		}
+		$snapshot = [
+			'checked' => 0,
+			'violations_count' => 0,
+			'top_issues' => [],
+			'status' => 'pending',
+		];
+		set_transient($cache_key, $snapshot, 30);
+		return $snapshot;
+	}
+
+	private static function bridge_acceptance_snapshot(int $limit = 12): array {
+		$cache_key = 'epv2_bridge_acceptance_snapshot';
+		$cached = get_transient($cache_key);
+		if (is_array($cached)) {
+			return $cached;
+		}
+
+		$items = self::get_queue_items_summary([
+			'states' => ['published'],
+			'limit' => max(1, min(50, $limit)),
+		]);
+		$streak = 0;
+		$checked = 0;
+		$recent = [];
+
+		foreach ($items as $item) {
+			if (! ($item instanceof stdClass)) {
+				continue;
+			}
+			$checked++;
+			$notes = self::row_notes($item);
+			$system = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$payload = self::row_payload($item);
+			$auto_mode = (string) ($item->mode ?? '') === 'auto';
+			$manual_required = (string) ($system['manual_confirmation_required'] ?? '') !== '';
+			$has_posts = self::row_has_live_published_posts($item);
+			$gate = EPV2_Publish_Gate::evaluate($item, $payload, [
+				'context' => 'acceptance',
+			]);
+			$selection_publishable = ! empty($gate['selection_publishable']);
+			$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			$checklist = is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
+			$publish_grade = ! empty($checklist['ready_publish'])
+				&& ! empty($checklist['translations_ready'])
+				&& ! empty($checklist['publish_finish_ready'])
+				&& (int) ($meta['quality']['score'] ?? 0) >= 90
+				&& (int) ($meta['seo_quality']['score'] ?? 0) >= 90
+				&& (int) ($meta['release_quality']['score'] ?? 0) >= 90
+				&& (int) ($meta['google_quality']['score'] ?? 0) >= 90;
+			$passes = $auto_mode && ! $manual_required && $has_posts && $publish_grade && ! empty($gate['allowed']);
+
+			$recent[] = [
+				'id' => (int) ($item->id ?? 0),
+				'updated_at' => (string) ($item->updated_at ?? ''),
+				'auto_mode' => $auto_mode,
+				'manual_required' => $manual_required,
+				'has_published_posts' => $has_posts,
+				'selection_publishable' => $selection_publishable,
+				'publish_gate_allowed' => ! empty($gate['allowed']),
+				'publish_gate_blockers' => array_values((array) ($gate['blockers'] ?? [])),
+				'publish_grade' => $publish_grade,
+				'passes' => $passes,
+			];
+
+			if ($passes && $streak === ($checked - 1)) {
+				$streak++;
+				continue;
+			}
+			if (! $passes) {
+				break;
+			}
+		}
+
+		$snapshot = [
+			'target' => 10,
+			'checked' => $checked,
+			'consecutive_autonomous_publish_grade' => $streak,
+			'remaining_to_target' => max(0, 10 - $streak),
+			'recent' => $recent,
+			'status' => $streak >= 10 ? 'accepted' : ($streak > 0 ? 'in_progress' : 'not_proven'),
+		];
+		set_transient($cache_key, $snapshot, 30);
+		return $snapshot;
+	}
+
+	private static function bridge_active_owner_row(): ?object {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$active_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
+		if ($active_id > 0) {
+			$item = $wpdb->get_row($wpdb->prepare(
+				"SELECT id, state, error_message, admin_notes, created_at, updated_at
+				FROM {$table}
+				WHERE id = %d
+				LIMIT 1",
+				$active_id
+			));
+			if ($item && self::current_row_should_keep_active_pointer($item)) {
+				return $item;
+			}
+		}
+
+		$item = $wpdb->get_row(
+			"SELECT id, state, error_message, admin_notes, created_at, updated_at
+			FROM {$table}
+			WHERE JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_owner_token')) <> ''
+			ORDER BY updated_at DESC, id DESC
+			LIMIT 1"
+		);
+		if ($item && self::current_row_should_keep_active_pointer($item)) {
+			return $item;
+		}
+
+		return null;
+	}
+
+	private static function bridge_next_processable_row(string $state): ?object {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT " . self::SUMMARY_FIELDS . "
+			FROM {$table}
+			WHERE state = %s
+			ORDER BY created_at ASC, id ASC
+			LIMIT 25",
+			$state
+		));
+		if (! is_array($rows) || $rows === []) {
+			return null;
+		}
+
+		foreach ($rows as $row) {
+			if (! ($row instanceof stdClass)) {
+				continue;
+			}
+			if (self::item_requires_manual_confirmation_state($row)) {
+				continue;
+			}
+			if (self::workflow_waiting_not_before($row)) {
+				continue;
+			}
+			if (! self::item_is_processable_read_only($row, false)) {
+				continue;
+			}
+			if ((string) ($row->state ?? '') === 'new') {
+				if (
+					self::row_has_non_publish_grade_selection($row)
+					&& self::workflow_owner_token($row) === ''
+					&& self::workflow_step($row) === ''
+				) {
+					continue;
+				}
+				if (
+					self::workflow_user_state_for_row($row) === 'ready_publish'
+					&& self::workflow_step($row) === ''
+					&& self::row_processing_stage($row) === ''
+				) {
+					continue;
+				}
+			}
+			return $row;
+		}
+
+		return null;
 	}
 
 	private static function workflow_migration_candidate_rows(int $limit = 500): array {
@@ -2976,5 +3740,71 @@ final class EPV2_Queue {
 	public static function workflow_step_status(object $row): string {
 		$system = self::workflow_system_payload($row);
 		return sanitize_key((string) ($system['workflow_step_status'] ?? ''));
+	}
+
+	public static function workflow_not_before_timestamp(object $row): int {
+		$system = self::workflow_system_payload($row);
+		$workflow_not_before = $system['workflow_not_before'] ?? '';
+		if (is_numeric($workflow_not_before)) {
+			$timestamp = (int) $workflow_not_before;
+			if ($timestamp > 0) {
+				return $timestamp;
+			}
+		}
+		if (is_string($workflow_not_before) && $workflow_not_before !== '') {
+			$timestamp = strtotime($workflow_not_before);
+			if ($timestamp !== false && $timestamp > 0) {
+				return $timestamp;
+			}
+		}
+		$retry_after = $system['retry_after'] ?? '';
+		if (is_numeric($retry_after)) {
+			$timestamp = (int) $retry_after;
+			if ($timestamp > 0) {
+				return $timestamp;
+			}
+		}
+		if (is_string($retry_after) && $retry_after !== '') {
+			$timestamp = strtotime($retry_after);
+			if ($timestamp !== false && $timestamp > 0) {
+				return $timestamp;
+			}
+		}
+		return 0;
+	}
+
+	public static function workflow_waiting_not_before(object $row): bool {
+		$not_before = self::workflow_not_before_timestamp($row);
+		return $not_before > time();
+	}
+
+	private static function workflow_stage_attempt_limit(string $stage): int {
+		$stage = sanitize_key($stage);
+		return match ($stage) {
+			'build_de_master' => 3,
+			'rebuild_bundle' => 4,
+			'publish_finish' => 3,
+			'publish_ready_gate' => 2,
+			'translate_uk', 'translate_en', 'translate_finish' => 3,
+			default => 6,
+		};
+	}
+
+	private static function recent_process_attempt_count(int $item_id, string $stage = '', int $window_seconds = DAY_IN_SECONDS): int {
+		global $wpdb;
+		if ($item_id <= 0) {
+			return 0;
+		}
+		$table = $wpdb->prefix . 'epv2_runs';
+		$since = gmdate('Y-m-d H:i:s', time() - max(HOUR_IN_SECONDS, $window_seconds));
+		return (int) $wpdb->get_var($wpdb->prepare(
+			"SELECT COUNT(*)
+			FROM {$table}
+			WHERE job_name = 'process'
+				AND started_at >= %s
+				AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.last_item_id')) AS UNSIGNED) = %d",
+			$since,
+			$item_id
+		));
 	}
 }

@@ -29,6 +29,7 @@ final class EPV2_HTML_Reader {
 		$paragraphs = self::pick_paragraphs($xpath);
 		$content = trim(implode("\n\n", $paragraphs));
 		$excerpt = trim(implode(' ', array_slice($paragraphs, 0, 2)));
+		$lang = self::pick_language($xpath, $dom);
 
 		return [
 			'title' => $title,
@@ -37,6 +38,7 @@ final class EPV2_HTML_Reader {
 			'excerpt' => $excerpt,
 			'image' => $image,
 			'video' => $video,
+			'lang' => $lang,
 		];
 	}
 
@@ -151,6 +153,33 @@ final class EPV2_HTML_Reader {
 		if (stripos($body, '<html') === false && stripos($body, '<!doctype html') === false) {
 			throw new RuntimeException(sprintf('Response is not an HTML document for %s', $url));
 		}
+	}
+
+	private static function pick_language(DOMXPath $xpath, DOMDocument $dom): string {
+		$html_nodes = $dom->getElementsByTagName('html');
+		if ($html_nodes->length) {
+			$raw = trim((string) $html_nodes->item(0)->getAttribute('lang'));
+			if ($raw !== '') {
+				$short = strtolower(substr($raw, 0, 2));
+				if (in_array($short, ['de', 'uk', 'en'], true)) {
+					return $short;
+				}
+			}
+		}
+		$nodes = $xpath->query('//meta[@property="og:locale"]/@content | //meta[@http-equiv="Content-Language"]/@content');
+		if ($nodes && $nodes->length) {
+			$locale = strtolower(trim((string) $nodes->item(0)->nodeValue));
+			if (str_starts_with($locale, 'uk')) {
+				return 'uk';
+			}
+			if (str_starts_with($locale, 'de')) {
+				return 'de';
+			}
+			if (str_starts_with($locale, 'en')) {
+				return 'en';
+			}
+		}
+		return '';
 	}
 
 	private static function load_dom(string $html): array {

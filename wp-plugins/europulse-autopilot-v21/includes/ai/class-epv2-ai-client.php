@@ -18,7 +18,7 @@ if (! defined('ABSPATH')) {
 		}
 		$probe = $config;
 		$probe['timeout'] = 12;
-		$probe['max_tokens'] = 80;
+		$probe['max_tokens'] = self::preflight_token_budget($provider, $model);
 		$probe['temperature'] = 0.1;
 		try {
 			$result = self::generate($probe, [
@@ -72,6 +72,11 @@ if (! defined('ABSPATH')) {
 		}
 	}
 
+	private static function preflight_token_budget(string $provider, string $model): int {
+		$is_openai_reasoning_model = $provider === 'openai' && (str_starts_with($model, 'gpt-5') || str_starts_with($model, 'o'));
+		return $is_openai_reasoning_model ? 800 : 120;
+	}
+
 	private static function gemini_request(array $config, array $messages): array {
 		if (($config['model'] ?? '') === 'gemini-auto-free') {
 			return self::gemini_auto_free_request($config, $messages);
@@ -123,20 +128,29 @@ if (! defined('ABSPATH')) {
 	}
 
 	private static function openai_like_request(string $url, array $config, array $messages, string $api_key): array {
+		$is_deepseek = str_contains($url, 'deepseek.com');
+		$model = (string) $config['model'];
+		$is_openai_reasoning_model = ! $is_deepseek && (str_starts_with($model, 'gpt-5') || str_starts_with($model, 'o'));
 		$body = [
-			'model' => (string) $config['model'],
+			'model' => $model,
 			'messages' => array_map(static function (array $message): array {
 				return [
 					'role' => (string) ($message['role'] ?? 'user'),
 					'content' => (string) ($message['content'] ?? ''),
 				];
 			}, $messages),
-			'temperature' => (float) ($config['temperature'] ?? 0.4),
-			'max_tokens' => (int) ($config['max_tokens'] ?? 3000),
 			'response_format' => ['type' => 'json_object'],
 		];
+		if ($is_deepseek) {
+			$body['temperature'] = (float) ($config['temperature'] ?? 0.4);
+			$body['max_tokens'] = (int) ($config['max_tokens'] ?? 3000);
+		} elseif ($is_openai_reasoning_model) {
+			$body['max_completion_tokens'] = (int) ($config['max_tokens'] ?? 3000);
+		} else {
+			$body['temperature'] = (float) ($config['temperature'] ?? 0.4);
+			$body['max_tokens'] = (int) ($config['max_tokens'] ?? 3000);
+		}
 
-		$is_deepseek = str_contains($url, 'deepseek.com');
 		$default_timeout = $is_deepseek ? 40 : 35;
 		$request = [
 			'timeout' => max(15, min($is_deepseek ? 40 : 60, (int) ($config['timeout'] ?? $default_timeout))),

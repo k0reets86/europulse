@@ -18,6 +18,7 @@ final class EPV2_Deduplicator {
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 		$hashes = self::hashes($title, $content);
+		$normalized_url = $url !== '' ? self::normalize_url($url) : '';
 		$active_states = ['new', 'reserve', 'processing_de', 'retry_process', 'ready_review', 'ready_publish', 'publishing'];
 		$active_placeholders = implode(',', array_fill(0, count($active_states), '%s'));
 		$dup = $wpdb->get_row(
@@ -38,8 +39,55 @@ final class EPV2_Deduplicator {
 			return ['duplicate' => true, 'duplicate_of' => (int) $dup->id, 'reason' => 'hash'];
 		}
 
+		$terminal_states = ['rejected', 'duplicate', 'error', 'published'];
+		$terminal_placeholders = implode(',', array_fill(0, count($terminal_states), '%s'));
+		if ($url !== '' && $normalized_url !== '') {
+			$terminal_dup = $wpdb->get_row(
+				$wpdb->prepare(
+					"SELECT CASE WHEN duplicate_of IS NOT NULL AND duplicate_of > 0 THEN duplicate_of ELSE id END AS id
+					FROM {$table}
+					WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+					  AND state IN ({$terminal_placeholders})
+					  AND (
+						title_hash = %s
+						OR content_hash = %s
+						OR original_url IN (%s, %s)
+						OR canonical_url IN (%s, %s)
+					  )
+					ORDER BY updated_at DESC
+					LIMIT 1",
+					...array_merge($terminal_states, [
+						$hashes['title_hash'],
+						$hashes['content_hash'],
+						$url,
+						$normalized_url,
+						$url,
+						$normalized_url,
+					])
+				)
+			);
+		} else {
+			$terminal_dup = $wpdb->get_row(
+				$wpdb->prepare(
+					"SELECT CASE WHEN duplicate_of IS NOT NULL AND duplicate_of > 0 THEN duplicate_of ELSE id END AS id
+					FROM {$table}
+					WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+					  AND state IN ({$terminal_placeholders})
+					  AND (title_hash = %s OR content_hash = %s)
+					ORDER BY updated_at DESC
+					LIMIT 1",
+					...array_merge($terminal_states, [
+						$hashes['title_hash'],
+						$hashes['content_hash'],
+					])
+				)
+			);
+		}
+		if ($terminal_dup) {
+			return ['duplicate' => true, 'duplicate_of' => (int) $terminal_dup->id, 'reason' => 'recent_terminal_exact'];
+		}
+
 		if ($url !== '') {
-			$normalized_url = self::normalize_url($url);
 			$wp = $wpdb->get_var($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE post_status IN ('publish','draft','pending','future') AND guid = %s LIMIT 1", $url));
 			if ($wp) {
 				return ['duplicate' => true, 'duplicate_of' => (int) $wp, 'reason' => 'published_url'];
@@ -188,6 +236,69 @@ final class EPV2_Deduplicator {
 			}
 			if (self::titles_are_semantically_close($title, $post_title) && self::categories_overlap($categories, is_array($post_categories) ? $post_categories : [])) {
 				return ['duplicate' => true, 'duplicate_of' => $post_id, 'reason' => 'published_recent_semantic'];
+			}
+		}
+
+		// === AI fingerprint check — 24 h window, final fallback for semantic near-misses ===
+		// The fingerprint is injected by EPV2_Collector::ingest_candidate() as $item['story_fingerprint'].
+		// If not present (e.g. AI unavailable at collection time) the check is simply skipped.
+		$candidate_fp = is_array($item['story_fingerprint'] ?? null) ? (array) $item['story_fingerprint'] : null;
+		if (is_array($candidate_fp)) {
+			// Check against published posts with a stored AI fingerprint (last 24 h).
+			$fp_post_ids = get_posts([
+				'post_type'           => 'post',
+				'post_status'         => 'publish',
+				'posts_per_page'      => 25,
+				'date_query'          => [
+					[
+						'after'     => gmdate('Y-m-d H:i:s', time() - DAY_IN_SECONDS),
+						'inclusive' => true,
+					],
+				],
+				'meta_query'          => [
+					[
+						'key'     => '_epv2_story_fingerprint',
+						'compare' => 'EXISTS',
+					],
+				],
+				'fields'              => 'ids',
+				'ignore_sticky_posts' => true,
+			]);
+			foreach ((array) $fp_post_ids as $fp_pid) {
+				$fp_pid  = (int) $fp_pid;
+				$raw     = get_post_meta($fp_pid, '_epv2_story_fingerprint', true);
+				$post_fp = is_string($raw) ? json_decode($raw, true) : (is_array($raw) ? $raw : null);
+				if (! is_array($post_fp)) {
+					continue;
+				}
+				if (self::fingerprints_are_same_story($candidate_fp, $post_fp)) {
+					return ['duplicate' => true, 'duplicate_of' => $fp_pid, 'reason' => 'published_ai_fingerprint'];
+				}
+			}
+			// Check against queue items with stored fingerprints (last 24 h).
+			$fp_rows = $wpdb->get_results(
+				"SELECT id, admin_notes
+				FROM {$wpdb->prefix}epv2_queue
+				WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+				  AND state NOT IN ('duplicate','rejected','error')
+				  AND JSON_EXTRACT(admin_notes, '$._system.story_fingerprint') IS NOT NULL
+				ORDER BY created_at DESC
+				LIMIT 30"
+			);
+			foreach ((array) $fp_rows as $fp_row) {
+				if (! ($fp_row instanceof stdClass)) {
+					continue;
+				}
+				$fp_notes = json_decode((string) ($fp_row->admin_notes ?? ''), true);
+				$row_fp   = is_array($fp_notes['_system']['story_fingerprint'] ?? null)
+					? (array) $fp_notes['_system']['story_fingerprint']
+					: null;
+				if (! is_array($row_fp)) {
+					continue;
+				}
+				if (self::fingerprints_are_same_story($candidate_fp, $row_fp)) {
+					return ['duplicate' => true, 'duplicate_of' => (int) $fp_row->id, 'reason' => 'queue_ai_fingerprint'];
+				}
 			}
 		}
 
@@ -425,6 +536,114 @@ final class EPV2_Deduplicator {
 		return $map[$label] ?? sanitize_title($label);
 	}
 
+	// =========================================================================
+	// AI story fingerprint — extraction and comparison
+	// =========================================================================
+
+	/**
+	 * Call a lightweight AI model to extract a structured story fingerprint from
+	 * a news article's title and body. Used for semantic deduplication at ingestion
+	 * time. Returns null on any failure — callers always treat null as "no fingerprint".
+	 */
+	public static function extract_story_fingerprint(string $title, string $content): ?array {
+		$config = EPV2_Settings::get_ai_config();
+		if (empty($config['api_key'])) {
+			return null;
+		}
+		$config['temperature'] = 0.1;
+		$config['max_tokens']  = 150;
+		$config['timeout']     = 10;
+		$snippet = mb_substr(trim(wp_strip_all_tags($title . '. ' . $content)), 0, 500);
+		if ($snippet === '') {
+			return null;
+		}
+		try {
+			$result = EPV2_AI_Client::generate($config, [
+				[
+					'role'    => 'system',
+					'content' => 'Extract a news event fingerprint. Return ONLY valid JSON with exactly these keys: {"type":"<one of: sport_match|sport_violence|sport_transfer|politics|crime|accident|protest|economy|culture|other>","actors":["<entity>"],"location":"<city_or_country>","action":"<key_noun_or_verb>"}. All values lowercase. Max 3 actors. Empty string for unknown values. No markdown, no explanation.',
+				],
+				[
+					'role'    => 'user',
+					'content' => $snippet,
+				],
+			]);
+			$text = trim((string) ($result['text'] ?? ''));
+			// Strip markdown code fences some providers add.
+			$text = (string) preg_replace('/^```(?:json)?\s*/i', '', $text);
+			$text = rtrim((string) preg_replace('/\s*```$/i', '', $text));
+			$fp   = json_decode(trim($text), true);
+			if (! is_array($fp) || ($fp['type'] ?? '') === '') {
+				return null;
+			}
+			return [
+				'type'     => mb_strtolower((string) ($fp['type'] ?? 'other')),
+				'actors'   => array_values(array_slice(array_filter(array_map('strval', (array) ($fp['actors'] ?? []))), 0, 3)),
+				'location' => mb_strtolower(trim((string) ($fp['location'] ?? ''))),
+				'action'   => mb_strtolower(trim((string) ($fp['action'] ?? ''))),
+			];
+		} catch (\Throwable $e) {
+			return null;
+		}
+	}
+
+	/**
+	 * Compare two story fingerprints. Returns true when both fingerprints describe
+	 * the same real-world event. Uses conservative rules to avoid false positives.
+	 */
+	private static function fingerprints_are_same_story(array $fp1, array $fp2): bool {
+		$t1 = $fp1['type'] ?? '';
+		$t2 = $fp2['type'] ?? '';
+		// Both must carry a specific type and they must match.
+		if ($t1 === '' || $t2 === '' || $t1 === 'other' || $t2 === 'other' || $t1 !== $t2) {
+			return false;
+		}
+		// Normalise actors to lowercase.
+		$a1 = array_filter(array_map('mb_strtolower', (array) ($fp1['actors'] ?? [])));
+		$a2 = array_filter(array_map('mb_strtolower', (array) ($fp2['actors'] ?? [])));
+		// Actor overlap: names match when one string contains the other (handles
+		// abbreviations like "FCN" vs "1. FC Nürnberg").
+		$actor_overlap = 0;
+		foreach ($a1 as $x) {
+			foreach ($a2 as $y) {
+				if (
+					$x === $y
+					|| (mb_strlen($x) >= 4 && mb_strlen($y) >= 4 && (str_contains($x, $y) || str_contains($y, $x)))
+				) {
+					$actor_overlap++;
+					break;
+				}
+			}
+		}
+		// Location match (partial containment for "Munich" vs "München area").
+		$loc1      = $fp1['location'] ?? '';
+		$loc2      = $fp2['location'] ?? '';
+		$loc_match = $loc1 !== '' && $loc2 !== '' && (
+			$loc1 === $loc2 || str_contains($loc1, $loc2) || str_contains($loc2, $loc1)
+		);
+		// Action similarity — also handles German compound words (suffix match).
+		$act1         = $fp1['action'] ?? '';
+		$act2         = $fp2['action'] ?? '';
+		$action_close = $act1 !== '' && $act2 !== '' && (
+			$act1 === $act2
+			|| (mb_strlen($act1) >= 4 && str_ends_with($act2, $act1))
+			|| (mb_strlen($act2) >= 4 && str_ends_with($act1, $act2))
+		);
+		// Decision rules (most → least strict):
+		if ($actor_overlap >= 2) {
+			return true; // 2+ shared actors → strong match
+		}
+		if ($actor_overlap >= 1 && ($loc_match || $action_close)) {
+			return true; // 1 actor + location or action → medium match
+		}
+		if ($loc_match && $action_close) {
+			return true; // same place + same action, no named actors → cautious match
+		}
+		return false;
+	}
+
+	// =========================================================================
+
 	private static function titles_are_semantically_close(string $left, string $right): bool {
 		$sports_left = self::sports_event_key($left);
 		$sports_right = self::sports_event_key($right);
@@ -438,6 +657,33 @@ final class EPV2_Deduplicator {
 		}
 		$overlap = count(array_intersect($left_tokens, $right_tokens));
 		$minimum = max(2, (int) ceil(min(count($left_tokens), count($right_tokens)) * 0.45));
+		// German compound word suffix matching: 'massenschlägerei' contains 'schlägerei',
+		// so if one token (len >= 6) is a suffix of a longer token, count it as overlap.
+		if ($overlap < $minimum) {
+			$compound_matched_left  = [];
+			$compound_matched_right = [];
+			foreach ($left_tokens as $lt) {
+				if (isset($compound_matched_left[$lt])) {
+					continue;
+				}
+				foreach ($right_tokens as $rt) {
+					if ($lt === $rt || isset($compound_matched_right[$rt])) {
+						continue;
+					}
+					$lt_len = mb_strlen($lt);
+					$rt_len = mb_strlen($rt);
+					if (
+						($lt_len > $rt_len && $rt_len >= 6 && str_ends_with($lt, $rt)) ||
+						($rt_len > $lt_len && $lt_len >= 6 && str_ends_with($rt, $lt))
+					) {
+						$overlap++;
+						$compound_matched_left[$lt]  = true;
+						$compound_matched_right[$rt] = true;
+						break;
+					}
+				}
+			}
+		}
 		return $overlap >= $minimum;
 	}
 

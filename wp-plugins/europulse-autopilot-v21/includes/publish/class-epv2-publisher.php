@@ -33,9 +33,9 @@ final class EPV2_Publisher {
 		$run_payload = [
 			'result' => 'started',
 		];
-		try {
+			try {
 				$run_payload['promoted_ready_like_rows'] = 0;
-				$item = EPV2_Queue::next_due_item_for_publish_fast($force);
+				$item = EPV2_Queue::next_due_item_for_publish_fast(false);
 			if (! $item) {
 				$run_payload['result'] = 'no_due_items';
 			} else {
@@ -90,7 +90,7 @@ final class EPV2_Publisher {
 								'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 							]);
 						} else {
-							EPV2_Resilience_Manager::schedule_retry($item, 'retry_process', 'publish_media', $e->getMessage());
+							EPV2_Resilience_Manager::schedule_retry($item, 'retry_process', 'process', $e->getMessage());
 						}
 						EPV2_Jobs::enqueue_process();
 						$run_payload['result'] = 'media_blocker_sent_to_repair';
@@ -194,12 +194,10 @@ final class EPV2_Publisher {
 			try {
 				$payload = EPV2_Review::ensure_payload($item);
 				$payload = EPV2_AI_Processor::try_lift_payload_to_publish_grade($item, $payload);
-				if (EPV2_AI_Processor::payload_is_terminal_publish_ready($payload)) {
+				if (EPV2_AI_Processor::transition_item_to_ready_publish((int) $item->id, $payload, [
+					'error_message' => '',
+				])) {
 					EPV2_Review::save_payload((int) $item->id, $payload);
-					EPV2_Queue::mark_state((int) $item->id, 'ready_publish', [
-						'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
-						'error_message' => '',
-					]);
 				}
 			} catch (Throwable $e) {
 				EPV2_Logger::warning('publish', 'Review promotion failed', [
@@ -339,6 +337,7 @@ final class EPV2_Publisher {
 						$fallback_media = is_array($fallback_check['media'] ?? null) ? $fallback_check['media'] : [];
 						if (($fallback_media['type'] ?? 'image') === 'image' && ! empty($fallback_media['attachment_id']) && ! empty($fallback_media['usable'])) {
 							set_post_thumbnail($post_id, (int) $fallback_media['attachment_id']);
+							$media_url = $fallback_media_url;
 						}
 					}
 				}
@@ -352,10 +351,19 @@ final class EPV2_Publisher {
 					self::update_post_meta_if_changed($post_id, '_epv2_featured_media_fingerprint', EPV2_Media::attachment_fingerprint($thumb_id, $remote));
 				}
 				$log_step('language_media_applied', ['lang' => (string) $lang, 'post_id' => $post_id, 'thumb_id' => $thumb_id]);
-				$media_meta = EPV2_Media::media_metadata($media_url, $lang);
+				$media_meta = EPV2_Media::media_metadata($media_url, $lang, (string) ($lang_payload['title'] ?? $item->original_title));
 				self::update_post_meta_if_changed($post_id, '_epv2_media_origin_url', (string) ($media_meta['origin_url'] ?? ''));
 				self::update_post_meta_if_changed($post_id, '_epv2_media_credit', (string) ($media_meta['credit'] ?? ''));
 				self::update_post_meta_if_changed($post_id, '_epv2_media_caption', (string) ($media_meta['caption'] ?? ''));
+				if (method_exists(EPV2_Media::class, 'media_diagnostics')) {
+					self::update_post_meta_if_changed($post_id, '_epv2_media_diagnostics', wp_json_encode(EPV2_Media::media_diagnostics(
+						$media_url,
+						(string) ($lang_payload['title'] ?? $item->original_title),
+						(string) ($lang_payload['excerpt'] ?? ''),
+						$categories,
+						$sourceDossier
+					), JSON_UNESCAPED_UNICODE));
+				}
 		}
 		$log_step('language_loop_complete', ['post_count' => count($post_ids)]);
 
@@ -579,10 +587,19 @@ final class EPV2_Publisher {
 					set_post_thumbnail($post_id, (int) $media['attachment_id']);
 				}
 			}
-			$media_meta = EPV2_Media::media_metadata($media_url, (string) $lang);
+			$media_meta = EPV2_Media::media_metadata($media_url, (string) $lang, $title !== '' ? $title : (string) get_the_title($post_id));
 			self::update_post_meta_if_changed($post_id, '_epv2_media_origin_url', (string) ($media_meta['origin_url'] ?? ''));
 			self::update_post_meta_if_changed($post_id, '_epv2_media_credit', (string) ($media_meta['credit'] ?? ''));
 			self::update_post_meta_if_changed($post_id, '_epv2_media_caption', (string) ($media_meta['caption'] ?? ''));
+			if (method_exists(EPV2_Media::class, 'media_diagnostics')) {
+				self::update_post_meta_if_changed($post_id, '_epv2_media_diagnostics', wp_json_encode(EPV2_Media::media_diagnostics(
+					$media_url,
+					$title !== '' ? $title : (string) get_the_title($post_id),
+					$excerpt,
+					$categories,
+					$source_dossier
+				), JSON_UNESCAPED_UNICODE));
+			}
 
 		}
 
@@ -595,7 +612,15 @@ final class EPV2_Publisher {
 	}
 
 	private static function normalize_categories(string $value): array {
-		$parts = array_values(array_filter(array_map('trim', explode(',', $value))));
+		$allowed = array_keys(EPV2_Taxonomy_Map::categories());
+		$parts = array_values(array_filter(array_map(static function ($part): string {
+			$slug = sanitize_text_field(trim((string) $part));
+			if ($slug === '') {
+				return '';
+			}
+			return EPV2_Taxonomy_Map::normalize_slug($slug);
+		}, explode(',', $value))));
+		$parts = array_values(array_filter($parts, static fn(string $slug): bool => in_array($slug, $allowed, true)));
 		$parts = array_values(array_unique($parts));
 		if ($parts === []) {
 			return ['deutschland'];
@@ -676,7 +701,11 @@ final class EPV2_Publisher {
 				$tags[] = sanitize_text_field((string) $category);
 			}
 		}
-		$tags = array_slice(array_values(array_unique(array_filter(array_map('trim', $tags)))), 0, 8);
+		if (class_exists('EPV2_AI_Response_Validator') && method_exists('EPV2_AI_Response_Validator', 'sanitize_tags_for_language')) {
+			$tags = EPV2_AI_Response_Validator::sanitize_tags_for_language($tags, $lang, $categories, 8);
+		} else {
+			$tags = array_slice(array_values(array_unique(array_filter(array_map('trim', $tags)))), 0, 8);
+		}
 		if ($tags !== []) {
 			wp_set_post_tags($post_id, $tags, false);
 		}
@@ -691,7 +720,7 @@ final class EPV2_Publisher {
 		$clean_content = self::inject_inline_media_into_content($clean_content, $inline_media_urls, $lang);
 		$related = '';
 		$body = trim($prefix . "\n\n" . $clean_content . "\n\n" . $related);
-		return EPV2_Compliance::append_source_block($body, $source_url, 'Originalquelle', $lang);
+		return EPV2_Compliance::append_source_block($body, $source_url, '', $lang);
 	}
 
 	private static function inject_inline_media_into_content(string $content, array $inline_media_urls, string $lang): string {
@@ -750,10 +779,15 @@ final class EPV2_Publisher {
 
 	private static function resolve_publish_media_url(array $lang_payload, array $payload, array $categories, string $title, string $excerpt, int $queue_id = 0): string {
 		$media_url = (string) ($lang_payload['media_url'] ?? $payload['featured_media_url'] ?? $payload['media_url'] ?? '');
-		if ($media_url !== '' && ! EPV2_Media::is_fallback_stock_url($media_url)) {
+		$source_dossier = (array) ($payload['_meta']['source_dossier'] ?? []);
+		if (
+			$media_url !== ''
+			&& ! EPV2_Media::is_fallback_stock_url($media_url)
+			&& self::media_candidate_passes_publish_context($media_url, $title, $excerpt, $categories, $source_dossier)
+		) {
 			return $media_url;
 		}
-		return EPV2_Media::resolve_featured_media($title, $excerpt, $categories, $media_url, (array) ($payload['_meta']['source_dossier'] ?? []), $queue_id);
+		return EPV2_Media::resolve_featured_media($title, $excerpt, $categories, $media_url, $source_dossier, $queue_id);
 	}
 
 	private static function resolve_shared_publish_media_url(object $item, array $payload, array $categories, array $source_dossier): string {
@@ -761,9 +795,9 @@ final class EPV2_Publisher {
 		$title = (string) ($de_payload['title'] ?? $item->original_title);
 		$excerpt = (string) ($de_payload['excerpt'] ?? $item->original_excerpt ?? '');
 		$current_media_url = (string) ($de_payload['media_url'] ?? $payload['featured_media_url'] ?? $payload['media_url'] ?? '');
-		if ($current_media_url !== '') {
+		if ($current_media_url !== '' && ! EPV2_Media::is_fallback_stock_url($current_media_url)) {
 			$current_check = EPV2_Media::validate_featured_media($current_media_url, 0, $title);
-			if (! empty($current_check['ok'])) {
+			if (! empty($current_check['ok']) && self::media_candidate_passes_publish_context($current_media_url, $title, $excerpt, $categories, $source_dossier)) {
 				return esc_url_raw($current_media_url);
 			}
 		}
@@ -779,9 +813,9 @@ final class EPV2_Publisher {
 		$de_payload = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
 		$title = (string) ($de_payload['title'] ?? $item->original_title ?? '');
 		$excerpt = (string) ($de_payload['excerpt'] ?? $item->original_excerpt ?? '');
-		if ($media_url !== '') {
+		if ($media_url !== '' && ! EPV2_Media::is_fallback_stock_url($media_url)) {
 			$current_check = EPV2_Media::validate_featured_media($media_url, 0, $title);
-			if (! empty($current_check['ok'])) {
+			if (! empty($current_check['ok']) && self::media_candidate_passes_publish_context($media_url, $title, $excerpt, $categories, $source_dossier)) {
 				return $media_url;
 			}
 		}
@@ -813,6 +847,22 @@ final class EPV2_Publisher {
 		}
 
 		throw new RuntimeException('Нельзя публиковать: у DE-версии не установлено featured image.');
+	}
+
+	private static function media_candidate_passes_publish_context(string $media_url, string $title, string $excerpt, array $categories, array $source_dossier): bool {
+		$media_url = esc_url_raw($media_url);
+		if ($media_url === '') {
+			return false;
+		}
+		if (! EPV2_Media::is_fallback_stock_url($media_url)) {
+			return EPV2_Media::is_relevant_media($media_url, $title, $excerpt, $categories, $source_dossier);
+		}
+		$diagnostics = EPV2_Media::media_diagnostics($media_url, $title, $excerpt, $categories, $source_dossier);
+		$risk_flags = array_map('sanitize_key', (array) ($diagnostics['risk_flags'] ?? []));
+		if (in_array('pexels_blocked_for_high_context_story', $risk_flags, true)) {
+			return false;
+		}
+		return ! empty($diagnostics['fit_pass']);
 	}
 
 	private static function skip_heavy_post_publish_audit(): bool {
@@ -1058,6 +1108,9 @@ final class EPV2_Publisher {
 		if ($item && self::is_stale_item($item, $payload)) {
 			throw new RuntimeException('Нельзя публиковать: новость устарела и потеряла актуальность для ленты.');
 		}
+		if ($item && self::payload_has_unsupported_explicit_event_date($item, $payload)) {
+			throw new RuntimeException('Нельзя публиковать: AI-текст содержит неподтверждённую календарную дату события, которой нет в исходнике.');
+		}
 		$de = $payload['languages']['de'] ?? [];
 		$uk = $payload['languages']['uk'] ?? [];
 		$en = $payload['languages']['en'] ?? [];
@@ -1297,7 +1350,7 @@ final class EPV2_Publisher {
 		$haystack = mb_strtolower(trim(
 			(string) ($item->original_title ?? '') . ' ' .
 			(string) ($item->original_excerpt ?? '') . ' ' .
-			wp_strip_all_tags((string) ($payload['languages']['de']['content'] ?? ''))
+			wp_strip_all_tags((string) ($item->original_content ?? ''))
 		));
 		if (self::has_future_or_active_event_window($haystack)) {
 			return false;
@@ -1317,6 +1370,51 @@ final class EPV2_Publisher {
 				}
 				$eventTs = gmmktime(12, 0, 0, $month, $day, $year > 0 ? $year : $currentYear);
 				if ($eventTs > 0 && (time() - $eventTs) > (36 * HOUR_IN_SECONDS) && preg_match('/\b(wird|soll|startet|beginnt|am)\b/ui', $haystack)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static function payload_has_unsupported_explicit_event_date(object $item, array $payload): bool {
+		$source_text = mb_strtolower(trim(
+			(string) ($item->original_title ?? '') . ' ' .
+			(string) ($item->original_excerpt ?? '') . ' ' .
+			wp_strip_all_tags((string) ($item->original_content ?? ''))
+		));
+		if ($source_text === '') {
+			return false;
+		}
+		$generated_text = mb_strtolower(trim(
+			(string) ($payload['languages']['de']['title'] ?? '') . ' ' .
+			(string) ($payload['languages']['de']['excerpt'] ?? '') . ' ' .
+			wp_strip_all_tags((string) ($payload['languages']['de']['content'] ?? ''))
+		));
+		if ($generated_text === '') {
+			return false;
+		}
+		$source_ts = strtotime((string) ($item->original_date ?? '')) ?: time();
+		$current_year = (int) gmdate('Y');
+		$month_map = [
+			'januar' => 1, 'februar' => 2, 'märz' => 3, 'marz' => 3, 'april' => 4, 'mai' => 5, 'juni' => 6,
+			'juli' => 7, 'august' => 8, 'september' => 9, 'oktober' => 10, 'november' => 11, 'dezember' => 12,
+		];
+		if (preg_match_all('/\b(\d{1,2})\.\s*(januar|februar|m[äa]rz|april|mai|juni|juli|august|september|oktober|november|dezember)\s+(\d{4})\b/ui', $generated_text, $matches, PREG_SET_ORDER)) {
+			foreach ($matches as $match) {
+				$day = (int) ($match[1] ?? 0);
+				$month_label = mb_strtolower((string) ($match[2] ?? ''));
+				$month = $month_map[$month_label] ?? 0;
+				$year = (int) ($match[3] ?? 0);
+				if ($day <= 0 || $month <= 0 || $year <= 0) {
+					continue;
+				}
+				$date_label = mb_strtolower(trim((string) $match[0]));
+				if (str_contains($source_text, $date_label)) {
+					continue;
+				}
+				$event_ts = gmmktime(12, 0, 0, $month, $day, $year);
+				if ($event_ts > 0 && $year < $current_year && $event_ts < ($source_ts - 36 * HOUR_IN_SECONDS)) {
 					return true;
 				}
 			}

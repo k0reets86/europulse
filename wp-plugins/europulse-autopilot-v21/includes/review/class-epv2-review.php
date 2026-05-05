@@ -123,9 +123,9 @@ final class EPV2_Review {
 			$item->state === 'ready_review'
 			&& $mode === 'auto'
 			&& in_array($default_status, ['publish', 'pending'], true)
-			&& EPV2_AI_Processor::payload_is_publish_ready($payload)
+			&& EPV2_AI_Processor::transition_item_to_ready_publish($item_id, $payload)
 		) {
-			EPV2_Queue::mark_state($item_id, 'ready_publish');
+			return;
 		}
 	}
 
@@ -516,7 +516,13 @@ final class EPV2_Review {
 
 	public static function normalize_categories(string $value): array {
 		$allowed = array_keys(EPV2_Taxonomy_Map::categories());
-		$parts = array_values(array_filter(array_map('sanitize_text_field', array_map('trim', explode(',', $value)))));
+		$parts = array_values(array_filter(array_map(static function ($part): string {
+			$slug = sanitize_text_field(trim((string) $part));
+			if ($slug === '') {
+				return '';
+			}
+			return EPV2_Taxonomy_Map::normalize_slug($slug);
+		}, explode(',', $value))));
 		$parts = array_values(array_filter($parts, static fn(string $slug): bool => in_array($slug, $allowed, true)));
 		$parts = array_values(array_unique($parts));
 		if ($parts === []) {

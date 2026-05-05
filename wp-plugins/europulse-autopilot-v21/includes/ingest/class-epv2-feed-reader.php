@@ -11,7 +11,14 @@ final class EPV2_Feed_Reader {
 		}
 
 		include_once ABSPATH . WPINC . '/feed.php';
+		$timeout_filter = static function ($feed): void {
+			if (is_object($feed) && method_exists($feed, 'set_timeout')) {
+				$feed->set_timeout(8);
+			}
+		};
+		add_action('wp_feed_options', $timeout_filter, 10, 1);
 		$feed = fetch_feed($url);
+		remove_action('wp_feed_options', $timeout_filter, 10);
 		if (is_wp_error($feed)) {
 			throw new RuntimeException($feed->get_error_message());
 		}

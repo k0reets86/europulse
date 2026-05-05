@@ -10,15 +10,15 @@ final class EPV2_Budget_Manager {
 		$excerpt = mb_strtolower(wp_strip_all_tags((string) ($item['excerpt'] ?? '')));
 		$content = mb_strtolower(wp_strip_all_tags((string) ($item['content'] ?? '')));
 		$url = (string) ($item['url'] ?? ($source->url ?? ''));
-		$category = (string) ($item['category'] ?? ($source->category_bias ?? ''));
+			$category = self::canonical_category((string) ($item['category'] ?? ($source->category_bias ?? '')));
 		$detected_category = EPV2_Categorizer::detect(
 			(string) ($item['title'] ?? ''),
 			(string) (($item['content'] ?? '') !== '' ? ($item['content'] ?? '') : ($item['excerpt'] ?? '')),
 			$category
 		);
-		if ($detected_category !== '') {
-			$category = $detected_category;
-		}
+			if ($detected_category !== '') {
+				$category = self::canonical_category($detected_category);
+			}
 		$risk = (string) ($source->risk_level ?? 'low');
 		$priority = (int) ($source->priority ?? 5);
 		$reasons = [];
@@ -55,6 +55,25 @@ final class EPV2_Budget_Manager {
 				'strictness' => (string) EPV2_Settings::get('ai_selection_strictness', 'medium'),
 				'budget_mode' => (string) EPV2_Settings::get('ai_budget_mode', 'normal'),
 				'reasons' => ['заведомо нерелевантный, обзорный или редакционно слабый сигнал'],
+				'category' => $category,
+				'risk' => $risk,
+				'priority' => $priority,
+			];
+		}
+
+		$sportFixtureBlock = self::sport_live_fixture_block($title, $excerpt, $content, $category);
+		if ($sportFixtureBlock !== '') {
+			return [
+				'score' => 0,
+				'tier' => 'D',
+				'decision' => 'reject',
+				'reject_class' => 'sport_fixture_livepage',
+				'breaking_candidate' => false,
+				'top_story_candidate' => false,
+				'consensus_mentions' => 0,
+				'strictness' => (string) EPV2_Settings::get('ai_selection_strictness', 'medium'),
+				'budget_mode' => (string) EPV2_Settings::get('ai_budget_mode', 'normal'),
+				'reasons' => [$sportFixtureBlock],
 				'category' => $category,
 				'risk' => $risk,
 				'priority' => $priority,
@@ -161,6 +180,12 @@ final class EPV2_Budget_Manager {
 			$reasons[] = 'слишком мелкий локальный повод';
 		}
 
+		$soft_low_value = self::soft_low_public_value_penalty($title . ' ' . $excerpt . ' ' . $content, $category, $practical, $public_impact, $community_value, $urgency, $editorial_interest);
+		$score += $soft_low_value;
+		if ($soft_low_value <= -8) {
+			$reasons[] = 'мягкий animal/oddity сюжет без достаточной общественной или практической ценности';
+		}
+
 		$old_story = self::old_story_penalty($title . ' ' . $excerpt . ' ' . $content);
 		$score += $old_story;
 		if ($old_story < 0) {
@@ -224,29 +249,28 @@ final class EPV2_Budget_Manager {
 			$editorial_interest,
 			(int) ($consensus['mentions'] ?? 0)
 		);
-		$mix_adjustment = EPV2_Category_Planner::selection_adjustment($category, [
-			'decision' => self::decision_for_score(max(0, min(100, $score)), self::tier_for_score(max(0, min(100, $score)))),
-			'breaking_candidate' => ! empty($breaking_signal['candidate']) || ! empty($breaking_signal['breaking_candidate']),
-			'top_story_candidate' => ! empty($breaking_signal['top_story']) || ! empty($breaking_signal['top_story_candidate']),
-		]);
-		$mix_delta = (int) ($mix_adjustment['delta'] ?? 0);
-		if ($mix_delta !== 0) {
-			$score += $mix_delta;
-			if ($mix_delta > 0) {
-				$reasons[] = 'рубрика недопредставлена в последние сутки, материал получил мягкий приоритет';
-			} else {
-				$reasons[] = 'рубрика уже перепредставлена в коротком окне, материал получил мягкое понижение';
+			$score = max(0, min(100, $score));
+			$preliminary_tier = self::tier_for_score($score, $category);
+			$mix_adjustment = EPV2_Category_Planner::selection_adjustment($category, [
+				'decision' => self::decision_for_score($score, $preliminary_tier, $category),
+				'breaking_candidate' => ! empty($breaking_signal['candidate']) || ! empty($breaking_signal['breaking_candidate']),
+				'top_story_candidate' => ! empty($breaking_signal['top_story']) || ! empty($breaking_signal['top_story_candidate']),
+			]);
+			$dynamic_threshold_delta = (int) ($mix_adjustment['delta'] ?? 0);
+			if ($dynamic_threshold_delta !== 0) {
+				$reasons[] = $dynamic_threshold_delta < 0
+					? 'рубрика недопредставлена: порог прохода мягко снижен без искусственного повышения score'
+					: 'рубрика перепредставлена: порог прохода мягко повышен без обнуления редакционной оценки';
 			}
-		}
-		$score = max(0, min(100, $score));
-		$tier = self::tier_for_score($score);
-		$flags = self::flags_for_score($score, $urgency, $consensus['mentions'], $category, $risk, $url, $breaking_signal);
-		$decision = self::decision_for_score($score, $tier);
+			$tier = self::tier_for_score($score, $category);
+			$flags = self::flags_for_score($score, $urgency, $consensus['mentions'], $category, $risk, $url, $breaking_signal);
+			$decision = self::decision_for_score($score, $tier, $category, $mix_adjustment);
+			$scorecard = self::category_scorecard($category);
 
-		return [
-			'score' => $score,
-			'tier' => $tier,
-			'decision' => $decision,
+			return [
+				'score' => $score,
+				'tier' => $tier,
+				'decision' => $decision,
 			'reject_class' => $decision === 'reject' ? 'low_score' : '',
 			'breaking_candidate' => $flags['breaking_candidate'],
 			'breaking_watch' => $flags['breaking_watch'],
@@ -255,12 +279,24 @@ final class EPV2_Budget_Manager {
 			'consensus_mentions' => $consensus['mentions'],
 			'strictness' => (string) EPV2_Settings::get('ai_selection_strictness', 'medium'),
 			'budget_mode' => (string) EPV2_Settings::get('ai_budget_mode', 'normal'),
-			'reasons' => array_values(array_unique($reasons)),
-			'category' => $category,
-			'risk' => $risk,
-			'priority' => $priority,
-		];
-	}
+				'reasons' => array_values(array_unique($reasons)),
+				'category' => $category,
+				'risk' => $risk,
+				'priority' => $priority,
+				'scorecard' => [
+					'a' => (int) $scorecard['a'],
+					'b' => (int) $scorecard['b'],
+					'c' => (int) $scorecard['c'],
+					'publish_c' => (int) $scorecard['publish_c'],
+					'dimensions' => (array) $scorecard['dimensions'],
+				],
+				'dynamic_threshold' => [
+					'delta' => $dynamic_threshold_delta,
+					'reason' => (string) ($mix_adjustment['reason'] ?? ''),
+					'stats' => (array) ($mix_adjustment['stats'] ?? []),
+				],
+			];
+		}
 
 	public static function analyze_contextual(array $item, array $dossier = [], array $seed = []): array {
 		$primary = is_array($dossier['primary'] ?? null) ? $dossier['primary'] : [];
@@ -275,7 +311,7 @@ final class EPV2_Budget_Manager {
 			implode('. ', array_map('strval', (array) ($event['fact_snippets'] ?? []))),
 		])));
 		$body_detect = $body_focus !== '' ? $body_focus : ($content !== '' ? $content : $excerpt);
-		$seed_category = (string) ($seed['category'] ?? ($item['category'] ?? ''));
+			$seed_category = self::canonical_category((string) ($seed['category'] ?? ($item['category'] ?? '')));
 		$detected_category = EPV2_Categorizer::detect('', $body_detect, $seed_category);
 		$refined_category = EPV2_Categorizer::refine_with_event_context(
 			$detected_category !== '' ? $detected_category : $seed_category,
@@ -290,12 +326,12 @@ final class EPV2_Budget_Manager {
 			'url' => (string) ($primary['url'] ?? ($item['url'] ?? '')),
 			'date' => (string) ($item['date'] ?? ''),
 			'image' => (string) ($item['image'] ?? ''),
-			'category' => $refined_category !== '' ? $refined_category : $seed_category,
-		]);
+				'category' => $refined_category !== '' ? self::canonical_category($refined_category) : $seed_category,
+			]);
 
 		$analysis['mode'] = 'contextual';
 		$analysis['body_detected_category'] = $detected_category;
-		$analysis['category'] = $refined_category !== '' ? $refined_category : (string) ($analysis['category'] ?? $seed_category);
+			$analysis['category'] = self::canonical_category($refined_category !== '' ? $refined_category : (string) ($analysis['category'] ?? $seed_category));
 		$analysis['supporting_count'] = count((array) ($dossier['supporting'] ?? []));
 		$analysis['event_kind'] = sanitize_key((string) ($event['kind'] ?? ''));
 		$analysis['search_terms'] = array_values(array_slice(array_unique(array_filter(array_map('sanitize_text_field', (array) ($story['search_terms'] ?? [])))), 0, 6));
@@ -343,9 +379,9 @@ final class EPV2_Budget_Manager {
 			$analysis['reasons'][] = 'контекст достаточно содержательный для автоматического усиления, а не для мгновенного отклонения';
 		}
 
-		$analysis['tier'] = self::tier_for_score((int) ($analysis['score'] ?? 0));
-		$analysis['decision'] = self::decision_for_score((int) ($analysis['score'] ?? 0), (string) ($analysis['tier'] ?? 'D'));
-		$analysis['reasons'] = array_values(array_unique(array_filter(array_map('strval', (array) ($analysis['reasons'] ?? [])))));
+			$analysis['tier'] = self::tier_for_score((int) ($analysis['score'] ?? 0), (string) ($analysis['category'] ?? ''));
+			$analysis['decision'] = self::decision_for_score((int) ($analysis['score'] ?? 0), (string) ($analysis['tier'] ?? 'D'), (string) ($analysis['category'] ?? ''));
+			$analysis['reasons'] = array_values(array_unique(array_filter(array_map('strval', (array) ($analysis['reasons'] ?? [])))));
 
 		return $analysis;
 	}
@@ -356,14 +392,9 @@ final class EPV2_Budget_Manager {
 		$threshold = self::score_threshold($mode, $strictness);
 		$score = (int) ($analysis['score'] ?? 0);
 		$tier = (string) ($analysis['tier'] ?? 'D');
-		$category = (string) ($analysis['category'] ?? '');
-		$budget = self::budget_state();
-		if (in_array($category, ['sport', 'kultur', 'community', 'wirtschaft', 'world'], true) && $score >= max(24, $threshold['ai'] - 8) && $tier !== 'D') {
-			$threshold['ai'] = max(24, $threshold['ai'] - 8);
-		}
-		if ($category === 'leben-in-deutschland' && $score >= max(22, $threshold['ai'] - 10) && $tier !== 'D') {
-			$threshold['ai'] = max(22, $threshold['ai'] - 10);
-		}
+			$category = self::canonical_category((string) ($analysis['category'] ?? ''));
+			$budget = self::budget_state();
+			$threshold = self::apply_category_ai_threshold($threshold, $category, $tier);
 
 		if ($score < $threshold['reject']) {
 			return ['allow' => false, 'mode' => 'reject', 'reason' => 'низкий рейтинг материала'];
@@ -396,14 +427,9 @@ final class EPV2_Budget_Manager {
 		$mode = (string) EPV2_Settings::get('ai_budget_mode', 'normal');
 		$score = (int) ($analysis['score'] ?? 0);
 		$tier = (string) ($analysis['tier'] ?? 'D');
-		$category = (string) ($analysis['category'] ?? '');
-		$threshold = self::queue_keep_threshold($mode, $strictness);
-		if (in_array($category, ['sport', 'kultur', 'community', 'wirtschaft', 'world'], true)) {
-			$threshold = max(22, $threshold - 8);
-		}
-		if ($category === 'leben-in-deutschland') {
-			$threshold = max(20, $threshold - 10);
-		}
+			$category = self::canonical_category((string) ($analysis['category'] ?? ''));
+			$threshold = self::queue_keep_threshold($mode, $strictness);
+			$threshold = self::apply_category_queue_threshold($threshold, $category);
 
 		if ($tier === 'A') {
 			return ['keep' => true, 'reason' => 'tier A всегда остаётся в очереди'];
@@ -451,18 +477,74 @@ final class EPV2_Budget_Manager {
 		return $matrix[$mode][$strictness] ?? 42;
 	}
 
+	private static function canonical_category(string $category): string {
+		$category = sanitize_text_field($category);
+		if (class_exists('EPV2_Taxonomy_Map') && method_exists('EPV2_Taxonomy_Map', 'normalize_slug')) {
+			return EPV2_Taxonomy_Map::normalize_slug($category);
+		}
+		return match (sanitize_title($category)) {
+			'world' => 'welt',
+			'münchen', 'munchen', 'munich' => 'muenchen',
+			default => sanitize_title($category),
+		};
+	}
+
+	private static function category_scorecard(string $category): array {
+		$category = self::canonical_category($category);
+		$base = [
+			'a' => 70,
+			'b' => 52,
+			'c' => 34,
+			'publish_c' => 40,
+			'ai_delta' => 0,
+			'queue_delta' => 0,
+			'dimensions' => ['importance', 'informativeness', 'freshness', 'source_confidence'],
+		];
+		$cards = [
+			'politik' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'source_confidence', 'timeliness', 'informativeness']],
+			'welt' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'international_relevance', 'source_confidence', 'timeliness']],
+			'ukraine' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['war_relevance', 'human_impact', 'source_confidence', 'timeliness']],
+			'europa' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'policy_relevance', 'source_confidence']],
+			'deutschland' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'reader_relevance', 'informativeness']],
+			'wirtschaft' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'ai_delta' => -2, 'queue_delta' => -2, 'dimensions' => ['economic_impact', 'reader_relevance', 'informativeness']],
+			'leben-in-deutschland' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -6, 'queue_delta' => -6, 'dimensions' => ['practical_value', 'reader_relevance', 'source_confidence', 'service_life']],
+			'community' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -6, 'queue_delta' => -6, 'dimensions' => ['community_value', 'reader_relevance', 'practical_value', 'local_fit']],
+			'muenchen' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -4, 'queue_delta' => -4, 'dimensions' => ['local_relevance', 'reader_relevance', 'informativeness', 'freshness']],
+			'bayern' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -4, 'queue_delta' => -4, 'dimensions' => ['regional_relevance', 'reader_relevance', 'informativeness', 'freshness']],
+			'kultur' => ['a' => 66, 'b' => 48, 'c' => 34, 'publish_c' => 40, 'ai_delta' => -4, 'queue_delta' => -4, 'dimensions' => ['editorial_interest', 'cultural_relevance', 'informativeness', 'freshness']],
+			'sport' => ['a' => 66, 'b' => 50, 'c' => 34, 'publish_c' => 41, 'ai_delta' => -3, 'queue_delta' => -3, 'dimensions' => ['editorial_interest', 'event_relevance', 'diversity', 'freshness']],
+		];
+		return array_merge($base, is_array($cards[$category] ?? null) ? $cards[$category] : []);
+	}
+
+	private static function apply_category_ai_threshold(array $threshold, string $category, string $tier): array {
+		if ($tier === 'D') {
+			return $threshold;
+		}
+		$card = self::category_scorecard($category);
+		$threshold['ai'] = max(20, (int) ($threshold['ai'] ?? 32) + (int) ($card['ai_delta'] ?? 0));
+		$threshold['reject'] = max(8, (int) ($threshold['reject'] ?? 14) + min(0, (int) ($card['queue_delta'] ?? 0)));
+		return $threshold;
+	}
+
+	private static function apply_category_queue_threshold(int $threshold, string $category): int {
+		$card = self::category_scorecard($category);
+		return max(18, $threshold + (int) ($card['queue_delta'] ?? 0));
+	}
+
 	private static function category_weight(string $category): int {
+		$category = self::canonical_category($category);
 		$weights = [
 			'politik' => 14,
 			'wirtschaft' => 12,
 			'deutschland' => 12,
 			'leben-in-deutschland' => 13,
 			'bayern' => 11,
-			'münchen' => 11,
+			'muenchen' => 11,
 			'ukraine' => 12,
 			'europa' => 10,
 			'community' => 11,
-			'world' => 11,
+			'welt' => 11,
 			'kultur' => 10,
 			'sport' => 10,
 		];
@@ -722,6 +804,7 @@ final class EPV2_Budget_Manager {
 	}
 
 	private static function public_impact_weight(string $text, string $category): int {
+		$category = self::canonical_category($category);
 		$terms = [
 			'gesetz', 'reform', 'abstimmung', 'beschluss', 'wahl', 'sanktionen', 'inflation', 'kraftstoff', 'miete',
 			'arbeitsmarkt', 'arbeitslosigkeit', 'wohnungsmarkt', 'streik', 'ausfall', 'kürzung', 'förderung', 'hilfe',
@@ -740,17 +823,18 @@ final class EPV2_Budget_Manager {
 				$weight += 2;
 			}
 		}
-		if (in_array($category, ['politik', 'wirtschaft', 'deutschland', 'ukraine', 'europa', 'world'], true) && $weight > 0) {
+		if (in_array($category, ['politik', 'wirtschaft', 'deutschland', 'ukraine', 'europa', 'welt'], true) && $weight > 0) {
 			$weight += 2;
 		}
-		if (in_array($category, ['münchen', 'bayern', 'leben-in-deutschland'], true) && $weight > 0) {
+		if (in_array($category, ['muenchen', 'bayern', 'leben-in-deutschland'], true) && $weight > 0) {
 			$weight += 1;
 		}
 		return min(16, $weight);
 	}
 
 	private static function community_event_weight(string $text, string $category): int {
-		if (! in_array($category, ['community', 'kultur', 'münchen', 'leben-in-deutschland'], true)) {
+		$category = self::canonical_category($category);
+		if (! in_array($category, ['community', 'kultur', 'muenchen', 'leben-in-deutschland'], true)) {
 			return 0;
 		}
 		$positive = [
@@ -786,7 +870,32 @@ final class EPV2_Budget_Manager {
 	}
 
 	private static function editorial_interest_weight(string $text, string $category): int {
+		$category = self::canonical_category($category);
 		$terms = match ($category) {
+			'politik' => [
+				'bundestag', 'bundesrat', 'kanzler', 'regierung', 'minister', 'wahl', 'koalition',
+				'gesetz', 'reform', 'haushalt', 'migration', 'parlament', 'abstimmung',
+			],
+			'welt' => [
+				'uno', 'un ', 'nato', 'eu ', 'usa', 'china', 'iran', 'nahost', 'gaza',
+				'konflikt', 'sanktionen', 'wahl', 'regierung', 'diplomatie',
+			],
+			'ukraine' => [
+				'ukraine', 'ukrain', 'kyiv', 'kiew', 'russland', 'russisch', 'drohne',
+				'front', 'besetzt', 'sanktionen', 'angriff', 'krieg',
+			],
+			'wirtschaft' => [
+				'unternehmen', 'tarif', 'inflation', 'preise', 'energie', 'arbeitsmarkt',
+				'investition', 'industrie', 'handel', 'konzern', 'verbraucher',
+			],
+			'deutschland' => [
+				'gericht', 'polizei', 'gesundheit', 'schule', 'migration', 'wahl',
+				'gesetz', 'reform', 'verkehr', 'sicherheit', 'verbraucher',
+			],
+			'bayern', 'muenchen' => [
+				'bayern', 'münchen', 'muenchen', 'landtag', 'stadt', 'polizei', 'verkehr',
+				'wohnung', 'miete', 'schule', 'integration', 'migration', 'bürger',
+			],
 			'sport' => [
 				'bundesliga', 'champions league', 'dfb', 'fc bayern', 'spiel', 'match', 'tor', 'trainer',
 				'sieg', 'niederlage', 'unentschieden', 'verein', 'transfer', 'stadion', 'sportschau',
@@ -853,7 +962,8 @@ final class EPV2_Budget_Manager {
 	}
 
 	private static function trivial_local_weight(string $text, string $category): int {
-		if (! in_array($category, ['münchen', 'bayern', 'community', 'deutschland'], true)) {
+		$category = self::canonical_category($category);
+		if (! in_array($category, ['muenchen', 'bayern', 'community', 'deutschland'], true)) {
 			return 0;
 		}
 		$terms = [
@@ -887,12 +997,7 @@ final class EPV2_Budget_Manager {
 		if ($title === '') {
 			return ['mentions' => 0, 'weight' => 0];
 		}
-		$like = '%' . $wpdb->esc_like(mb_substr($title, 0, 48)) . '%';
-		$table = $wpdb->prefix . 'epv2_queue';
-		$mentions = (int) $wpdb->get_var($wpdb->prepare(
-			"SELECT COUNT(DISTINCT source_id) FROM {$table} WHERE original_title LIKE %s AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)",
-			$like
-		));
+		$mentions = self::recent_title_source_mentions(mb_substr($title, 0, 48), DAY_IN_SECONDS);
 		$weight = match (true) {
 			$mentions >= 5 => 16,
 			$mentions >= 3 => 10,
@@ -902,25 +1007,66 @@ final class EPV2_Budget_Manager {
 		return ['mentions' => $mentions, 'weight' => $weight];
 	}
 
+	private static function recent_title_source_mentions(string $needle, int $window_seconds): int {
+		global $wpdb;
+		$needle = trim(mb_strtolower($needle));
+		if ($needle === '') {
+			return 0;
+		}
+		static $cache = [];
+		$cache_key = md5($needle . '|' . $window_seconds);
+		if (array_key_exists($cache_key, $cache)) {
+			return (int) $cache[$cache_key];
+		}
+		$table = $wpdb->prefix . 'epv2_queue';
+		$max_id = (int) $wpdb->get_var("SELECT MAX(id) FROM {$table}");
+		if ($max_id <= 0) {
+			return 0;
+		}
+		$min_id = max(0, $max_id - 1500);
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT source_id, original_title, created_at FROM {$table} WHERE id >= %d ORDER BY id DESC LIMIT 400",
+			$min_id
+		));
+		$cutoff = time() - max(60, $window_seconds);
+		$sources = [];
+		foreach ((array) $rows as $row) {
+			$created = strtotime((string) ($row->created_at ?? ''));
+			if ($created && $created < $cutoff) {
+				continue;
+			}
+			$row_title = self::normalize_title((string) ($row->original_title ?? ''));
+			if ($row_title === '' || ! str_contains($row_title, $needle)) {
+				continue;
+			}
+			$source_id = (int) ($row->source_id ?? 0);
+			$sources[$source_id > 0 ? (string) $source_id : md5($row_title)] = true;
+		}
+		$cache[$cache_key] = count($sources);
+		return (int) $cache[$cache_key];
+	}
+
 	private static function normalize_title(string $title): string {
 		$title = mb_strtolower(trim(wp_strip_all_tags($title)));
 		$title = preg_replace('/\s+/u', ' ', $title) ?: $title;
 		return $title;
 	}
 
-	private static function tier_for_score(int $score): string {
+	private static function tier_for_score(int $score, string $category = ''): string {
+		$card = self::category_scorecard($category);
 		return match (true) {
-			$score >= 70 => 'A',
-			$score >= 52 => 'B',
-			$score >= 34 => 'C',
+			$score >= (int) $card['a'] => 'A',
+			$score >= (int) $card['b'] => 'B',
+			$score >= (int) $card['c'] => 'C',
 			default => 'D',
 		};
 	}
 
 	private static function flags_for_score(int $score, int $urgency, int $mentions, string $category, string $risk, string $url, array $breaking_signal = []): array {
+		$category = self::canonical_category($category);
 		$breaking = ($score >= 72 && $urgency >= 10 && $mentions >= 2 && $risk !== 'high') || ! empty($breaking_signal['breaking']);
 		$watch = ! empty($breaking_signal['watch']) || $breaking;
-		$top = $score >= 64 && in_array($category, ['politik', 'wirtschaft', 'deutschland', 'ukraine', 'europa', 'world'], true);
+		$top = $score >= 64 && in_array($category, ['politik', 'wirtschaft', 'deutschland', 'ukraine', 'europa', 'welt'], true);
 		if (self::looks_official($url) && $urgency >= 8 && $mentions >= 2) {
 			$breaking = true;
 			$watch = true;
@@ -944,11 +1090,14 @@ final class EPV2_Budget_Manager {
 		return false;
 	}
 
-	private static function decision_for_score(int $score, string $tier): string {
+	private static function decision_for_score(int $score, string $tier, string $category = '', array $threshold_context = []): string {
+		$card = self::category_scorecard($category);
+		$dynamic_delta = (int) ($threshold_context['delta'] ?? 0);
+		$publish_c = max((int) $card['c'], min(((int) $card['b']) - 1, ((int) $card['publish_c']) + $dynamic_delta));
 		return match ($tier) {
 			'A' => 'priority',
 			'B' => 'strong',
-			'C' => $score >= 40 ? 'review' : 'low',
+			'C' => $score >= $publish_c ? 'review' : 'low',
 			default => 'reject',
 		};
 	}
@@ -969,7 +1118,8 @@ final class EPV2_Budget_Manager {
 			return $score;
 		}
 
-		$seriousCategories = ['politik', 'wirtschaft', 'world', 'ukraine', 'europa', 'leben-in-deutschland', 'sport', 'kultur', 'community', 'deutschland'];
+		$category = self::canonical_category($category);
+		$seriousCategories = ['politik', 'wirtschaft', 'welt', 'ukraine', 'europa', 'leben-in-deutschland', 'sport', 'kultur', 'community', 'deutschland', 'bayern', 'muenchen'];
 		if (! in_array($category, $seriousCategories, true)) {
 			return $score;
 		}
@@ -992,6 +1142,26 @@ final class EPV2_Budget_Manager {
 		}
 
 		return max($score, 40);
+	}
+
+	private static function soft_low_public_value_penalty(string $text, string $category, int $practical, int $publicImpact, int $communityValue, int $urgency, int $editorialInterest): int {
+		$category = self::canonical_category($category);
+		if (! in_array($category, ['deutschland', 'bayern', 'muenchen', 'welt', 'sport'], true)) {
+			return 0;
+		}
+		if ($publicImpact >= 8 || $practical >= 8 || $communityValue >= 8 || $urgency >= 8 || $editorialInterest >= 6) {
+			return 0;
+		}
+
+		$text = mb_strtolower(wp_strip_all_tags($text));
+		$animalSoftSignal = preg_match('/\b(wal|wale|delfin|delfine|robbe|robben|hund|hunde|katze|katzen|tierbaby|zoo|tierpark|pudelwohl)\b/u', $text) === 1
+			&& preg_match('/\b(rettung|gerettet|befreit|gefunden|transport|pudelwohl|süß|suess|niedlich)\b/u', $text) === 1;
+		if (! $animalSoftSignal) {
+			return 0;
+		}
+
+		$publicValueSignal = preg_match('/\b(artenschutz|naturschutz|umwelt|klima|havarie|öl|oel|seuche|vogelgrippe|behörde|behoerde|polizei|verletzte|gesetz|gericht|verbot|warnung|gefahr|evakuierung)\b/u', $text) === 1;
+		return $publicValueSignal ? 0 : -12;
 	}
 
 	private static function looks_like_soft_tabloid_or_evergreen(string $text): bool {
@@ -1062,6 +1232,7 @@ final class EPV2_Budget_Manager {
 	}
 
 	private static function has_rescue_signal(string $text, string $category): bool {
+		$category = self::canonical_category($category);
 		$signals = [
 			'jobsuche', 'bewerbung', 'beratung', 'sprachkurs', 'deutschkurs', 'jobcenter', 'integration',
 			'psycholog', 'netzwerk', 'community event', 'freiwilligen', 'kostenlos', 'anmeldung',
@@ -1089,6 +1260,7 @@ final class EPV2_Budget_Manager {
 	}
 
 	private static function looks_like_hard_reject(string $title, string $excerpt, string $content, string $category): bool {
+		$category = self::canonical_category($category);
 		$headline = trim($title . ' ' . $excerpt . ' ' . mb_substr($content, 0, 300));
 		$normalized_title = trim(mb_strtolower(wp_strip_all_tags($title)));
 		$body_plain = trim(mb_strtolower(wp_strip_all_tags($excerpt . ' ' . $content)));
@@ -1134,10 +1306,39 @@ final class EPV2_Budget_Manager {
 				return true;
 			}
 		}
-		if ($category === 'münchen' && preg_match('/übersicht|mehr erfahren/u', $headline)) {
-			return true;
-		}
+			if ($category === 'muenchen' && preg_match('/übersicht|mehr erfahren/u', $headline)) {
+				return true;
+			}
 		return false;
+	}
+
+	private static function sport_live_fixture_block(string $title, string $excerpt, string $content, string $category): string {
+		$category = self::canonical_category($category);
+		if ($category !== 'sport') {
+			return '';
+		}
+
+		$text = trim(mb_strtolower(wp_strip_all_tags($title . ' ' . $excerpt . ' ' . mb_substr($content, 0, 500))));
+		if ($text === '') {
+			return '';
+		}
+
+		$fixtureSignal = preg_match('/\b(livereportage|liveticker|live[-\s]?ticker|liveblog|tv und stream|übertragung|uebertragung|wo läuft|wo laeuft|anpfiff|heute[, ]+\d{1,2}(?::\d{2})?\s*uhr)\b/u', $text) === 1;
+		if (! $fixtureSignal) {
+			return '';
+		}
+
+		$sportSignal = preg_match('/\b(fc bayern|paris saint-germain|psg|bundesliga|champions league|europa league|conference league|dfb|uefa|spiel|match|halbfinale|viertelfinale|achtelfinale|rückspiel|hinspiel)\b/u', $text) === 1;
+		if (! $sportSignal) {
+			return '';
+		}
+
+		$actualNewsSignal = preg_match('/\b(gewann|verlor|sieg|niederlage|finale erreicht|ausgeschieden|verletz|transfer|entlassen|rücktritt|urteil|ermittlung|skandal|strafe|rekord|entscheidung|beschlossen)\b/u', $text) === 1;
+		if ($actualNewsSignal) {
+			return '';
+		}
+
+		return 'низкоценная спортивная live/fixture страница без самостоятельного новостного результата';
 	}
 
 	private static function telegram_community_promo_block(string $title, string $excerpt, string $content, string $url, string $category): string {
@@ -1148,7 +1349,7 @@ final class EPV2_Budget_Manager {
 			return '';
 		}
 
-		$category = sanitize_key($category);
+			$category = self::canonical_category($category);
 		if (! in_array($category, ['community', 'leben-in-deutschland'], true)) {
 			return '';
 		}
@@ -1187,13 +1388,24 @@ final class EPV2_Budget_Manager {
 
 	private static function old_story_penalty(string $text): int {
 		$currentYear = (int) gmdate('Y');
+		$old_years = 0;
 		if (preg_match_all('/\b(20\d{2})\b/u', $text, $matches)) {
 			foreach ((array) ($matches[1] ?? []) as $year) {
 				$year = (int) $year;
 				if ($year > 2000 && $year < ($currentYear - 1)) {
-					return -12;
+					$old_years++;
 				}
 			}
+		}
+		if ($old_years === 0) {
+			return 0;
+		}
+		$archive_context = preg_match('/\b(archiv|rückblick|rueckblick|historisch|damals|vor \d+ jahren|jahrestag|chronik|wiederholung|best of)\b/u', $text) === 1;
+		if ($archive_context) {
+			return -10;
+		}
+		if ($old_years >= 3 && preg_match('/\b(heute|aktuell|neue|neuer|beschluss|urteil|prozess|wahl|angriff|reform|gesetz)\b/u', $text) !== 1) {
+			return -5;
 		}
 		return 0;
 	}

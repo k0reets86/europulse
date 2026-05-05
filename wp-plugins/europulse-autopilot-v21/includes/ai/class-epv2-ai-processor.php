@@ -96,12 +96,11 @@ final class EPV2_AI_Processor {
 					$stored_pipeline_stage = self::payload_pipeline_stage($existing_payload);
 					$payload_for_stage = $existing_payload !== [] ? self::normalize_existing_payload($existing_payload, false) : [];
 					self::log_process_item_step('after_normalize_existing_payload', (int) $item->id, ['run_id' => $run, 'has_payload_for_stage' => $payload_for_stage !== [] ? 1 : 0]);
-					$pipeline_stage = self::payload_pipeline_stage($payload_for_stage);
-					if (
-						$pipeline_stage === ''
-						&& $stored_pipeline_stage !== ''
-						&& in_array((string) ($item->state ?? ''), ['retry_process', 'processing_de'], true)
-					) {
+					$step_context = self::run_active_workflow_step($item, $payload_for_stage, $existing_payload);
+					$payload_for_stage = $step_context['payload'];
+					$pipeline_stage = (string) ($step_context['pipeline_stage'] ?? '');
+					$workflow_step = (string) ($step_context['workflow_step'] ?? '');
+					if ($pipeline_stage === '' && $stored_pipeline_stage !== '') {
 						$pipeline_stage = $stored_pipeline_stage;
 						$payload_for_stage = self::set_payload_pipeline_stage($payload_for_stage, $pipeline_stage);
 					}
@@ -111,6 +110,23 @@ final class EPV2_AI_Processor {
 				) {
 					$payload_for_stage = self::refresh_payload_stage_markers($payload_for_stage);
 					self::log_process_item_step('after_stage_payload_refresh', (int) $item->id, ['run_id' => $run, 'pipeline_stage' => $pipeline_stage]);
+					}
+					if (
+						$payload_for_stage !== []
+						&& (
+							self::fast_transition_item_to_ready_publish((int) $item->id, $payload_for_stage)
+							|| self::transition_item_to_ready_publish((int) $item->id, $payload_for_stage)
+						)
+					) {
+						self::log_process_item_step('terminal_ready_payload_short_circuit', (int) $item->id, [
+							'run_id' => $run,
+							'pipeline_stage' => $pipeline_stage,
+							'duration_ms' => self::duration_ms_since($item_started_at),
+						]);
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'terminal_ready_payload_short_circuit';
+						break;
 					}
 					if ($payload_for_stage !== []) {
 						self::log_process_item_step('before_resume_stage_reconcile', (int) $item->id, [
@@ -141,10 +157,16 @@ final class EPV2_AI_Processor {
 					}
 				}
 				$run_payload['pipeline_stage_before'] = $pipeline_stage;
-				self::log_process_item_step('after_pipeline_stage_detected', (int) $item->id, ['run_id' => $run, 'pipeline_stage' => $pipeline_stage]);
+				$run_payload['workflow_step_before'] = $workflow_step;
+				self::log_process_item_step('after_pipeline_stage_detected', (int) $item->id, ['run_id' => $run, 'pipeline_stage' => $pipeline_stage, 'workflow_step' => $workflow_step]);
 				if ($pipeline_stage === 'rebuild_bundle' && self::recent_rebuild_bundle_runs_stalled((int) $item->id)) {
 					$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
 					EPV2_Resilience_Manager::schedule_retry($fresh_item, 'retry_process', 'process', 'publish threshold stalled rebuild bundle');
+					EPV2_Queue::workflow_system_update((int) $item->id, [
+						'workflow_step_status' => 'pending',
+						'workflow_owner_token' => '',
+						'workflow_heartbeat_at' => '',
+					]);
 					self::log_process_item_step('stalled_rebuild_run_history_cooldown', (int) $item->id, [
 						'run_id' => $run,
 						'duration_ms' => self::duration_ms_since($item_started_at),
@@ -164,7 +186,7 @@ final class EPV2_AI_Processor {
 				} else {
 					$requires_fresh_rebuild = $payload_for_stage !== [] && self::payload_requires_fresh_rebuild_fast($payload_for_stage);
 					$publish_finish_resume_viable = ! $is_publish_finish_stage || self::publish_finish_resume_is_viable($payload_for_stage);
-						$repairing_media_blocker = ! in_array($pipeline_stage, ['rebuild_bundle', 'publish_finish'], true) && ! $requires_fresh_rebuild && self::item_needs_media_repair($item, $payload_for_stage);
+						$repairing_media_blocker = ! in_array($pipeline_stage, ['rebuild_bundle', 'translate_uk', 'translate_en', 'translate_finish', 'publish_finish'], true) && ! $requires_fresh_rebuild && self::item_needs_media_repair($item, $payload_for_stage);
 						if ($is_publish_finish_stage && $publish_finish_resume_viable) {
 							$auto_rework = false;
 							$auto_finish = ! $repairing_media_blocker;
@@ -199,11 +221,7 @@ final class EPV2_AI_Processor {
 					EPV2_Queue::update_fields((int) $item->id, [
 						'ai_payload' => wp_json_encode($existing_payload, JSON_UNESCAPED_UNICODE),
 					]);
-					if (self::payload_is_terminal_publish_ready($existing_payload)) {
-						EPV2_Queue::mark_state((int) $item->id, 'ready_publish', [
-							'ai_payload' => wp_json_encode($existing_payload, JSON_UNESCAPED_UNICODE),
-							'error_message' => '',
-						]);
+					if (self::transition_item_to_ready_publish((int) $item->id, $existing_payload)) {
 						$count++;
 						$run_payload['result'] = 'media_repaired_to_publish_ready';
 						$run_payload['processed_item_id'] = (int) $item->id;
@@ -218,7 +236,7 @@ final class EPV2_AI_Processor {
 							$run_payload['result'] = 'requeued_rebuild_bundle_after_media_repair';
 							break;
 						}
-						EPV2_Resilience_Manager::schedule_retry($item, 'retry_process', 'publish_media', 'Нельзя публиковать: у DE-версии не установлено featured image.');
+						EPV2_Resilience_Manager::schedule_retry($item, 'retry_process', 'process', 'Нельзя публиковать: у DE-версии не установлено featured image.');
 						$run_payload['result'] = 'media_repair_pending';
 						continue;
 						}
@@ -243,9 +261,61 @@ final class EPV2_AI_Processor {
 						$run_payload['worker_stage'] = $worker_stage;
 						$run_payload['worker_duration_ms'] = (int) ($worker_response['duration_ms'] ?? 0);
 						self::log_process_item_step('after_worker_stage', (int) $item->id, ['run_id' => $run, 'worker_stage' => $worker_stage, 'duration_ms' => self::duration_ms_since($item_started_at)]);
-						self::persist_intermediate_payload((int) $item->id, $payload, $analysis, $gate);
-						$next_translation_stage = $worker_stage === 'translate_uk' ? 'translate_en' : 'publish_finish';
-						self::queue_required_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
+						if (self::fast_transition_item_to_ready_publish((int) $item->id, $payload)) {
+							self::log_process_item_step('after_worker_single_translation_ready_publish', (int) $item->id, [
+								'run_id' => $run,
+								'worker_stage' => $worker_stage,
+								'duration_ms' => self::duration_ms_since($item_started_at),
+							]);
+							$count++;
+							$run_payload['processed_item_id'] = (int) $item->id;
+							$run_payload['result'] = 'worker_single_translation_ready_publish';
+							break;
+						}
+						$worker_lang = $worker_stage === 'translate_uk' ? 'uk' : 'en';
+						$payload = self::refresh_stage_checklist_for_routing($payload);
+						$worker_checklist = self::payload_stage_checklist($payload);
+						if (empty($worker_checklist[$worker_lang . '_ready'])) {
+							$translation_attempts = self::bump_translation_no_progress_attempt((int) $item->id, $worker_lang, $payload);
+							if ($translation_attempts >= 3) {
+								$result = self::resolve_translation_no_progress_terminally($item, $payload, $worker_lang, $translation_attempts, $analysis, $gate);
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = $result;
+								break;
+							}
+							$next_translation_stage = $worker_stage;
+							self::queue_incomplete_translation_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
+						} elseif ($worker_stage === 'translate_uk') {
+							self::reset_translation_no_progress_attempt((int) $item->id, $worker_lang);
+							$next_translation_stage = 'translate_en';
+						} else {
+							self::reset_translation_no_progress_attempt((int) $item->id, $worker_lang);
+							$next_translation_stage = 'publish_finish';
+						}
+						if ($next_translation_stage !== $worker_stage) {
+							try {
+								self::queue_required_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
+							} catch (Throwable $e) {
+								self::log_process_item_step('after_worker_single_translation_transition_fallback', (int) $item->id, [
+									'run_id' => $run,
+									'worker_stage' => $worker_stage,
+									'blocked_stage' => $next_translation_stage,
+									'error' => $e->getMessage(),
+									'duration_ms' => self::duration_ms_since($item_started_at),
+								]);
+								$translation_attempts = self::bump_translation_no_progress_attempt((int) $item->id, $worker_lang, $payload);
+								if ($translation_attempts >= 3) {
+									$result = self::resolve_translation_no_progress_terminally($item, $payload, $worker_lang, $translation_attempts, $analysis, $gate);
+									$count++;
+									$run_payload['processed_item_id'] = (int) $item->id;
+									$run_payload['result'] = $result;
+									break;
+								}
+								$next_translation_stage = $worker_stage;
+								self::queue_incomplete_translation_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
+							}
+						}
 						self::log_process_item_step('after_worker_single_translation_queue_next', (int) $item->id, [
 							'run_id' => $run,
 							'worker_stage' => $worker_stage,
@@ -282,8 +352,9 @@ final class EPV2_AI_Processor {
 						$run_payload['worker_stage'] = $worker_stage;
 						$run_payload['worker_duration_ms'] = (int) ($worker_response['duration_ms'] ?? 0);
 						self::log_process_item_step('after_worker_stage', (int) $item->id, ['run_id' => $run, 'worker_stage' => $worker_stage, 'duration_ms' => self::duration_ms_since($item_started_at)]);
-					self::persist_intermediate_payload((int) $item->id, $payload, $analysis, $gate);
-					self::log_process_item_step('after_worker_persist', (int) $item->id, ['run_id' => $run, 'worker_stage' => $worker_stage, 'duration_ms' => self::duration_ms_since($item_started_at)]);
+					// Do not persist here: queue_required_stage()/terminal state below
+					// owns persistence. Double-saving large worker payloads can burn CPU.
+					self::log_process_item_step('after_worker_persist_skipped_before_routing', (int) $item->id, ['run_id' => $run, 'worker_stage' => $worker_stage, 'duration_ms' => self::duration_ms_since($item_started_at)]);
 					if (! empty($payload['_meta']['translations_deferred'])) {
 						if (! self::de_master_ready_for_translation($payload)) {
 							throw new RuntimeException('AI rewrite did not reach minimum DE master quality');
@@ -398,15 +469,23 @@ final class EPV2_AI_Processor {
 						}
 						self::persist_intermediate_payload((int) $item->id, $payload, $analysis, $gate);
 						$next_stage = self::payload_next_required_stage($payload);
-						if ($next_stage !== '') {
-							self::queue_required_stage((int) $item->id, $payload, $next_stage, $analysis, $gate);
-							$count++;
-							$run_payload['processed_item_id'] = (int) $item->id;
-							$run_payload['result'] = 'queued_' . $next_stage . '_stage';
-							break;
-						}
-						$next_state = self::next_state_after_processing($payload);
-						EPV2_Queue::mark_state((int) $item->id, $next_state, [
+					if ($next_stage !== '') {
+						self::queue_required_stage((int) $item->id, $payload, $next_stage, $analysis, $gate);
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'queued_' . $next_stage . '_stage';
+						break;
+					}
+					$next_stage = self::payload_next_required_stage_for_routing($payload);
+					if ($next_stage !== '') {
+						self::queue_required_stage((int) $item->id, $payload, $next_stage, $analysis, $gate);
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'queued_' . $next_stage . '_stage';
+						break;
+					}
+					$next_state = self::next_state_after_processing($payload);
+					EPV2_Queue::mark_state((int) $item->id, $next_state, [
 							'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
 							'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 							'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
@@ -544,10 +623,9 @@ final class EPV2_AI_Processor {
 					break;
 				}
 				if ($existing_payload !== [] && ! $repairing_media_blocker && ! $requires_translation_finish && ! $auto_rework && ! $auto_finish) {
-					if (self::payload_is_terminal_publish_ready($existing_payload)) {
-						EPV2_Queue::mark_state((int) $item->id, 'ready_publish', [
-							'error_message' => '',
-						]);
+					if (self::transition_item_to_ready_publish((int) $item->id, $existing_payload, [
+						'error_message' => '',
+					])) {
 						$count++;
 						$run_payload['result'] = 'existing_publish_ready_payload';
 						break;
@@ -599,6 +677,7 @@ final class EPV2_AI_Processor {
 						'image' => (string) $source_item->source_image_url,
 						'category' => (string) $source_item->category_proposed,
 					]);
+					$analysis = self::preserve_planner_selected_candidate_analysis($item, $analysis);
 				}
 				self::log_process_item_step('after_analysis', (int) $item->id, [
 					'run_id' => $run,
@@ -644,7 +723,8 @@ final class EPV2_AI_Processor {
 						'selection' => $analysis,
 						'gate' => $gate,
 						'_system' => [
-							'retry_after' => time() + (2 * HOUR_IN_SECONDS),
+							'workflow_not_before' => gmdate('Y-m-d H:i:s', time() + (2 * HOUR_IN_SECONDS)),
+							'retry_after' => gmdate('Y-m-d H:i:s', time() + (2 * HOUR_IN_SECONDS)),
 							'workflow_step' => '',
 							'workflow_step_status' => '',
 						],
@@ -715,6 +795,7 @@ final class EPV2_AI_Processor {
 						$gate['mode'] = 'ai_rebuild_enrichment';
 						$gate['reason'] = 'ready_review candidate sent to automatic enrichment rebuild';
 					}
+					self::assert_worker_owned_stage_available($pipeline_stage, $auto_rework, $auto_finish, $existing_payload, $gate);
 					$use_worker = self::worker_pipeline_enabled()
 						&& (
 							$auto_rework
@@ -742,7 +823,28 @@ final class EPV2_AI_Processor {
 							self::log_process_item_step('after_worker_stage', (int) $item->id, ['run_id' => $run, 'duration_ms' => self::duration_ms_since($item_started_at), 'worker_stage' => $worker_stage]);
 							$run_payload['worker_stage'] = $worker_stage;
 							$run_payload['worker_duration_ms'] = (int) ($worker_response['duration_ms'] ?? 0);
+							if (self::payload_has_ai_provider_failure($payload)) {
+								EPV2_Resilience_Manager::schedule_retry($item, 'retry_process', 'process', 'AI provider unavailable: All AI providers failed');
+								$not_before = gmdate('Y-m-d H:i:s', time() + (30 * MINUTE_IN_SECONDS));
+								EPV2_Queue::workflow_system_update((int) $item->id, [
+									'workflow_not_before' => $not_before,
+									'retry_after' => $not_before,
+									'workflow_step_status' => 'pending',
+									'workflow_owner_token' => '',
+									'workflow_heartbeat_at' => '',
+									'workflow_last_error' => 'AI provider unavailable: All AI providers failed',
+								]);
+								EPV2_Queue::clear_active_automation_item((int) $item->id);
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = 'ai_provider_failure_retry';
+								break;
+							}
 							EPV2_Lock_Manager::heartbeat('process', $lock, (int) EPV2_Settings::get('job_lock_ttl_seconds', 900));
+							self::log_process_item_step('after_worker_publish_ready_short_circuit_skipped', (int) $item->id, [
+								'run_id' => $run,
+								'duration_ms' => self::duration_ms_since($item_started_at),
+							]);
 					} elseif (($auto_finish || ! $auto_rework) && $existing_payload !== [] && self::payload_is_review_ready($existing_payload) && self::automation_requires_publish_grade()) {
 						EPV2_Lock_Manager::heartbeat('process', $lock, (int) EPV2_Settings::get('job_lock_ttl_seconds', 900));
 						if (self::payload_needs_enrichment_rebuild($existing_payload) && ! self::publish_finish_resume_is_viable($existing_payload)) {
@@ -839,9 +941,70 @@ final class EPV2_AI_Processor {
 							'duration_ms' => self::duration_ms_since($item_started_at),
 						]);
 							if (isset($worker_stage) && (string) $worker_stage === 'rebuild_bundle') {
-							$next_stage = self::payload_next_stage_from_cached_checklist($payload);
-							if ($next_stage !== '') {
-								self::queue_required_stage((int) $item->id, $payload, $next_stage, $analysis, $gate);
+							$worker_outcome = sanitize_key((string) ($worker_response['outcome'] ?? ''));
+							$payload_blockers = self::payload_blocker_strings($payload);
+							if ($worker_outcome === 'ready_review' || $payload_blockers !== []) {
+								$payload = self::set_payload_pipeline_stage($payload, '');
+								$terminal_gate = EPV2_Publish_Gate::evaluate($item, $payload, [
+									'context' => 'worker_terminal_outcome',
+								]);
+								$terminal_state = empty($terminal_gate['selection_publishable']) ? 'rejected' : 'ready_review';
+								$terminal_notes = [
+									'selection' => $analysis,
+									'gate' => $gate,
+									'_system' => [
+										'workflow_terminal_reason' => 'worker_terminal_outcome',
+										'quarantine_reason' => $payload_blockers !== [] ? 'worker_blockers' : 'worker_ready_review',
+										'worker_outcome' => $worker_outcome,
+										'worker_blockers' => $payload_blockers,
+										'last_publish_gate_blockers' => array_values((array) ($terminal_gate['blockers'] ?? [])),
+										'workflow_step' => '',
+										'workflow_step_status' => 'terminal',
+										'workflow_owner_token' => '',
+										'workflow_heartbeat_at' => '',
+										'next_operator_action' => $terminal_state === 'ready_review' ? 'manual_editorial_review' : 'review_source_or_restore_manually',
+									],
+								];
+								if ($terminal_state === 'ready_review') {
+									$terminal_notes['_system']['manual_confirmation_required'] = 'worker_blockers';
+								}
+								EPV2_Queue::mark_state((int) $item->id, $terminal_state, [
+									'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
+									'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+									'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
+									'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
+									'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+									'error_message' => $terminal_state === 'ready_review'
+										? 'Материал остановлен для ручной проверки: worker вернул terminal review/blockers (' . implode(', ', $payload_blockers) . ').'
+										: 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($terminal_gate['selection_decision'] ?? 'unknown') . '".',
+									'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
+								]);
+								self::log_process_item_step('after_worker_terminal_outcome', (int) $item->id, [
+									'run_id' => $run,
+									'state' => $terminal_state,
+									'worker_outcome' => $worker_outcome,
+									'blockers' => $payload_blockers,
+									'duration_ms' => self::duration_ms_since($item_started_at),
+								]);
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = 'worker_terminal_' . $terminal_state;
+								break;
+								}
+								if (self::worker_rebuild_payload_should_continue_to_publish_finish($payload)) {
+									self::queue_required_stage((int) $item->id, $payload, 'publish_finish', $analysis, $gate);
+									self::log_process_item_step('after_worker_rebuild_force_publish_finish', (int) $item->id, [
+										'run_id' => $run,
+										'duration_ms' => self::duration_ms_since($item_started_at),
+									]);
+									$count++;
+									$run_payload['processed_item_id'] = (int) $item->id;
+									$run_payload['result'] = 'queued_publish_finish_stage';
+									break;
+								}
+								$next_stage = self::payload_next_stage_from_cached_checklist($payload);
+								if ($next_stage !== '') {
+									self::queue_required_stage((int) $item->id, $payload, $next_stage, $analysis, $gate);
 								self::log_process_item_step('after_worker_rebuild_queue_next', (int) $item->id, [
 									'run_id' => $run,
 									'next_stage' => $next_stage,
@@ -850,6 +1013,19 @@ final class EPV2_AI_Processor {
 								$count++;
 								$run_payload['processed_item_id'] = (int) $item->id;
 								$run_payload['result'] = 'queued_' . $next_stage . '_stage';
+								break;
+							}
+							if (
+								self::fast_transition_item_to_ready_publish((int) $item->id, $payload)
+								|| self::transition_item_to_ready_publish((int) $item->id, $payload)
+							) {
+								self::log_process_item_step('after_worker_rebuild_ready_publish', (int) $item->id, [
+									'run_id' => $run,
+									'duration_ms' => self::duration_ms_since($item_started_at),
+								]);
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = 'worker_rebuild_ready_publish';
 								break;
 							}
 							$next_state = self::next_state_after_processing($payload);
@@ -885,7 +1061,56 @@ final class EPV2_AI_Processor {
 									$run_payload['result'] = 'queued_' . $next_stage . '_stage';
 									break;
 								}
-								$next_state = self::next_state_after_processing($payload);
+									if (self::transition_item_to_ready_publish((int) $item->id, $payload)) {
+										self::log_process_item_step('after_worker_publish_finish_ready_publish', (int) $item->id, [
+											'run_id' => $run,
+											'duration_ms' => self::duration_ms_since($item_started_at),
+										]);
+									$count++;
+									$run_payload['processed_item_id'] = (int) $item->id;
+									$run_payload['result'] = 'worker_publish_finish_ready_publish';
+									break;
+								}
+									$next_state = self::next_state_after_processing($payload);
+									if ($next_state !== 'ready_publish') {
+										$fresh_finish_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
+										$no_progress_count = (int) ($payload['_meta']['publish_finish_no_progress'] ?? 0);
+										$fresh_finish_notes = json_decode((string) ($fresh_finish_item->admin_notes ?? ''), true);
+										$fresh_finish_notes = is_array($fresh_finish_notes) ? $fresh_finish_notes : [];
+										$fresh_finish_system = is_array($fresh_finish_notes['_system'] ?? null) ? $fresh_finish_notes['_system'] : [];
+										$finish_retries = (int) ($fresh_finish_system['retries']['review_finish'] ?? 0);
+										$workflow_attempts = (int) ($fresh_finish_system['workflow_step_attempts'] ?? 0);
+										if (self::review_finish_exhausted($fresh_finish_item, $payload) || $no_progress_count >= 2 || $finish_retries >= 2 || $workflow_attempts >= 4) {
+											self::log_process_item_step('after_worker_publish_finish_bounded_cooldown', (int) $item->id, [
+												'run_id' => $run,
+												'next_state' => $next_state,
+												'no_progress' => $no_progress_count,
+												'finish_retries' => $finish_retries,
+												'workflow_attempts' => $workflow_attempts,
+												'duration_ms' => self::duration_ms_since($item_started_at),
+											]);
+											$count++;
+											$run_payload['processed_item_id'] = (int) $item->id;
+											$run_payload['result'] = self::force_item_continuation(
+												$fresh_finish_item,
+												$payload,
+												'publish_finish',
+												'Publish-finish не дал прогресса после нескольких попыток; автоматика освободила очередь и повторит доводку позже.',
+												30 * MINUTE_IN_SECONDS
+											);
+											break;
+										}
+										self::queue_required_stage((int) $item->id, $payload, 'publish_finish', $analysis, $gate);
+										self::log_process_item_step('after_worker_publish_finish_requeue_same_stage', (int) $item->id, [
+											'run_id' => $run,
+											'next_state' => $next_state,
+											'duration_ms' => self::duration_ms_since($item_started_at),
+									]);
+									$count++;
+									$run_payload['processed_item_id'] = (int) $item->id;
+									$run_payload['result'] = 'queued_publish_finish_stage';
+									break;
+								}
 								EPV2_Queue::mark_state((int) $item->id, $next_state, [
 									'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
 									'ai_payload' => wp_json_encode(self::set_payload_pipeline_stage($payload, ''), JSON_UNESCAPED_UNICODE),
@@ -905,8 +1130,58 @@ final class EPV2_AI_Processor {
 								break;
 							}
 							if (isset($worker_stage) && in_array((string) $worker_stage, ['translate_uk', 'translate_en'], true)) {
-							$next_translation_stage = (string) $worker_stage === 'translate_uk' ? 'translate_en' : 'publish_finish';
-							self::queue_required_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
+							$worker_lang = (string) $worker_stage === 'translate_uk' ? 'uk' : 'en';
+							$payload = self::refresh_stage_checklist_for_routing($payload);
+							$worker_checklist = self::payload_stage_checklist($payload);
+							if (empty($worker_checklist[$worker_lang . '_ready'])) {
+								$next_translation_stage = (string) $worker_stage;
+								$translation_attempts = self::bump_translation_no_progress_attempt((int) $item->id, $worker_lang, $payload);
+								if ($translation_attempts >= 3) {
+									$result = self::resolve_translation_no_progress_terminally($item, $payload, $worker_lang, $translation_attempts, $analysis, $gate);
+									$count++;
+									$run_payload['processed_item_id'] = (int) $item->id;
+									$run_payload['result'] = $result;
+									break;
+								}
+								self::queue_incomplete_translation_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
+								self::log_process_item_step('after_staged_translation_requeue_incomplete', (int) $item->id, [
+									'run_id' => $run,
+									'worker_stage' => (string) $worker_stage,
+									'next_stage' => $next_translation_stage,
+									'duration_ms' => self::duration_ms_since($item_started_at),
+								]);
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = 'queued_' . $next_translation_stage . '_stage';
+								break;
+							} elseif ((string) $worker_stage === 'translate_uk') {
+								self::reset_translation_no_progress_attempt((int) $item->id, $worker_lang);
+								$next_translation_stage = 'translate_en';
+							} else {
+								self::reset_translation_no_progress_attempt((int) $item->id, $worker_lang);
+								$next_translation_stage = 'publish_finish';
+							}
+							try {
+								self::queue_required_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
+							} catch (Throwable $e) {
+								self::log_process_item_step('after_staged_translation_transition_fallback', (int) $item->id, [
+									'run_id' => $run,
+									'worker_stage' => (string) $worker_stage,
+									'blocked_stage' => $next_translation_stage,
+									'error' => $e->getMessage(),
+									'duration_ms' => self::duration_ms_since($item_started_at),
+								]);
+								$next_translation_stage = (string) $worker_stage;
+								$translation_attempts = self::bump_translation_no_progress_attempt((int) $item->id, $worker_lang, $payload);
+								if ($translation_attempts >= 3) {
+									$result = self::resolve_translation_no_progress_terminally($item, $payload, $worker_lang, $translation_attempts, $analysis, $gate);
+									$count++;
+									$run_payload['processed_item_id'] = (int) $item->id;
+									$run_payload['result'] = $result;
+									break;
+								}
+								self::queue_incomplete_translation_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
+							}
 							self::log_process_item_step('after_staged_translation_queue_next', (int) $item->id, [
 								'run_id' => $run,
 								'worker_stage' => (string) $worker_stage,
@@ -975,6 +1250,14 @@ final class EPV2_AI_Processor {
 						$run_payload['result'] = 'queued_' . $next_stage . '_stage';
 						break;
 					}
+					$next_stage = self::payload_next_required_stage_for_routing($payload);
+					if ($next_stage !== '') {
+						self::queue_required_stage((int) $item->id, $payload, $next_stage, $analysis, $gate);
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'queued_' . $next_stage . '_stage';
+						break;
+					}
 					$next_state = self::next_state_after_processing($payload);
 					EPV2_Queue::mark_state((int) $item->id, $next_state, [
 						'category_final' => implode(',', $payload['categories']),
@@ -985,6 +1268,19 @@ final class EPV2_AI_Processor {
 						'error_message' => '',
 						'admin_notes' => wp_json_encode(['selection' => $analysis, 'gate' => $gate], JSON_UNESCAPED_UNICODE),
 					]);
+					if ($next_state !== 'ready_publish') {
+						$stored_item = EPV2_Queue::get_item((int) $item->id);
+						$stored_payload = $stored_item ? json_decode((string) ($stored_item->ai_payload ?? ''), true) : [];
+						$stored_payload = is_array($stored_payload) ? $stored_payload : [];
+						$next_stage = self::payload_next_required_stage_for_routing($stored_payload);
+						if ($next_stage !== '') {
+							self::queue_required_stage((int) $item->id, $stored_payload, $next_stage, $analysis, $gate);
+							$count++;
+							$run_payload['processed_item_id'] = (int) $item->id;
+							$run_payload['result'] = 'queued_' . $next_stage . '_stage_after_save';
+							break;
+						}
+					}
 					if (! empty($payload['_meta']['tokens'])) {
 						EPV2_Stats::bump('ai_tokens', (int) $payload['_meta']['tokens']);
 					}
@@ -1115,7 +1411,8 @@ final class EPV2_AI_Processor {
 		if ($item_id <= 0 || $payload === []) {
 			return;
 		}
-		$payload = self::refresh_stage_checklist($payload);
+		$payload = self::compact_payload_source_dossier($payload);
+		$payload = self::refresh_stage_checklist_for_routing($payload);
 		$categories = array_values(array_filter(array_map('sanitize_text_field', (array) ($payload['categories'] ?? []))));
 		$fields = [
 			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
@@ -1149,9 +1446,27 @@ final class EPV2_AI_Processor {
 		// translation metadata. Re-finalize first so v2 routing decisions operate
 		// on the current payload, not on cached warnings from a previous step.
 		$payload = self::finalize_payload_for_queue($payload);
+		if ($stage === 'translate_en' && ! self::payload_language_ready_for_routing($payload, 'uk')) {
+			$stage = 'translate_uk';
+			$definition = self::stage_status_definition($stage);
+			$status = (string) ($definition['status'] ?? $status);
+			$status_code = (string) ($definition['code'] ?? $status_code);
+		} elseif ($stage === 'publish_finish' && ! self::payload_language_ready_for_routing($payload, 'uk')) {
+			$stage = 'translate_uk';
+			$definition = self::stage_status_definition($stage);
+			$status = (string) ($definition['status'] ?? $status);
+			$status_code = (string) ($definition['code'] ?? $status_code);
+		} elseif ($stage === 'publish_finish' && ! self::payload_language_ready_for_routing($payload, 'en')) {
+			$stage = 'translate_en';
+			$definition = self::stage_status_definition($stage);
+			$status = (string) ($definition['status'] ?? $status);
+			$status_code = (string) ($definition['code'] ?? $status_code);
+		}
 			self::assert_stage_transition_ready($payload, $stage);
 			$payload = self::set_payload_pipeline_stage($payload, $stage);
-			$payload = self::refresh_stage_checklist($payload);
+			$payload = in_array($stage, ['translate_uk', 'translate_en', 'translate_finish', 'publish_finish'], true)
+				? self::refresh_stage_checklist_for_routing($payload)
+				: self::refresh_stage_checklist($payload);
 			$payload = self::set_payload_pipeline_stage($payload, $stage);
 			$notes = [];
 		$item = EPV2_Queue::get_item($item_id);
@@ -1169,7 +1484,7 @@ final class EPV2_AI_Processor {
 		$notes['_system']['context_memory'] = is_array($payload['_meta']['context_memory'] ?? null)
 			? (array) $payload['_meta']['context_memory']
 			: self::payload_context_memory_light($payload);
-		unset($notes['_system']['retry_after']);
+		self::clear_workflow_retry_window($notes);
 		$target_state = (class_exists('EPV2_Jobs') && EPV2_Jobs::orchestrator_v2_enabled()) ? 'new' : 'retry_process';
 		EPV2_Queue::mark_state($item_id, $target_state, [
 			'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
@@ -1178,12 +1493,29 @@ final class EPV2_AI_Processor {
 			'error_message' => '',
 		]);
 		if (class_exists('EPV2_Jobs') && EPV2_Jobs::orchestrator_v2_enabled()) {
+			$workflow_step = self::canonical_workflow_step_from_stage($stage, $payload);
 			EPV2_Queue::workflow_system_update($item_id, [
-				'workflow_step' => sanitize_key($stage),
+				'workflow_step' => $workflow_step,
 				'workflow_step_status' => 'pending',
 			]);
 		}
 		EPV2_Queue::set_live_status($item_id, $status, $status_code);
+	}
+
+	private static function set_workflow_retry_window(array &$notes, int $delay_seconds): void {
+		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		if ($delay_seconds <= 0) {
+			self::clear_workflow_retry_window($notes);
+			return;
+		}
+		$not_before = gmdate('Y-m-d H:i:s', time() + $delay_seconds);
+		$notes['_system']['workflow_not_before'] = $not_before;
+		$notes['_system']['retry_after'] = $not_before;
+	}
+
+	private static function clear_workflow_retry_window(array &$notes): void {
+		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		unset($notes['_system']['workflow_not_before'], $notes['_system']['retry_after']);
 	}
 
 	private static function queue_required_stage(int $item_id, array $payload, string $stage, array $analysis = [], array $gate = []): void {
@@ -1192,6 +1524,154 @@ final class EPV2_AI_Processor {
 			return;
 		}
 		self::queue_next_processing_stage($item_id, $payload, $stage, $definition['status'], $definition['code'], $analysis, $gate);
+	}
+
+	private static function queue_incomplete_translation_stage(int $item_id, array $payload, string $stage, array $analysis = [], array $gate = []): void {
+		$definition = self::stage_status_definition($stage);
+		if ($definition === [] || ! in_array($stage, ['translate_uk', 'translate_en'], true)) {
+			return;
+		}
+		$payload = self::set_payload_pipeline_stage($payload, $stage);
+		$item = EPV2_Queue::get_item($item_id);
+		$notes = $item ? json_decode((string) ($item->admin_notes ?? ''), true) : [];
+		$notes = is_array($notes) ? $notes : [];
+		if ($analysis !== []) {
+			$notes['selection'] = $analysis;
+		}
+		if ($gate !== []) {
+			$notes['gate'] = $gate;
+		}
+		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$notes['_system']['context_memory'] = is_array($payload['_meta']['context_memory'] ?? null)
+			? (array) $payload['_meta']['context_memory']
+			: self::payload_context_memory_light($payload);
+		self::set_workflow_retry_window($notes, 2 * MINUTE_IN_SECONDS);
+		$notes['_system']['workflow_step'] = self::canonical_workflow_step_from_stage($stage, $payload);
+		$notes['_system']['workflow_step_status'] = 'pending';
+		$notes['_system']['live_status'] = (string) ($definition['status'] ?? '') . ' Следующая попытка ограничена защитным cooldown.';
+		$notes['_system']['live_status_code'] = (string) ($definition['code'] ?? '');
+		EPV2_Queue::update_fields($item_id, [
+			'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
+			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+			'error_message' => '',
+		]);
+	}
+
+	private static function run_active_workflow_step(object $item, array $payload_for_stage, array $existing_payload = []): array {
+		$workflow_step = self::resolve_active_workflow_step($item, $payload_for_stage, $existing_payload);
+		$pipeline_stage = self::pipeline_stage_from_workflow_step($workflow_step, $payload_for_stage !== [] ? $payload_for_stage : $existing_payload);
+		if ($pipeline_stage !== '' && $payload_for_stage !== []) {
+			$payload_for_stage = self::set_payload_pipeline_stage($payload_for_stage, $pipeline_stage);
+		}
+		EPV2_Queue::workflow_system_update((int) $item->id, [
+			'workflow_step' => $workflow_step,
+			'workflow_step_status' => 'running',
+			'workflow_step_attempts' => self::next_workflow_step_attempt((int) $item->id, $workflow_step),
+		]);
+		return [
+			'workflow_step' => $workflow_step,
+			'pipeline_stage' => $pipeline_stage,
+			'payload' => $payload_for_stage,
+		];
+	}
+
+	private static function resolve_active_workflow_step(object $item, array $payload_for_stage, array $existing_payload = []): string {
+		$stored_step = '';
+		if (class_exists('EPV2_Queue')) {
+			$stored_step = EPV2_Queue::workflow_step($item);
+		}
+		if ($stored_step !== '') {
+			return $stored_step;
+		}
+		$payload = $payload_for_stage !== [] ? $payload_for_stage : $existing_payload;
+		$stored_pipeline_stage = self::payload_pipeline_stage($payload);
+		if ($stored_pipeline_stage !== '') {
+			return self::canonical_workflow_step_from_stage($stored_pipeline_stage, $payload);
+		}
+		if (self::payload_has_fast_ready_publish_markers($payload)) {
+			return 'publish_ready_gate';
+		}
+		$required_stage = self::payload_next_required_stage($payload);
+		if ($required_stage !== '') {
+			return self::canonical_workflow_step_from_stage($required_stage, $payload);
+		}
+		if ($payload !== [] && self::payload_is_terminal_publish_ready($payload)) {
+			return 'publish_ready_gate';
+		}
+		return 'build_de_master';
+	}
+
+	private static function payload_has_fast_ready_publish_markers(array $payload): bool {
+		if ($payload === []) {
+			return false;
+		}
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$stage_checklist = is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
+		if (! empty($stage_checklist['ready_publish'])) {
+			return true;
+		}
+		if (empty($stage_checklist['translations_ready']) || empty($stage_checklist['publish_finish_ready'])) {
+			return false;
+		}
+		$primary_media = self::payload_primary_media_url($payload);
+		if ($primary_media === '' || EPV2_Media::is_generated_story_cover_url($primary_media)) {
+			return false;
+		}
+		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
+		$seo_title = trim((string) ($de['seo_title'] ?? ''));
+		$meta_description = trim((string) ($de['meta_description'] ?? ''));
+		return $seo_title !== '' && $meta_description !== '';
+	}
+
+	private static function canonical_workflow_step_from_stage(string $stage, array $payload = []): string {
+		$stage = sanitize_key($stage);
+		return match ($stage) {
+			'rebuild_bundle' => 'build_de_master',
+			'translate_uk' => 'translate_uk',
+			'translate_en', 'translate_finish' => 'translate_en',
+			'publish_finish' => self::publish_finish_workflow_step($payload),
+			default => 'build_de_master',
+		};
+	}
+
+	private static function pipeline_stage_from_workflow_step(string $workflow_step, array $payload = []): string {
+		$workflow_step = sanitize_key($workflow_step);
+		return match ($workflow_step) {
+			'build_de_master' => 'rebuild_bundle',
+			'translate_uk' => 'translate_uk',
+			'translate_en' => 'translate_en',
+			'finalize_media', 'finalize_seo', 'publish_ready_gate' => 'publish_finish',
+			default => self::payload_next_required_stage($payload),
+		};
+	}
+
+	private static function publish_finish_workflow_step(array $payload): string {
+		$payload = self::refresh_stage_checklist($payload);
+		if (! self::publish_ready_gate_media_contract_passes($payload)) {
+			return 'finalize_media';
+		}
+		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
+		$seo_title = trim((string) ($de['seo_title'] ?? ''));
+		$meta_description = trim((string) ($de['meta_description'] ?? ''));
+		if ($seo_title === '' || $meta_description === '') {
+			return 'finalize_seo';
+		}
+		return 'publish_ready_gate';
+	}
+
+	private static function next_workflow_step_attempt(int $item_id, string $workflow_step): int {
+		$item = EPV2_Queue::get_item_summary($item_id);
+		if (! $item) {
+			return 1;
+		}
+		$system = EPV2_Queue::workflow_system_payload($item);
+		$current_step = sanitize_key((string) ($system['workflow_step'] ?? ''));
+		$current_attempts = (int) ($system['workflow_step_attempts'] ?? 0);
+		if ($current_step === sanitize_key($workflow_step) && $current_attempts > 0) {
+			return $current_attempts + 1;
+		}
+		return 1;
 	}
 
 	private static function assert_stage_transition_ready(array $payload, string $stage): void {
@@ -1205,7 +1685,10 @@ final class EPV2_AI_Processor {
 				}
 				return;
 			case 'translate_en':
-				if (empty($checklist['de_master_ready']) || empty($checklist['uk_ready'])) {
+				if (
+					empty($checklist['de_master_ready'])
+					|| (empty($checklist['uk_ready']) && ! self::payload_language_ready_for_routing($payload, 'uk'))
+				) {
 					throw new RuntimeException('Переход к translate_en запрещён: UK этап не подтверждён.');
 				}
 				return;
@@ -1218,8 +1701,8 @@ final class EPV2_AI_Processor {
 				$de_publish_ready = ! empty($checklist['publish_finish_ready']) || ! empty($checklist['de_master_ready']);
 				$translations_ready = ! empty($checklist['translations_ready'])
 					|| (
-						self::payload_language_ready($payload, 'uk')
-						&& self::payload_language_ready($payload, 'en')
+						self::payload_language_ready_for_routing($payload, 'uk')
+						&& self::payload_language_ready_for_routing($payload, 'en')
 					);
 				if (! $de_publish_ready && ! $translations_ready) {
 					throw new RuntimeException('Переход к publish_finish запрещён: DE master и переводы не подтверждены.');
@@ -1263,7 +1746,48 @@ final class EPV2_AI_Processor {
 	}
 
 	private static function worker_pipeline_enabled(): bool {
-		return class_exists('EPV2_Worker_Client') && EPV2_Worker_Client::enabled();
+		if (! class_exists('EPV2_Worker_Client') || ! EPV2_Worker_Client::enabled()) {
+			return false;
+		}
+		if (class_exists('EPV2_Jobs') && EPV2_Jobs::server_orchestrator_enabled() && ! EPV2_Jobs::orchestrator_v2_enabled()) {
+			return false;
+		}
+		return EPV2_Worker_Client::is_available();
+	}
+
+	private static function worker_owned_canonical_mode(): bool {
+		return class_exists('EPV2_Jobs')
+			&& EPV2_Jobs::server_orchestrator_enabled()
+			&& EPV2_Jobs::orchestrator_v2_enabled()
+			&& class_exists('EPV2_Worker_Client')
+			&& EPV2_Worker_Client::enabled();
+	}
+
+	private static function worker_owned_stage_required(string $pipeline_stage, bool $auto_rework, bool $auto_finish, array $existing_payload, array $gate): bool {
+		if (! self::worker_owned_canonical_mode()) {
+			return false;
+		}
+		if (in_array($pipeline_stage, ['rebuild_bundle', 'translate_uk', 'translate_en', 'translate_finish', 'publish_finish'], true)) {
+			return true;
+		}
+		if ($auto_rework || $auto_finish || ! empty($gate['allow'])) {
+			return true;
+		}
+		return $existing_payload !== []
+			&& self::payload_is_review_ready($existing_payload)
+			&& self::automation_requires_publish_grade();
+	}
+
+	private static function assert_worker_owned_stage_available(string $pipeline_stage, bool $auto_rework, bool $auto_finish, array $existing_payload, array $gate): void {
+		if (! self::worker_owned_stage_required($pipeline_stage, $auto_rework, $auto_finish, $existing_payload, $gate)) {
+			return;
+		}
+		if (! class_exists('EPV2_Worker_Client') || ! EPV2_Worker_Client::enabled()) {
+			throw new RuntimeException('Canonical worker-owned stage requires external worker, but worker mode is disabled.');
+		}
+		if (! EPV2_Worker_Client::is_available()) {
+			throw new RuntimeException('Canonical worker-owned stage deferred: external worker unavailable.');
+		}
 	}
 
 		private static function worker_stage_for_request(array $existing_payload, bool $auto_rework, bool $auto_finish): string {
@@ -1298,7 +1822,18 @@ final class EPV2_AI_Processor {
 
 	private static function run_worker_stage(object $item, string $stage, array $existing_payload = []): array {
 			$started_at = microtime(true);
-			$response = EPV2_Worker_Client::run_for_item($item, $stage, $existing_payload);
+			if (! EPV2_Resilience_Manager::workflow_stage_available($stage)) {
+				$until = EPV2_Resilience_Manager::workflow_stage_cooldown_until($stage);
+				throw new RuntimeException('Workflow stage circuit open for ' . $stage . ' until ' . ($until > 0 ? gmdate('Y-m-d H:i:s', $until) : 'unknown'));
+			}
+			try {
+				$response = EPV2_Worker_Client::run_for_item($item, $stage, $existing_payload);
+			} catch (Throwable $e) {
+				if (preg_match('/all ai providers failed|no ready provider|provider unavailable/iu', $e->getMessage()) === 1) {
+					EPV2_Resilience_Manager::register_workflow_stage_failure($stage, $e->getMessage());
+				}
+				throw $e;
+			}
 			$payload = is_array($response['payload'] ?? null) ? $response['payload'] : [];
 			if ($payload === []) {
 				throw new RuntimeException('External worker returned empty payload');
@@ -1307,6 +1842,11 @@ final class EPV2_AI_Processor {
 			// stage. Re-running heavy finalization here reintroduces the same long
 			// blocking path we are trying to remove from the parent process.
 			$response['payload'] = self::refresh_stage_checklist($payload);
+			if (self::payload_has_ai_provider_failure($response['payload'])) {
+				EPV2_Resilience_Manager::register_workflow_stage_failure($stage, 'AI provider unavailable: All AI providers failed');
+			} else {
+				EPV2_Resilience_Manager::register_workflow_stage_success($stage);
+			}
 			$response['duration_ms'] = (int) round((microtime(true) - $started_at) * 1000);
 			return $response;
 		}
@@ -1843,10 +2383,205 @@ final class EPV2_AI_Processor {
 	}
 
 	private static function next_state_after_processing(array $payload): string {
-		if (self::payload_next_required_stage($payload) !== '') {
-			return 'retry_process';
+		if (self::publish_ready_gate_passes($payload)) {
+			return 'ready_publish';
 		}
-		return self::payload_is_terminal_publish_ready($payload) ? 'ready_publish' : 'retry_process';
+		return self::payload_next_required_stage_for_routing($payload) !== '' ? 'retry_process' : 'retry_process';
+	}
+
+	private static function publish_ready_gate_passes(array $payload): bool {
+		$payload = self::refresh_stage_checklist_for_routing($payload);
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		if (! empty($meta['blockers'])) {
+			return false;
+		}
+		$stage_checklist = is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
+		if (self::payload_selection_blocks_automatic_publish($payload)) {
+			return false;
+		}
+		if (self::payload_context_rejects($payload)) {
+			return false;
+		}
+		if (self::payload_has_stale_context_signal($payload)) {
+			return false;
+		}
+		if (! self::publish_ready_gate_stage_contract_passes($payload, $stage_checklist, $meta)) {
+			return false;
+		}
+		if (! self::publish_ready_gate_language_contract_passes($payload)) {
+			return false;
+		}
+		if (! self::publish_ready_gate_seo_contract_passes($payload, $meta)) {
+			return false;
+		}
+		if (! self::publish_ready_gate_media_contract_passes($payload)) {
+			return false;
+		}
+		if (! self::publish_ready_gate_payload_integrity_passes($payload, $meta)) {
+			return false;
+		}
+		return true;
+	}
+
+	private static function publish_ready_gate_stage_contract_passes(array $payload, array $stage_checklist, array $meta): bool {
+		$terminal_ready_despite_stale_stage =
+			! empty($stage_checklist['ready_publish'])
+			&& ! empty($stage_checklist['translations_ready'])
+			&& ! empty($stage_checklist['publish_finish_ready'])
+			&& empty($meta['translations_deferred']);
+		if (self::payload_pipeline_stage($payload) !== '' && ! $terminal_ready_despite_stale_stage) {
+			return false;
+		}
+		if (! $terminal_ready_despite_stale_stage && self::payload_next_required_stage_for_routing($payload) !== '') {
+			return false;
+		}
+		if (! empty($meta['gate_mode']) && (string) $meta['gate_mode'] !== 'ai_priority_only') {
+			return false;
+		}
+			return
+				! empty($stage_checklist['ready_publish'])
+				&& ! empty($stage_checklist['translations_ready'])
+				&& ! empty($stage_checklist['publish_finish_ready'])
+				&& empty($meta['translations_deferred'])
+				&& self::payload_languages_are_semantically_consistent($payload);
+	}
+
+	private static function publish_ready_gate_language_contract_passes(array $payload): bool {
+		return self::languages_look_publishable($payload)
+			&& self::payload_languages_are_semantically_consistent($payload);
+	}
+
+	private static function publish_ready_gate_seo_contract_passes(array $payload, array $meta): bool {
+		$seo_quality = is_array($meta['seo_quality'] ?? null) ? $meta['seo_quality'] : [];
+		if (! self::quality_meets_publish_gate($seo_quality, 'seo')) {
+			return false;
+		}
+		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
+		$seo_title = trim((string) ($de['seo_title'] ?? $payload['seo']['seo_title'] ?? ''));
+		$meta_description = trim((string) ($de['meta_description'] ?? $payload['seo']['meta_description'] ?? ''));
+		$slug = trim((string) ($de['slug'] ?? $payload['seo']['slug'] ?? ''));
+		$focus_keywords = array_values(array_filter(array_map('strval', (array) ($de['focus_keywords'] ?? $payload['seo']['focus_keywords'] ?? []))));
+		return $seo_title !== '' && $meta_description !== '' && $slug !== '' && $focus_keywords !== [];
+	}
+
+	private static function publish_ready_gate_media_contract_passes(array $payload): bool {
+		$featured_media_url = self::payload_primary_media_url($payload);
+		if ($featured_media_url === '' || self::payload_media_is_blocked($payload, $featured_media_url)) {
+			return false;
+		}
+		if (self::payload_featured_media_is_publishable($payload)) {
+			return true;
+		}
+		$dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? (array) $payload['_meta']['source_dossier'] : [];
+		return
+			! self::payload_featured_media_is_generic_stock($payload)
+			&& EPV2_Media::is_source_host_media($featured_media_url, $dossier);
+	}
+
+	private static function publish_ready_gate_payload_integrity_passes(array $payload, array $meta): bool {
+		$quality = is_array($meta['quality'] ?? null) ? $meta['quality'] : [];
+		$release_quality = is_array($meta['release_quality'] ?? null) ? $meta['release_quality'] : [];
+		$google_quality = is_array($meta['google_quality'] ?? null) ? $meta['google_quality'] : [];
+		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
+		$content_plain = trim(wp_strip_all_tags((string) ($de['content'] ?? '')));
+		$short_factual_ready = self::payload_allows_short_factual_bulletin($payload, $content_plain);
+		if (! self::quality_meets_publish_gate($quality, 'editorial')) {
+			return false;
+		}
+		if (! self::quality_meets_publish_gate($release_quality, 'release') && ! ($short_factual_ready && ! empty($release_quality['pass']))) {
+			return false;
+		}
+		if (! self::quality_meets_publish_gate($google_quality, 'google') && ! ($short_factual_ready && ! empty($google_quality['pass']))) {
+			return false;
+		}
+		return self::payload_has_publish_grade_substance($payload);
+	}
+
+	public static function transition_item_to_ready_publish(int $item_id, array $payload, array $extra_fields = []): bool {
+		$payload = self::normalize_existing_payload($payload, false);
+		$item = EPV2_Queue::get_item_summary($item_id);
+		$payload = self::payload_with_item_source_context($item instanceof stdClass ? $item : null, $payload);
+		$gate = EPV2_Publish_Gate::evaluate($item instanceof stdClass ? $item : null, $payload, [
+			'context' => 'ready_publish',
+		]);
+		if (empty($gate['allowed'])) {
+			return false;
+		}
+		$fields = [
+			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+			'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
+			'error_message' => '',
+		];
+		if ($extra_fields !== []) {
+			$fields = array_replace($fields, $extra_fields);
+		}
+			EPV2_Queue::mark_state($item_id, 'ready_publish', $fields);
+			$updated = EPV2_Queue::get_item($item_id);
+			return $updated && in_array((string) ($updated->state ?? ''), ['ready_publish', 'retry_publish', 'publishing'], true);
+	}
+
+	private static function fast_transition_item_to_ready_publish(int $item_id, array $payload): bool {
+		$item = EPV2_Queue::get_item_summary($item_id);
+		$payload = self::payload_with_item_source_context($item instanceof stdClass ? $item : null, $payload);
+		if (! self::payload_has_cached_terminal_ready_contract($payload)) {
+			return false;
+		}
+		$payload = self::set_payload_pipeline_stage($payload, '');
+		$notes = $item ? json_decode((string) ($item->admin_notes ?? ''), true) : [];
+		$notes = is_array($notes) ? $notes : [];
+		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$notes['_system']['ready_publish_at'] = gmdate('Y-m-d H:i:s');
+		$publish_interval = max(5, (int) EPV2_Settings::get('publish_interval_minutes', 5)) * MINUTE_IN_SECONDS;
+		$notes['_system']['publish_not_before'] = time() + $publish_interval;
+		$notes['_system']['workflow_step'] = '';
+		$notes['_system']['workflow_step_status'] = '';
+		$notes['_system']['workflow_owner_token'] = '';
+		$notes['_system']['workflow_heartbeat_at'] = '';
+		unset($notes['_system']['retry_after'], $notes['_system']['workflow_not_before'], $notes['_system']['live_status'], $notes['_system']['live_status_code']);
+		EPV2_Queue::update_fields($item_id, [
+			'state' => 'ready_publish',
+			'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
+			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+			'error_message' => '',
+			]);
+			EPV2_Queue::clear_active_automation_item($item_id);
+			EPV2_Queue::normalize_ready_publish_schedule(false);
+			return true;
+		}
+
+	private static function payload_has_cached_terminal_ready_contract(array $payload): bool {
+		$gate = EPV2_Publish_Gate::evaluate(null, $payload, [
+			'context' => 'ready_publish',
+		]);
+		if (empty($gate['allowed'])) {
+			return false;
+		}
+		if (self::payload_selection_blocks_automatic_publish($payload) || self::payload_context_rejects($payload) || self::payload_has_stale_context_signal($payload)) {
+			return false;
+		}
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$checklist = is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
+		$quality = is_array($meta['quality'] ?? null) ? $meta['quality'] : [];
+		$seo = is_array($meta['seo_quality'] ?? null) ? $meta['seo_quality'] : [];
+		$release = is_array($meta['release_quality'] ?? null) ? $meta['release_quality'] : [];
+		$google = is_array($meta['google_quality'] ?? null) ? $meta['google_quality'] : [];
+		$media = trim((string) ($payload['featured_media_url'] ?? $payload['media_url'] ?? ''));
+		return
+			$media !== ''
+			&& ! empty($checklist['ready_publish'])
+			&& ! empty($checklist['translations_ready'])
+				&& ! empty($checklist['publish_finish_ready'])
+				&& empty($meta['translations_deferred'])
+				&& self::payload_languages_are_semantically_consistent($payload)
+				&& ! empty($quality['pass'])
+			&& (int) ($quality['score'] ?? 0) >= 90
+			&& ! empty($seo['pass'])
+			&& (int) ($seo['score'] ?? 0) >= 90
+			&& ! empty($release['pass'])
+			&& (int) ($release['score'] ?? 0) >= 90
+			&& ! empty($google['pass'])
+			&& (int) ($google['score'] ?? 0) >= 90;
 	}
 
 	public static function payload_is_publish_ready(array $payload): bool {
@@ -1864,12 +2599,20 @@ final class EPV2_AI_Processor {
 		}
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 		$stage_checklist = is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
-		return
-			! empty($stage_checklist['ready_publish'])
-			&& ! empty($stage_checklist['translations_ready'])
-			&& ! empty($stage_checklist['publish_finish_ready'])
-			&& empty($meta['translations_deferred'])
+			return
+				! empty($stage_checklist['ready_publish'])
+				&& ! empty($stage_checklist['translations_ready'])
+				&& ! empty($stage_checklist['publish_finish_ready'])
+				&& empty($meta['translations_deferred'])
+				&& self::payload_languages_are_semantically_consistent($payload)
 			&& self::payload_has_publish_grade_substance($payload);
+	}
+
+	private static function payload_blocker_strings(array $payload): array {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		return array_values(array_filter(array_map(static function ($value): string {
+			return trim((string) $value);
+		}, (array) ($meta['blockers'] ?? []))));
 	}
 
 	public static function payload_is_review_ready(array $payload): bool {
@@ -1880,8 +2623,38 @@ final class EPV2_AI_Processor {
 		return self::payload_has_publish_grade_substance($payload);
 	}
 
+	public static function payload_with_item_source_context(?object $item, array $payload): array {
+		if (! $item || $payload === []) {
+			return $payload;
+		}
+		$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? $payload['_meta']['source_dossier'] : [];
+		if (! empty($dossier['primary']) || ! empty($dossier['shell_primary'])) {
+			return $payload;
+		}
+		$source_url = esc_url_raw((string) ($item->original_url ?? $item->canonical_url ?? ''));
+		$media_url = esc_url_raw(self::payload_primary_media_url($payload));
+		if ($source_url === '' || $media_url === '' || EPV2_Media::is_fallback_stock_url($media_url)) {
+			return $payload;
+		}
+		$dossier['primary'] = [
+			'url' => $source_url,
+			'image' => $media_url,
+			'title' => sanitize_text_field((string) ($item->original_title ?? '')),
+			'excerpt' => sanitize_textarea_field((string) ($item->original_excerpt ?? '')),
+		];
+		$payload['_meta']['source_dossier'] = $dossier;
+		$payload['_meta']['source_count'] = max(1, (int) ($payload['_meta']['source_count'] ?? 0));
+		return $payload;
+	}
+
 	public static function payload_requires_media_manual_review(array $payload): bool {
 		return self::payload_requires_media_manual_confirmation($payload);
+	}
+
+	public static function payload_media_contract_passes(array $payload): bool {
+		$payload = self::normalize_existing_payload($payload, false);
+		return self::publish_ready_gate_media_contract_passes($payload);
 	}
 
 	public static function repair_media_for_automation(object $item, array $payload): array {
@@ -1956,12 +2729,7 @@ final class EPV2_AI_Processor {
 		if ($payload === []) {
 			return 'empty_payload';
 		}
-		if (self::payload_is_terminal_publish_ready($payload)) {
-			EPV2_Queue::mark_state($item_id, 'ready_publish', [
-				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
-				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
-				'error_message' => '',
-			]);
+		if (self::transition_item_to_ready_publish($item_id, $payload)) {
 			return 'forced_ready_publish';
 		}
 		$checklist = self::payload_stage_checklist(self::refresh_stage_checklist($payload));
@@ -1973,7 +2741,7 @@ final class EPV2_AI_Processor {
 		) {
 			if (
 				! self::payload_has_media_candidate($payload)
-				|| ! self::payload_featured_media_is_publishable($payload)
+				|| ! self::publish_ready_gate_media_contract_passes($payload)
 			) {
 				if (self::queue_media_repair_retry($item, $payload, 'stalled_owner_media')) {
 					return 'queued_media_repair_for_stalled_owner';
@@ -2041,16 +2809,248 @@ final class EPV2_AI_Processor {
 			if (! self::payload_ready_for_publish($payload)) {
 				continue;
 			}
-			EPV2_Queue::mark_state((int) $item->id, 'ready_publish', [
-				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
-				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
-				'error_message' => '',
-			]);
+			self::transition_item_to_ready_publish((int) $item->id, $payload);
 			$repaired[] = (int) $item->id;
 		}
 		return [
 			'count' => count($repaired),
 			'ids' => $repaired,
+		];
+	}
+
+	public static function repair_stalled_translation_loops(int $limit = 50): array {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$limit = max(1, min(200, $limit));
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id FROM {$table}
+			WHERE state = 'new'
+				AND JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step')) IN ('translate_uk','translate_en')
+				AND (
+					CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) >= 6
+					OR CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.translation_no_progress_attempts')) AS UNSIGNED) >= 3
+					OR CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.retries.translate_uk')) AS UNSIGNED) >= 3
+					OR CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.retries.translate_en')) AS UNSIGNED) >= 3
+				)
+			ORDER BY updated_at ASC
+			LIMIT %d",
+			$limit
+		));
+		$repaired = [];
+		foreach ((array) $rows as $row) {
+			$item = EPV2_Queue::get_item((int) ($row->id ?? 0));
+			if (! $item) {
+				continue;
+			}
+			$system = EPV2_Queue::workflow_system_payload($item);
+			$status = sanitize_key((string) ($system['workflow_step_status'] ?? ''));
+			$heartbeat = strtotime((string) ($system['workflow_heartbeat_at'] ?? '')) ?: 0;
+			$process_active = class_exists('EPV2_Lock_Manager') && EPV2_Lock_Manager::is_active('process');
+			if ($process_active && in_array($status, ['claimed', 'running'], true) && $heartbeat > 0 && ($heartbeat + 10 * MINUTE_IN_SECONDS) > time()) {
+				continue;
+			}
+			$payload = json_decode((string) ($item->ai_payload ?? ''), true);
+			$payload = is_array($payload) ? self::normalize_existing_payload($payload, false) : [];
+			if ($payload === []) {
+				continue;
+			}
+			$step = sanitize_key((string) ($system['workflow_step'] ?? ''));
+			$lang = $step === 'translate_en' ? 'en' : 'uk';
+			$payload = self::refresh_stage_checklist_for_routing($payload);
+			$next_stage = '';
+			if (self::payload_language_ready_for_routing($payload, $lang)) {
+				$next_stage = $lang === 'uk' && ! self::payload_language_ready_for_routing($payload, 'en')
+					? 'translate_en'
+					: self::payload_next_required_stage_for_routing($payload);
+			}
+			if ($next_stage === '' || $next_stage === $step) {
+				$next_stage = self::de_master_ready_for_translation($payload) ? 'rebuild_bundle' : '';
+			}
+			if ($next_stage === '') {
+				continue;
+			}
+			try {
+				self::queue_required_stage((int) $item->id, $payload, $next_stage);
+			} catch (Throwable $e) {
+				if ($next_stage !== 'rebuild_bundle') {
+					self::queue_required_stage((int) $item->id, $payload, 'rebuild_bundle');
+					$next_stage = 'rebuild_bundle';
+				} else {
+					continue;
+				}
+			}
+			EPV2_Queue::workflow_system_update((int) $item->id, [
+				'retry_after' => '',
+				'workflow_not_before' => '',
+				'workflow_step_status' => 'pending',
+				'translation_loop_repaired_at' => gmdate('Y-m-d H:i:s'),
+			]);
+			EPV2_Queue::update_fields((int) $item->id, [
+				'error_message' => '',
+			]);
+			$repaired[] = [
+				'id' => (int) $item->id,
+				'from' => $step,
+				'to' => $next_stage,
+			];
+		}
+		return [
+			'count' => count($repaired),
+			'items' => $repaired,
+		];
+	}
+
+	public static function repair_stalled_publish_finish_loops(int $limit = 50): array {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$limit = max(1, min(200, $limit));
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id FROM {$table}
+			WHERE state = 'new'
+				AND JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step')) IN ('publish_finish','publish_ready_gate')
+				AND (
+					CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) >= 4
+					OR CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.retries.review_finish')) AS UNSIGNED) >= 1
+					OR NULLIF(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.retry_after')), '') IS NOT NULL
+				)
+			ORDER BY updated_at ASC
+			LIMIT %d",
+			$limit
+		));
+		$repaired = [];
+		foreach ((array) $rows as $row) {
+			$item = EPV2_Queue::get_item((int) ($row->id ?? 0));
+			if (! $item) {
+				continue;
+			}
+			$system = EPV2_Queue::workflow_system_payload($item);
+			$status = sanitize_key((string) ($system['workflow_step_status'] ?? ''));
+			$heartbeat = strtotime((string) ($system['workflow_heartbeat_at'] ?? '')) ?: 0;
+			$process_active = class_exists('EPV2_Lock_Manager') && EPV2_Lock_Manager::is_active('process');
+			if ($process_active && in_array($status, ['claimed', 'running'], true) && $heartbeat > 0 && ($heartbeat + 10 * MINUTE_IN_SECONDS) > time()) {
+				continue;
+			}
+			$payload = json_decode((string) ($item->ai_payload ?? ''), true);
+			$payload = is_array($payload) ? self::normalize_existing_payload($payload, false) : [];
+			if ($payload === [] || self::payload_context_rejects($payload) || self::payload_has_stale_context_signal($payload)) {
+				continue;
+			}
+			$from = sanitize_key((string) ($system['workflow_step'] ?? ''));
+			$payload = self::refresh_stage_checklist_for_routing($payload);
+			$to = '';
+			if (self::transition_item_to_ready_publish((int) $item->id, $payload)) {
+				$to = 'ready_publish';
+				EPV2_Queue::workflow_system_update((int) $item->id, [
+					'workflow_step' => '',
+					'workflow_step_status' => '',
+					'workflow_owner_token' => '',
+					'workflow_heartbeat_at' => '',
+					'retry_after' => '',
+					'workflow_not_before' => '',
+					'publish_finish_loop_repaired_at' => gmdate('Y-m-d H:i:s'),
+				]);
+				EPV2_Queue::clear_active_automation_item((int) $item->id);
+			} else {
+				$next_stage = self::payload_next_required_stage_for_routing($payload);
+				if ($next_stage === '' || $next_stage === $from) {
+					$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+					$payload['_meta']['translation_rebuild_invalidated'] = true;
+					$payload['_meta']['force_rebuild_after_translation'] = true;
+					$payload['_meta']['publish_finish_gate_rebuild_reason'] = 'ready checklist but publish gate failed';
+					$next_stage = 'rebuild_bundle';
+				}
+				try {
+					self::queue_required_stage((int) $item->id, $payload, $next_stage);
+				} catch (Throwable $e) {
+					continue;
+				}
+				$to = $next_stage;
+				EPV2_Queue::workflow_system_update((int) $item->id, [
+					'retry_after' => '',
+					'workflow_not_before' => '',
+					'workflow_step_status' => 'pending',
+					'publish_finish_loop_repaired_at' => gmdate('Y-m-d H:i:s'),
+				]);
+			}
+			EPV2_Queue::update_fields((int) $item->id, [
+				'error_message' => '',
+			]);
+			$repaired[] = [
+				'id' => (int) $item->id,
+				'from' => $from,
+				'to' => $to,
+			];
+		}
+		return [
+			'count' => count($repaired),
+			'items' => $repaired,
+		];
+	}
+
+	public static function repair_stranded_rebuild_outputs(int $limit = 50): array {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$limit = max(1, min(200, $limit));
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id FROM {$table}
+			WHERE state = 'new'
+				AND JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step')) = 'build_de_master'
+				AND JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_status')) = 'claimed'
+				AND CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) >= 4
+			ORDER BY updated_at ASC
+			LIMIT %d",
+			$limit
+		));
+		$repaired = [];
+		foreach ((array) $rows as $row) {
+			$item = EPV2_Queue::get_item((int) ($row->id ?? 0));
+			if (! $item) {
+				continue;
+			}
+			$system = EPV2_Queue::workflow_system_payload($item);
+			$heartbeat = strtotime((string) ($system['workflow_heartbeat_at'] ?? '')) ?: 0;
+			if ($heartbeat > 0 && ($heartbeat + 60) > time()) {
+				continue;
+			}
+			$payload = json_decode((string) ($item->ai_payload ?? ''), true);
+			$payload = is_array($payload) ? self::normalize_existing_payload($payload, false) : [];
+			if ($payload === [] || self::payload_context_rejects($payload) || self::payload_has_stale_context_signal($payload)) {
+				continue;
+			}
+			$payload = self::refresh_stage_checklist_for_routing($payload);
+			$next_stage = self::payload_next_required_stage_for_routing($payload);
+			if ($next_stage === '') {
+				if (self::transition_item_to_ready_publish((int) $item->id, $payload)) {
+					$next_stage = 'ready_publish';
+				} else {
+					continue;
+				}
+			} else {
+				try {
+					self::queue_required_stage((int) $item->id, $payload, $next_stage);
+				} catch (Throwable $e) {
+					continue;
+				}
+			}
+			EPV2_Queue::workflow_system_update((int) $item->id, [
+				'retry_after' => '',
+				'workflow_not_before' => '',
+				'workflow_step_status' => $next_stage === 'ready_publish' ? '' : 'pending',
+				'workflow_owner_token' => '',
+				'workflow_heartbeat_at' => '',
+				'stranded_rebuild_repaired_at' => gmdate('Y-m-d H:i:s'),
+			]);
+			EPV2_Queue::update_fields((int) $item->id, [
+				'error_message' => '',
+			]);
+			$repaired[] = [
+				'id' => (int) $item->id,
+				'to' => $next_stage,
+			];
+		}
+		return [
+			'count' => count($repaired),
+			'items' => $repaired,
 		];
 	}
 
@@ -2078,8 +3078,8 @@ final class EPV2_AI_Processor {
 				$issues[] = 'invalid_media_url';
 			}
 			$normalized = self::normalize_existing_payload($payload, false);
-			$uk_ready = self::payload_language_ready($normalized, 'uk');
-			$en_ready = self::payload_language_ready($normalized, 'en');
+			$uk_ready = self::payload_language_ready($normalized, 'uk') || self::payload_language_ready_for_routing($normalized, 'uk');
+			$en_ready = self::payload_language_ready($normalized, 'en') || self::payload_language_ready_for_routing($normalized, 'en');
 			if ($uk_ready && $en_ready && ! empty($payload['_meta']['translations_deferred'])) {
 				$issues[] = 'stale_translations_deferred';
 			}
@@ -2187,11 +3187,7 @@ final class EPV2_AI_Processor {
 			$notes = is_array($notes) ? $notes : [];
 			$lang = (string) ($notes['_system']['translation_manual_lang'] ?? '');
 			$lang = in_array($lang, ['uk', 'en'], true) ? $lang : (empty($payload['_meta']['stage_checklist']['uk_ready']) ? 'uk' : 'en');
-			$attempts = max(
-				2,
-				(int) ($notes['_system']['translation_no_progress_attempts'] ?? 0),
-				(int) (($notes['_system']['retries']['translate_' . $lang] ?? 0))
-			);
+			$attempts = max(2, self::translation_attempts_from_notes($notes, $lang));
 			$result = self::resolve_translation_no_progress_terminally($item, $payload, $lang, $attempts, [], []);
 			$resolved[] = [
 				'id' => (int) $item->id,
@@ -2238,7 +3234,7 @@ final class EPV2_AI_Processor {
 			if (! in_array($lang, ['uk', 'en'], true)) {
 				continue;
 			}
-			$attempts = (int) (($notes['_system']['retries']['translate_' . $lang] ?? 0));
+			$attempts = self::translation_attempts_from_notes($notes, $lang);
 			if ($attempts >= 50) {
 				continue;
 			}
@@ -2247,9 +3243,10 @@ final class EPV2_AI_Processor {
 			$notes['_system']['translation_manual_lang'] = '';
 			$notes['_system']['translation_no_progress_attempts'] = 0;
 			$notes['_system']['workflow_terminal_reason'] = '';
-			unset($notes['_system']['retry_after']);
+			self::clear_workflow_retry_window($notes);
 			$notes['_system']['workflow_step'] = 'translate_' . $lang;
 			$notes['_system']['workflow_step_status'] = 'pending';
+			$notes['_system']['workflow_step_attempts'] = max(1, $attempts);
 			$payload = self::force_payload_pipeline_stage($payload, 'translate_' . $lang);
 			EPV2_Queue::mark_state((int) $item->id, 'new', [
 				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($item->category_final ?? ''),
@@ -2336,14 +3333,16 @@ final class EPV2_AI_Processor {
 				];
 				continue;
 			}
-			$target_state = self::payload_is_terminal_publish_ready($payload) ? 'ready_publish' : 'retry_process';
-			EPV2_Queue::mark_state((int) $item->id, $target_state, [
-				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
-				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($item->category_final ?? $item->category_proposed ?? ''),
-				'error_message' => $target_state === 'ready_publish'
-					? ''
-					: 'Материал автоматически восстановлен из legacy auto ready_review sink и возвращён в automation queue.',
-			]);
+			$target_state = self::publish_ready_gate_passes($payload) ? 'ready_publish' : 'retry_process';
+			if ($target_state === 'ready_publish') {
+				self::transition_item_to_ready_publish((int) $item->id, $payload);
+			} else {
+				EPV2_Queue::mark_state((int) $item->id, $target_state, [
+					'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+					'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($item->category_final ?? $item->category_proposed ?? ''),
+					'error_message' => 'Материал автоматически восстановлен из legacy auto ready_review sink и возвращён в automation queue.',
+				]);
+			}
 			$resolved[] = [
 				'id' => (int) $item->id,
 				'result' => $target_state === 'ready_publish'
@@ -2490,14 +3489,16 @@ final class EPV2_AI_Processor {
 				}
 			}
 			$repaired = self::repair_media_for_automation($item, $payload);
-			$target_state = self::payload_is_terminal_publish_ready($repaired) ? 'ready_publish' : 'retry_process';
-			EPV2_Queue::mark_state((int) $item->id, $target_state, [
-				'ai_payload' => wp_json_encode($repaired, JSON_UNESCAPED_UNICODE),
-				'category_final' => implode(',', array_values(array_filter((array) ($repaired['categories'] ?? [])))) ?: (string) ($item->category_final ?? $item->category_proposed ?? ''),
-				'error_message' => $target_state === 'ready_publish'
-					? ''
-					: 'Материал восстановлен после media-blocker и возвращён в publish_finish.',
-			]);
+			$target_state = self::publish_ready_gate_passes($repaired) ? 'ready_publish' : 'retry_process';
+			if ($target_state === 'ready_publish') {
+				self::transition_item_to_ready_publish((int) $item->id, $repaired);
+			} else {
+				EPV2_Queue::mark_state((int) $item->id, $target_state, [
+					'ai_payload' => wp_json_encode($repaired, JSON_UNESCAPED_UNICODE),
+					'category_final' => implode(',', array_values(array_filter((array) ($repaired['categories'] ?? [])))) ?: (string) ($item->category_final ?? $item->category_proposed ?? ''),
+					'error_message' => 'Материал восстановлен после media-blocker и возвращён в publish_finish.',
+				]);
+			}
 			$resolved[] = [
 				'id' => (int) $item->id,
 				'state' => $target_state,
@@ -2560,14 +3561,24 @@ final class EPV2_AI_Processor {
 			if (! $real_media) {
 				continue;
 			}
-			$target_state = self::payload_is_terminal_publish_ready($repaired) ? 'ready_publish' : 'new';
-			EPV2_Queue::mark_state((int) $item->id, $target_state, [
-				'ai_payload' => wp_json_encode($repaired, JSON_UNESCAPED_UNICODE),
-				'category_final' => implode(',', array_values(array_filter((array) ($repaired['categories'] ?? [])))) ?: (string) ($item->category_final ?? $item->category_proposed ?? ''),
-				'error_message' => $target_state === 'ready_publish'
-					? ''
-					: 'Материал восстановлен после media-blocker и возвращён в finalize_media.',
-			]);
+			$target_state = self::publish_ready_gate_passes($repaired) ? 'ready_publish' : 'new';
+			if ($target_state === 'ready_publish') {
+				self::transition_item_to_ready_publish((int) $item->id, $repaired);
+			} else {
+				$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+				$notes = is_array($notes) ? $notes : [];
+				$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+				$notes['_system']['workflow_step'] = 'finalize_media';
+				$notes['_system']['workflow_step_status'] = 'pending';
+				$notes['_system']['workflow_recovery_reason'] = 'persisted_media_repair';
+				$notes['_system']['workflow_last_error'] = 'Persisted item was returned to finalize_media after media repair recovery.';
+				EPV2_Queue::mark_state((int) $item->id, $target_state, [
+					'ai_payload' => wp_json_encode($repaired, JSON_UNESCAPED_UNICODE),
+					'category_final' => implode(',', array_values(array_filter((array) ($repaired['categories'] ?? [])))) ?: (string) ($item->category_final ?? $item->category_proposed ?? ''),
+					'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+					'error_message' => 'Материал восстановлен и возвращён в finalize_media.',
+				]);
+			}
 			$resolved[] = [
 				'id' => (int) $item->id,
 				'state' => $target_state,
@@ -2687,9 +3698,10 @@ final class EPV2_AI_Processor {
 			return self::finalize_payload_for_queue($payload, false);
 		}
 		$release_text = mb_strtolower(implode(' | ', self::warning_strings($payload['_meta']['release_quality']['warnings'] ?? [])));
+		$media_contract_passes = self::publish_ready_gate_media_contract_passes($payload);
 		$needs_media_repair = ! self::payload_has_media_candidate($payload)
-			|| ! self::payload_featured_media_is_publishable($payload)
-			|| preg_match('/generic stock featured media|слишком слабое.*featured media|не соответствует теме материала|нет featured media|нет главного изображения/u', $release_text) === 1;
+			|| ! $media_contract_passes
+			|| (! $media_contract_passes && preg_match('/generic stock featured media|слишком слабое.*featured media|не соответствует теме материала|нет featured media|нет главного изображения/u', $release_text) === 1);
 		if ($needs_media_repair) {
 			$payload = self::repair_payload_media($item, $payload);
 			if (! self::payload_has_media_candidate($payload)) {
@@ -2708,13 +3720,13 @@ final class EPV2_AI_Processor {
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 		$has_media_candidate = self::payload_has_media_candidate($payload);
 		$featured_media_url = self::payload_primary_media_url($payload);
-		$featured_media_publishable = $featured_media_url !== '' && self::payload_featured_media_is_publishable($payload);
+		$featured_media_publishable = $featured_media_url !== '' && self::publish_ready_gate_media_contract_passes($payload);
 		$warning_text = mb_strtolower(implode(' | ', array_merge(
 			self::warning_strings($meta['release_quality']['warnings'] ?? []),
 			self::warning_strings($meta['google_quality']['warnings'] ?? [])
 		)));
 		$media_warning_signal = preg_match('/generic stock featured media|слишком слабое.*featured media|не соответствует теме материала|нет featured media|нет главного изображения/u', $warning_text) === 1;
-		if (! $media_warning_signal && $featured_media_publishable) {
+		if ($featured_media_publishable) {
 			return false;
 		}
 		if (empty($meta['media_repair_failed'])) {
@@ -2755,7 +3767,7 @@ final class EPV2_AI_Processor {
 			$current_media !== ''
 			&& ! EPV2_Media::is_generated_story_cover_url($current_media)
 			&& (
-				self::payload_featured_media_is_publishable($payload)
+				self::publish_ready_gate_media_contract_passes($payload)
 				|| EPV2_Media::is_source_host_media($current_media, is_array($payload['_meta']['source_dossier'] ?? null) ? (array) $payload['_meta']['source_dossier'] : [])
 			)
 		) {
@@ -2809,16 +3821,32 @@ final class EPV2_AI_Processor {
 
 	private static function queue_translation_manual_confirmation(object $item, array $payload, string $lang, int $attempts): void {
 		$lang_label = $lang === 'uk' ? 'UK' : strtoupper($lang);
+		$workflow_step = 'translate_' . $lang;
+		$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+		$notes = is_array($notes) ? $notes : [];
+		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$notes['_system']['manual_confirmation_required'] = 'translation';
+		$notes['_system']['manual_confirmation_reason'] = $lang . '_no_progress';
+		$notes['_system']['translation_manual_lang'] = $lang;
+		$notes['_system']['translation_no_progress_attempts'] = $attempts;
+		$notes['_system']['workflow_step'] = $workflow_step;
+		$notes['_system']['workflow_step_status'] = 'manual_confirmation';
+		$notes['_system']['workflow_step_attempts'] = $attempts;
+		$notes['_system']['workflow_terminal_reason'] = '';
+		$notes['_system']['workflow_last_error'] = sprintf(
+			'Automatic translation %s did not pass validation after %d attempts.',
+			$lang_label,
+			$attempts
+		);
+		unset($notes['_system']['retry_after'], $notes['_system']['workflow_not_before']);
+		$notes_json = wp_json_encode($notes, JSON_UNESCAPED_UNICODE);
 		EPV2_Queue::mark_state((int) $item->id, 'ready_review', [
 			'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
 			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 			'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 			'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 			'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
-			'admin_notes' => self::manual_confirmation_notes($item, 'translation', $lang . '_no_progress', [
-				'translation_manual_lang' => $lang,
-				'translation_no_progress_attempts' => $attempts,
-			]),
+			'admin_notes' => $notes_json,
 			'error_message' => sprintf(
 				'Требует ручного подтверждения translation: автоматический перевод %s стабильно не проходит валидатор после %d попыток.',
 				$lang_label,
@@ -2838,11 +3866,7 @@ final class EPV2_AI_Processor {
 		$notes['_system']['workflow_terminal_reason'] = '';
 		$notes['_system']['workflow_step'] = $stage;
 		$notes['_system']['workflow_step_status'] = 'pending';
-		if ($delay_seconds > 0) {
-			$notes['_system']['retry_after'] = gmdate('Y-m-d H:i:s', time() + $delay_seconds);
-		} else {
-			unset($notes['_system']['retry_after']);
-		}
+		self::set_workflow_retry_window($notes, $delay_seconds);
 		EPV2_Queue::mark_state((int) $item->id, 'new', [
 			'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($item->category_final ?? $item->category_proposed ?? ''),
 			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
@@ -2926,7 +3950,7 @@ final class EPV2_AI_Processor {
 		$notes['_system']['workflow_step'] = 'publish_finish';
 		$notes['_system']['workflow_step_status'] = 'pending';
 		$delay_seconds = $attempts >= 10 ? 30 * MINUTE_IN_SECONDS : 3 * MINUTE_IN_SECONDS;
-		$notes['_system']['retry_after'] = gmdate('Y-m-d H:i:s', time() + $delay_seconds);
+		self::set_workflow_retry_window($notes, $delay_seconds);
 		if ($blocked !== []) {
 			$notes['_system']['blocked_media_urls'] = $blocked;
 		} else {
@@ -2951,6 +3975,21 @@ final class EPV2_AI_Processor {
 		$fresh_item = EPV2_Queue::get_item((int) ($item->id ?? 0));
 		if ($fresh_item instanceof stdClass) {
 			$item = $fresh_item;
+		}
+		$routing_payload = self::refresh_stage_checklist_for_routing($payload);
+		if (self::payload_language_ready_for_routing($routing_payload, $lang)) {
+			self::reset_translation_no_progress_attempt((int) $item->id, $lang);
+			self::persist_intermediate_payload((int) $item->id, $routing_payload, $analysis, $gate);
+			$next_stage = $lang === 'uk' && ! self::payload_language_ready_for_routing($routing_payload, 'en')
+				? 'translate_en'
+				: self::payload_next_required_stage_for_routing($routing_payload);
+			if ($next_stage !== '' && $next_stage !== 'translate_' . $lang) {
+				self::queue_required_stage((int) $item->id, $routing_payload, $next_stage, $analysis, $gate);
+				return 'queued_' . $next_stage . '_after_translation_routing_recovery';
+			}
+			if (self::transition_item_to_ready_publish((int) $item->id, $routing_payload)) {
+				return 'translation_routing_recovered_ready_publish';
+			}
 		}
 		$payload = self::repair_payload_languages($payload);
 		$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
@@ -3001,9 +4040,10 @@ final class EPV2_AI_Processor {
 			$notes['_system']['translation_no_progress_attempts'] = 0;
 			$notes['_system']['workflow_terminal_reason'] = '';
 			$delay = $attempts >= 6 ? 30 * MINUTE_IN_SECONDS : 5 * MINUTE_IN_SECONDS;
-			$notes['_system']['retry_after'] = gmdate('Y-m-d H:i:s', time() + $delay);
+			self::set_workflow_retry_window($notes, $delay);
 			$notes['_system']['workflow_step'] = 'translate_' . $lang;
 			$notes['_system']['workflow_step_status'] = 'pending';
+			$notes['_system']['workflow_step_attempts'] = max(1, $attempts);
 			EPV2_Queue::mark_state((int) $item->id, 'new', [
 				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
 				'ai_payload' => wp_json_encode(self::force_payload_pipeline_stage($payload, 'translate_' . $lang), JSON_UNESCAPED_UNICODE),
@@ -3037,7 +4077,14 @@ final class EPV2_AI_Processor {
 		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
 		$notes['_system']['retries'] = is_array($notes['_system']['retries'] ?? null) ? $notes['_system']['retries'] : [];
 		$key = 'translate_' . $lang;
-		$notes['_system']['retries'][$key] = (int) ($notes['_system']['retries'][$key] ?? 0) + 1;
+		$legacy_attempts = (int) ($notes['_system']['retries'][$key] ?? 0);
+		$workflow_attempts = (int) ($notes['_system']['workflow_step_attempts'] ?? 0);
+		$attempts = max($legacy_attempts, $workflow_attempts, 0) + 1;
+		$notes['_system']['retries'][$key] = $attempts;
+		$notes['_system']['translation_no_progress_attempts'] = $attempts;
+		$notes['_system']['workflow_step'] = $key;
+		$notes['_system']['workflow_step_status'] = 'running';
+		$notes['_system']['workflow_step_attempts'] = $attempts;
 		if ($payload !== []) {
 			$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 			$payload['_meta']['translation_failures'] = is_array($payload['_meta']['translation_failures'] ?? null) ? $payload['_meta']['translation_failures'] : [];
@@ -3047,7 +4094,19 @@ final class EPV2_AI_Processor {
 			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 			'ai_payload' => $payload !== [] ? wp_json_encode($payload, JSON_UNESCAPED_UNICODE) : null,
 		]);
-		return (int) $notes['_system']['retries'][$key];
+		return $attempts;
+	}
+
+	private static function translation_attempts_from_notes(array $notes, string $lang): int {
+		$system = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$retries = is_array($system['retries'] ?? null) ? $system['retries'] : [];
+		$step_key = 'translate_' . $lang;
+		return max(
+			0,
+			(int) ($system['translation_no_progress_attempts'] ?? 0),
+			(int) ($system['workflow_step_attempts'] ?? 0),
+			(int) ($retries[$step_key] ?? 0)
+		);
 	}
 
 	private static function reset_translation_no_progress_attempt(int $item_id, string $lang): void {
@@ -3059,7 +4118,13 @@ final class EPV2_AI_Processor {
 		$notes = is_array($notes) ? $notes : [];
 		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
 		$notes['_system']['retries'] = is_array($notes['_system']['retries'] ?? null) ? $notes['_system']['retries'] : [];
-		unset($notes['_system']['retries']['translate_' . $lang]);
+		$step_key = 'translate_' . $lang;
+		unset($notes['_system']['retries'][$step_key]);
+		$notes['_system']['translation_no_progress_attempts'] = 0;
+		if ((string) ($notes['_system']['workflow_step'] ?? '') === $step_key) {
+			$notes['_system']['workflow_step_attempts'] = 0;
+			$notes['_system']['workflow_last_error'] = '';
+		}
 		EPV2_Queue::update_fields($item_id, [
 			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 		]);
@@ -3154,7 +4219,7 @@ final class EPV2_AI_Processor {
 			$notes['_system']['review_rebuild_signature'] = $signature;
 		}
 		$notes['_system']['retries']['review_rebuild'] = (int) ($notes['_system']['retries']['review_rebuild'] ?? 0) + 1;
-		unset($notes['_system']['retry_after']);
+		self::clear_workflow_retry_window($notes);
 		EPV2_Queue::update_fields($item_id, [
 			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 		]);
@@ -3222,7 +4287,7 @@ final class EPV2_AI_Processor {
 			$notes['_system']['review_finish_signature'] = $signature;
 		}
 		$notes['_system']['retries']['review_finish'] = (int) ($notes['_system']['retries']['review_finish'] ?? 0) + 1;
-		unset($notes['_system']['retry_after']);
+		self::clear_workflow_retry_window($notes);
 		EPV2_Queue::update_fields($item_id, [
 			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 		]);
@@ -3313,6 +4378,13 @@ final class EPV2_AI_Processor {
 			&& empty($meta['translations_deferred'])
 			&& self::de_master_ready_for_translation($payload)
 			&& self::payload_needs_publish_finish_fast($payload)
+		) {
+			return false;
+		}
+		if (
+			$translations_ready
+			&& empty($meta['translations_deferred'])
+			&& ! self::payload_translation_rebuild_explicitly_invalidated($payload)
 		) {
 			return false;
 		}
@@ -3506,6 +4578,9 @@ final class EPV2_AI_Processor {
 			return false;
 		}
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		if (! empty($meta['blockers'])) {
+			return false;
+		}
 		return (int) ($meta['quality']['score'] ?? 0) >= 100
 			&& (int) ($meta['seo_quality']['score'] ?? 0) >= 100
 			&& (int) ($meta['release_quality']['score'] ?? 0) >= 100
@@ -3641,72 +4716,7 @@ final class EPV2_AI_Processor {
 	}
 
 	private static function payload_ready_for_publish(array $payload): bool {
-		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
-		if (self::payload_selection_blocks_automatic_publish($payload)) {
-			return false;
-		}
-		if (self::payload_context_rejects($payload)) {
-			return false;
-		}
-		if (self::payload_has_stale_context_signal($payload)) {
-			return false;
-		}
-		$stage_checklist = is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
-		$terminal_ready_despite_stale_stage =
-			! empty($stage_checklist['ready_publish'])
-			&& ! empty($stage_checklist['translations_ready'])
-			&& ! empty($stage_checklist['publish_finish_ready'])
-			&& empty($meta['translations_deferred']);
-		if (self::payload_pipeline_stage($payload) !== '' && ! $terminal_ready_despite_stale_stage) {
-			return false;
-		}
-		if (self::payload_next_required_stage($payload) !== '') {
-			return false;
-		}
-		$quality = is_array($meta['quality'] ?? null) ? $meta['quality'] : [];
-		$seo_quality = is_array($meta['seo_quality'] ?? null) ? $meta['seo_quality'] : [];
-		$release_quality = is_array($meta['release_quality'] ?? null) ? $meta['release_quality'] : [];
-		$google_quality = is_array($meta['google_quality'] ?? null) ? $meta['google_quality'] : [];
-		if (
-			! empty($stage_checklist['ready_publish'])
-			&& empty($meta['gate_mode'])
-			&& self::payload_primary_media_url($payload) !== ''
-			&& self::payload_featured_media_is_publishable($payload)
-			&& self::quality_meets_publish_gate($quality, 'editorial')
-			&& self::quality_meets_publish_gate($seo_quality, 'seo')
-			&& self::quality_meets_publish_gate($release_quality, 'release')
-			&& self::quality_meets_publish_gate($google_quality, 'google')
-		) {
-			return true;
-		}
-
-		if (! empty($meta['gate_mode']) && (string) $meta['gate_mode'] !== 'ai_priority_only') {
-			return false;
-		}
-		if (! self::quality_meets_publish_gate($quality, 'editorial')) {
-			return false;
-		}
-		if (! self::quality_meets_publish_gate($seo_quality, 'seo')) {
-			return false;
-		}
-		if (! self::quality_meets_publish_gate($release_quality, 'release')) {
-			return false;
-		}
-		if (! self::quality_meets_publish_gate($google_quality, 'google')) {
-			return false;
-		}
-		$featured_media_url = self::payload_primary_media_url($payload);
-		if ($featured_media_url === '' || self::payload_media_is_blocked($payload, $featured_media_url)) {
-			return false;
-		}
-		if (! self::payload_featured_media_is_publishable($payload)) {
-			return false;
-		}
-		if (! self::payload_has_publish_grade_substance($payload)) {
-			return false;
-		}
-
-		return self::languages_look_publishable($payload);
+		return self::publish_ready_gate_passes($payload);
 	}
 
 	private static function payload_has_stale_context_signal(array $payload): bool {
@@ -3792,10 +4802,32 @@ final class EPV2_AI_Processor {
 	private static function payload_selection_blocks_automatic_publish(array $payload): bool {
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 		$decision = sanitize_key((string) ($meta['selection']['decision'] ?? ''));
+		if ($decision === 'low' && self::low_selection_payload_earned_publish_gate($payload)) {
+			return false;
+		}
 		if (! in_array($decision, ['low', 'reject'], true)) {
 			return false;
 		}
 		return ! self::payload_has_editorial_publish_override($payload);
+	}
+
+	private static function low_selection_payload_earned_publish_gate(array $payload): bool {
+		$payload = self::refresh_stage_checklist_for_routing($payload);
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$checklist = is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
+		foreach (['quality', 'seo_quality', 'release_quality', 'google_quality'] as $key) {
+			$quality = is_array($meta[$key] ?? null) ? $meta[$key] : [];
+			if (empty($quality['pass']) || (int) ($quality['score'] ?? 0) < 100 || ! self::quality_has_no_warnings($quality)) {
+				return false;
+			}
+		}
+		return
+			! empty($checklist['ready_publish'])
+			&& ! empty($checklist['translations_ready'])
+			&& ! empty($checklist['publish_finish_ready'])
+			&& self::publish_ready_gate_language_contract_passes($payload)
+			&& self::publish_ready_gate_media_contract_passes($payload)
+			&& self::payload_has_publish_grade_substance($payload);
 	}
 
 	private static function context_reject_can_be_overridden_by_completed_payload(array $payload, array $context): bool {
@@ -3841,6 +4873,9 @@ final class EPV2_AI_Processor {
 		if (EPV2_Media::is_generated_story_cover_url($featured_media_url)) {
 			return false;
 		}
+		if (! self::payload_featured_media_meets_source_first_contract($payload, $featured_media_url)) {
+			return false;
+		}
 		$de_payload = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
 		$title = trim((string) ($de_payload['title'] ?? ''));
 		$excerpt = trim((string) ($de_payload['excerpt'] ?? ''));
@@ -3851,6 +4886,44 @@ final class EPV2_AI_Processor {
 			return false;
 		}
 		return EPV2_Media::is_relevant_media($featured_media_url, $title, $excerpt, $categories, $dossier);
+	}
+
+	private static function payload_featured_media_meets_source_first_contract(array $payload, string $featured_media_url = ''): bool {
+		$featured_media_url = $featured_media_url !== '' ? $featured_media_url : self::payload_primary_media_url($payload);
+		if ($featured_media_url === '') {
+			return false;
+		}
+		$dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? $payload['_meta']['source_dossier'] : [];
+		if (EPV2_Media::is_source_host_media($featured_media_url, $dossier)) {
+			return true;
+		}
+		if (! self::payload_featured_media_is_generic_stock($payload)) {
+			return true;
+		}
+		return ! self::payload_has_source_dossier_media_candidates($payload);
+	}
+
+	private static function payload_has_source_dossier_media_candidates(array $payload): bool {
+		$dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? $payload['_meta']['source_dossier'] : [];
+		$candidates = [];
+		foreach (['primary', 'shell_primary'] as $key) {
+			if (is_array($dossier[$key] ?? null)) {
+				$candidates[] = (string) ($dossier[$key]['image'] ?? '');
+			}
+		}
+		foreach ((array) ($dossier['supporting'] ?? []) as $entry) {
+			if (is_array($entry)) {
+				$candidates[] = (string) ($entry['image'] ?? '');
+			}
+		}
+		foreach ($candidates as $candidate) {
+			$candidate = EPV2_Media::normalize_featured_candidate_url($candidate);
+			if ($candidate === '' || EPV2_Media::is_fallback_stock_url($candidate)) {
+				continue;
+			}
+			return true;
+		}
+		return false;
 	}
 
 	private static function is_reworkable_process_error(string $message): bool {
@@ -4329,6 +5402,47 @@ final class EPV2_AI_Processor {
 		return false;
 	}
 
+	private static function preserve_planner_selected_candidate_analysis(object $item, array $analysis): array {
+		$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+		$notes = is_array($notes) ? $notes : [];
+		$planner = is_array($notes['planner'] ?? null) ? $notes['planner'] : [];
+		$stored_selection = is_array($notes['selection'] ?? null) ? $notes['selection'] : [];
+		$planner_action = sanitize_key((string) ($planner['action'] ?? ''));
+		if (! in_array($planner_action, ['select', 'replace'], true)) {
+			return $analysis;
+		}
+		if (self::planner_selected_candidate_looks_like_noise($item)) {
+			return $analysis;
+		}
+		$decision = sanitize_key((string) ($analysis['decision'] ?? ''));
+		if (! in_array($decision, ['low', 'reject'], true)) {
+			return $analysis;
+		}
+		$reject_class = sanitize_key((string) ($analysis['reject_class'] ?? ''));
+		if (! in_array($reject_class, ['', 'low_score'], true)) {
+			return $analysis;
+		}
+		$score = max((int) ($analysis['score'] ?? 0), (int) ($stored_selection['score'] ?? 0), 40);
+		$analysis['score'] = $score;
+		$analysis['tier'] = 'C';
+		$analysis['decision'] = 'review';
+		$analysis['reject_class'] = '';
+		$analysis['planner_preserved'] = true;
+		$analysis['reasons'] = array_values(array_unique(array_filter(array_merge(
+			(array) ($analysis['reasons'] ?? []),
+			['planner selected candidate; soft repeat-analysis downgrade ignored']
+		))));
+		return $analysis;
+	}
+
+	private static function planner_selected_candidate_looks_like_noise(object $item): bool {
+		$text = mb_strtolower(trim((string) (($item->original_title ?? '') . ' ' . ($item->original_excerpt ?? '') . ' ' . ($item->original_url ?? ''))));
+		if ($text === '') {
+			return false;
+		}
+		return preg_match('/\b(let.?s dance|dschungelcamp|promi|celebrity|stalker|llambi|gammour|geweint|horoskop|sternzeichen|ranking|die besten|tv und stream)\b/u', $text) === 1;
+	}
+
 	private static function quality_has_no_warnings(array $quality): bool {
 		$warnings = $quality['warnings'] ?? [];
 		if (! is_array($warnings) || $warnings === []) {
@@ -4384,10 +5498,24 @@ final class EPV2_AI_Processor {
 			return empty($checklist['de_master_ready']) || empty($checklist['translations_ready']);
 		}
 
-		return false;
-	}
+			return false;
+		}
 
-	private static function languages_look_publishable(array $payload): bool {
+		private static function payload_has_ai_provider_failure(array $payload): bool {
+			$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			$messages = array_merge(
+				(array) ($meta['blockers'] ?? []),
+				(array) ($meta['warnings'] ?? [])
+			);
+			foreach ($messages as $message) {
+				if (preg_match('/all ai providers failed|ai provider unavailable|provider unavailable/i', (string) $message) === 1) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		private static function languages_look_publishable(array $payload): bool {
 		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
 		$uk = is_array($payload['languages']['uk'] ?? null) ? $payload['languages']['uk'] : [];
 		$en = is_array($payload['languages']['en'] ?? null) ? $payload['languages']['en'] : [];
@@ -4471,7 +5599,8 @@ final class EPV2_AI_Processor {
 		$de_soft = (int) ($profile['de']['content_soft_chars'] ?? 1100);
 		$event_kind = sanitize_key((string) ($meta['source_dossier']['event_context']['kind'] ?? ''));
 		if (in_array($shape, ['bulletin', 'service_note'], true)) {
-			return mb_strlen($content_plain) >= $de_min && $source_count >= 1;
+			return (mb_strlen($content_plain) >= $de_min && $source_count >= 1)
+				|| self::payload_allows_short_factual_bulletin($payload, $content_plain);
 		}
 		if ($shape === 'preview') {
 			return mb_strlen($content_plain) >= $de_min
@@ -4501,6 +5630,9 @@ final class EPV2_AI_Processor {
 			return true;
 		}
 		if ($source_count >= 1 && mb_strlen($content_plain) >= $de_soft) {
+			return true;
+		}
+		if (self::payload_allows_short_factual_bulletin($payload, $content_plain)) {
 			return true;
 		}
 		if ($source_count >= 2 && mb_strlen($content_plain) >= max($de_soft, $de_min + 120)) {
@@ -4562,6 +5694,16 @@ final class EPV2_AI_Processor {
 		}
 		$checklist = self::payload_stage_checklist(self::refresh_stage_checklist($payload));
 		return empty($checklist['translations_ready']);
+	}
+
+	private static function payload_translation_rebuild_explicitly_invalidated(array $payload): bool {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		foreach (['translation_rebuild_invalidated', 'allow_translation_rebuild', 'force_rebuild_after_translation'] as $flag) {
+			if (! empty($meta[$flag])) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static function maybe_cooldown_stagnated_rebuild(object $item, array $before, array $after, string $next_stage): bool {
@@ -4686,8 +5828,10 @@ final class EPV2_AI_Processor {
 		if ($item_id <= 0) {
 			return false;
 		}
-		$rows = $wpdb->get_col(
-			"SELECT payload
+		$item = EPV2_Queue::get_item_summary($item_id);
+		$updated_at = $item ? strtotime((string) ($item->updated_at ?? '')) : 0;
+		$rows = $wpdb->get_results(
+			"SELECT payload, started_at
 			FROM {$wpdb->prefix}epv2_runs
 			WHERE job_name = 'process'
 			  AND status IN ('finished', 'finished_with_errors')
@@ -4695,8 +5839,14 @@ final class EPV2_AI_Processor {
 			LIMIT 30"
 		);
 		$matching = 0;
-		foreach ((array) $rows as $raw_payload) {
-			$payload = json_decode((string) $raw_payload, true);
+		foreach ((array) $rows as $row) {
+			if ($updated_at > 0) {
+				$started_at = strtotime((string) ($row->started_at ?? '')) ?: 0;
+				if ($started_at > 0 && $started_at < $updated_at) {
+					continue;
+				}
+			}
+			$payload = json_decode((string) ($row->payload ?? ''), true);
 			$payload = is_array($payload) ? $payload : [];
 			$run_item_id = (int) ($payload['processed_item_id'] ?? $payload['last_item_id'] ?? 0);
 			if ($run_item_id !== $item_id) {
@@ -4792,7 +5942,7 @@ final class EPV2_AI_Processor {
 		if ($source_count <= 0) {
 			return false;
 		}
-		return mb_strlen($content_plain) >= $de_min;
+		return mb_strlen($content_plain) >= $de_min || self::payload_allows_short_factual_bulletin($payload, $content_plain);
 	}
 
 	private static function looks_like_official_primary(string $url): bool {
@@ -5082,14 +6232,24 @@ final class EPV2_AI_Processor {
 		$en_ready = self::payload_language_ready_for_routing($payload, 'en');
 		$translations_ready = $uk_ready && $en_ready && empty($payload['_meta']['translations_deferred']);
 		$publish_finish_ready = self::de_master_ready_for_routing($payload);
+		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
+		$content_plain = trim(wp_strip_all_tags((string) ($de['content'] ?? '')));
+		$short_factual_ready =
+			self::payload_allows_short_factual_bulletin($payload, $content_plain)
+			&& self::payload_has_publish_grade_substance($payload);
 		$ready_publish_fast =
 			$translations_ready
 			&& $publish_finish_ready
 			&& self::payload_primary_media_url($payload) !== ''
-			&& (int) ($payload['_meta']['quality']['score'] ?? 0) >= 100
-			&& (int) ($payload['_meta']['seo_quality']['score'] ?? 0) >= 100
-			&& (int) ($payload['_meta']['release_quality']['score'] ?? 0) >= 100
-			&& (int) ($payload['_meta']['google_quality']['score'] ?? 0) >= 100;
+			&& (
+				(
+					(int) ($payload['_meta']['quality']['score'] ?? 0) >= 100
+					&& (int) ($payload['_meta']['seo_quality']['score'] ?? 0) >= 100
+					&& (int) ($payload['_meta']['release_quality']['score'] ?? 0) >= 100
+					&& (int) ($payload['_meta']['google_quality']['score'] ?? 0) >= 100
+				)
+				|| $short_factual_ready
+			);
 		$completed = [
 			'source_received' => true,
 			'initial_analysis_done' => ! empty($payload['_meta']['selection']),
@@ -5163,8 +6323,8 @@ final class EPV2_AI_Processor {
 		}
 
 		$translations_ready =
-			self::payload_language_ready($payload, 'uk')
-			&& self::payload_language_ready($payload, 'en')
+			(self::payload_language_ready($payload, 'uk') || self::payload_language_ready_for_routing($payload, 'uk'))
+			&& (self::payload_language_ready($payload, 'en') || self::payload_language_ready_for_routing($payload, 'en'))
 			&& empty($meta['translations_deferred']);
 		$release_google_ready =
 			self::de_master_ready_for_translation($payload)
@@ -5191,6 +6351,9 @@ final class EPV2_AI_Processor {
 		if ($payload === [] || self::payload_context_rejects($payload)) {
 			return '';
 		}
+		if (self::payload_blocker_strings($payload) !== []) {
+			return '';
+		}
 		$checklist = self::payload_stage_checklist(self::refresh_stage_checklist_for_routing($payload));
 		$requires_rebuild_fast = self::payload_requires_fresh_rebuild_fast($payload);
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
@@ -5198,6 +6361,7 @@ final class EPV2_AI_Processor {
 			! empty($checklist['uk_ready'])
 			&& ! empty($checklist['en_ready'])
 			&& empty($meta['translations_deferred']);
+		$allow_translation_rebuild = $translations_ready && self::payload_translation_rebuild_explicitly_invalidated($payload);
 		$can_finish_without_rebuild = $translations_ready && self::publish_finish_resume_is_viable($payload);
 		if (empty($checklist['de_master_ready'])) {
 			if ($can_finish_without_rebuild) {
@@ -5212,19 +6376,19 @@ final class EPV2_AI_Processor {
 			return 'translate_en';
 		}
 		if (empty($checklist['publish_finish_ready'])) {
-			if ($can_finish_without_rebuild) {
+			if ($can_finish_without_rebuild || ($translations_ready && ! $allow_translation_rebuild)) {
 				return 'publish_finish';
 			}
 			return 'rebuild_bundle';
 		}
 		if (! self::payload_is_review_ready_fast($payload)) {
-			return $requires_rebuild_fast ? 'rebuild_bundle' : 'publish_finish';
+			return ($requires_rebuild_fast && ! ($translations_ready && ! $allow_translation_rebuild)) ? 'rebuild_bundle' : 'publish_finish';
 		}
 		if (empty($checklist['ready_publish'])) {
-			return $requires_rebuild_fast ? 'rebuild_bundle' : 'publish_finish';
+			return ($requires_rebuild_fast && ! ($translations_ready && ! $allow_translation_rebuild)) ? 'rebuild_bundle' : 'publish_finish';
 		}
 		if (! self::payload_has_publish_grade_substance($payload)) {
-			return 'rebuild_bundle';
+			return ($translations_ready && ! $allow_translation_rebuild) ? 'publish_finish' : 'rebuild_bundle';
 		}
 		if (! self::payload_is_terminal_publish_ready($payload)) {
 			return 'publish_finish';
@@ -5237,12 +6401,27 @@ final class EPV2_AI_Processor {
 			return is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
 		}
 
-		private static function payload_next_stage_from_cached_checklist(array $payload): string {
-			$pipeline_stage = self::payload_pipeline_stage($payload);
+			private static function payload_next_stage_from_cached_checklist(array $payload): string {
+				$pipeline_stage = self::payload_pipeline_stage($payload);
+				if (self::payload_blocker_strings($payload) !== []) {
+					return '';
+				}
+			$checklist = self::payload_stage_checklist($payload);
+			$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			$translations_ready =
+				! empty($checklist['uk_ready'])
+				&& ! empty($checklist['en_ready'])
+				&& empty($meta['translations_deferred']);
+			if (
+				$pipeline_stage === 'rebuild_bundle'
+				&& $translations_ready
+				&& ! self::payload_translation_rebuild_explicitly_invalidated($payload)
+			) {
+				return 'publish_finish';
+			}
 			if (in_array($pipeline_stage, ['translate_uk', 'translate_en', 'translate_finish', 'publish_finish', 'rebuild_bundle'], true)) {
 				return $pipeline_stage;
 			}
-			$checklist = self::payload_stage_checklist($payload);
 			if ($checklist === []) {
 				return '';
 			}
@@ -5257,11 +6436,34 @@ final class EPV2_AI_Processor {
 			}
 			if (empty($checklist['publish_finish_ready']) || empty($checklist['ready_publish'])) {
 				return 'publish_finish';
+				}
+				return '';
 			}
-			return '';
-		}
 
-		private static function payload_next_required_stage(array $payload): string {
+			private static function worker_rebuild_payload_should_continue_to_publish_finish(array $payload): bool {
+				if ($payload === [] || self::payload_context_rejects($payload) || self::payload_blocker_strings($payload) !== []) {
+					return false;
+				}
+				$payload = self::refresh_stage_checklist_for_routing($payload);
+				$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+				$checklist = self::payload_stage_checklist($payload);
+				$translations_ready = (
+					! empty($checklist['translations_ready'])
+					|| (
+						self::payload_language_ready_for_routing($payload, 'uk')
+						&& self::payload_language_ready_for_routing($payload, 'en')
+						&& empty($meta['translations_deferred'])
+					)
+				);
+				if (! $translations_ready) {
+					return false;
+				}
+				return ! empty($checklist['publish_finish_ready'])
+					|| self::de_master_is_viable_fast($payload)
+					|| self::de_master_ready_for_translation($payload);
+			}
+
+			private static function payload_next_required_stage(array $payload): string {
 		if ($payload === [] || self::payload_context_rejects($payload)) {
 			return '';
 		}
@@ -5272,8 +6474,9 @@ final class EPV2_AI_Processor {
 			! empty($checklist['uk_ready'])
 			&& ! empty($checklist['en_ready'])
 			&& empty($meta['translations_deferred']);
+		$allow_translation_rebuild = $translations_ready && self::payload_translation_rebuild_explicitly_invalidated($payload);
 		if ($translations_ready && self::payload_needs_deeper_supporting_enrichment($payload)) {
-			return 'rebuild_bundle';
+			return $allow_translation_rebuild ? 'rebuild_bundle' : 'publish_finish';
 		}
 		if (empty($checklist['de_master_ready'])) {
 			if ($translations_ready && self::publish_finish_resume_is_viable($payload)) {
@@ -5288,7 +6491,7 @@ final class EPV2_AI_Processor {
 			return 'translate_en';
 		}
 		if (empty($checklist['publish_finish_ready'])) {
-			return $requires_rebuild_fast ? 'rebuild_bundle' : 'publish_finish';
+			return ($requires_rebuild_fast && ! ($translations_ready && ! $allow_translation_rebuild)) ? 'rebuild_bundle' : 'publish_finish';
 		}
 		// Once the full language bundle exists, finish on the publish path instead
 		// of re-opening rebuild loops for media/SEO polish. The publish_finish
@@ -5300,13 +6503,13 @@ final class EPV2_AI_Processor {
 			}
 		}
 		if (! self::payload_is_review_ready_fast($payload)) {
-			return $requires_rebuild_fast ? 'rebuild_bundle' : 'publish_finish';
+			return ($requires_rebuild_fast && ! ($translations_ready && ! $allow_translation_rebuild)) ? 'rebuild_bundle' : 'publish_finish';
 		}
 		if (empty($checklist['ready_publish'])) {
-			return $requires_rebuild_fast ? 'rebuild_bundle' : 'publish_finish';
+			return ($requires_rebuild_fast && ! ($translations_ready && ! $allow_translation_rebuild)) ? 'rebuild_bundle' : 'publish_finish';
 		}
 		if (! self::payload_has_publish_grade_substance($payload)) {
-			return 'rebuild_bundle';
+			return ($translations_ready && ! $allow_translation_rebuild) ? 'publish_finish' : 'rebuild_bundle';
 		}
 		if (! self::payload_is_terminal_publish_ready($payload)) {
 			return 'publish_finish';
@@ -5339,7 +6542,24 @@ final class EPV2_AI_Processor {
 		if ($source_count <= 0) {
 			return false;
 		}
-		return mb_strlen($content_plain) >= $de_min;
+		return mb_strlen($content_plain) >= $de_min || self::payload_allows_short_factual_bulletin($payload, $content_plain);
+	}
+
+	private static function payload_allows_short_factual_bulletin(array $payload, string $content_plain): bool {
+		if (mb_strlen($content_plain) < 480) {
+			return false;
+		}
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		if (! empty($meta['blockers'])) {
+			return false;
+		}
+		foreach (['quality', 'seo_quality', 'release_quality', 'google_quality'] as $key) {
+			$quality = is_array($meta[$key] ?? null) ? $meta[$key] : [];
+			if (empty($quality['pass'])) {
+				return false;
+			}
+		}
+		return (int) ($meta['source_count'] ?? 0) >= 1;
 	}
 
 	private static function payload_language_ready(array $payload, string $lang): bool {
@@ -5699,9 +6919,10 @@ final class EPV2_AI_Processor {
 			return self::refresh_payload_context_for_publish_lift($item, $payload, $categories);
 		}
 		$release_text = mb_strtolower(implode(' | ', self::warning_strings($payload['_meta']['release_quality']['warnings'] ?? [])));
+		$media_contract_passes = self::publish_ready_gate_media_contract_passes($payload);
 		$needs_media_repair = ! self::payload_has_media_candidate($payload)
-			|| ! self::payload_featured_media_is_publishable($payload)
-			|| preg_match('/generic stock featured media|слишком слабое.*featured media|не соответствует теме материала|нет featured media|нет главного изображения/u', $release_text) === 1;
+			|| ! $media_contract_passes
+			|| (! $media_contract_passes && preg_match('/generic stock featured media|слишком слабое.*featured media|не соответствует теме материала|нет featured media|нет главного изображения/u', $release_text) === 1);
 		if ($needs_media_repair) {
 			return self::repair_payload_media($item, $payload);
 		}
@@ -5924,6 +7145,8 @@ final class EPV2_AI_Processor {
 		$warning_text = preg_replace('/\bgeneric stock featured media\b/iu', '', $warning_text);
 		$warning_text = preg_replace('/\bслишком слабое.*featured media\b/iu', '', $warning_text);
 		$warning_text = preg_replace('/\bне соответствует теме материала\b/iu', '', $warning_text);
+		$warning_text = preg_replace('/\b(?:[a-z]{2}\s*:\s*)?материал может быть слишком коротким[^\|]*/iu', '', $warning_text);
+		$warning_text = preg_replace('/\b(?:[a-z]{2}\s*:\s*)?материал может быть слишком поверхностным[^\|]*/iu', '', $warning_text);
 		$warning_text = preg_replace('/\b(?:[a-z]{2}\s*:\s*)?слишком\s+слабое\s+досье\s+источников[^\|]*/iu', '', $warning_text);
 		$warning_text = preg_replace('/\b(?:[a-z]{2}\s*:\s*)?слабое\s+досье\s+источников[^\|]*/iu', '', $warning_text);
 		return trim((string) $warning_text, " |\t\n\r\0\x0B");
@@ -5955,7 +7178,10 @@ final class EPV2_AI_Processor {
 			$primary_category === 'sport'
 			|| $event_kind === 'sport'
 		) && mb_strlen($content_plain) >= 1400;
-		return $official_primary_longform || $single_source_longform_preview || $single_source_longform_sport;
+		return $official_primary_longform
+			|| $single_source_longform_preview
+			|| $single_source_longform_sport
+			|| self::payload_allows_short_factual_bulletin($payload, $content_plain);
 	}
 
 	private static function payload_featured_media_is_generic_stock(array $payload): bool {
@@ -6120,13 +7346,14 @@ final class EPV2_AI_Processor {
 		};
 		$war_tone_hint = 'Если тема связана с войной России против Украины, ударами по военным объектам, потерями российской армии, оккупированным Крымом или действиями украинской обороны, держи тон сухим, фактическим и стратегическим. Не используй сочувствующие или траурные формулы по отношению к потерям российской армии и военным объектам агрессора. Не создавай ложного морального симметризма. Допустимо ясно указывать, что Украина обороняется от российской агрессии, а удары по российской военной инфраструктуре являются частью этой войны. При этом не скатывайся в лозунги: только точные факты, контекст и последствия.';
 		$source_hint = 'Если исходный сигнал короткий или бедный, обязательно усили материал на основе первоисточника и ещё 1-3 подтверждающих публикаций из досье. Старайся ссылаться по смыслу на первоисточник и опираться именно на него как на основную фактуру. Если в досье есть короткая подтверждённая цитата с атрибуцией, используй одну такую цитату естественно внутри текста, а не как служебный блок. Когда в статье появляется прямая речь, указывай не только автора, но и площадку или контекст: например, что человек заявил это в интервью конкретному изданию, в заявлении для конкретного источника или по данным конкретной публикации. Не повторяй такую отсылку в каждом абзаце, но не оставляй цитату без ясной привязки. Для media_url используй только реальное релевантное изображение из первоисточника или из подтверждающих источников по той же теме. Не предлагай generated cover, абстрактный сток и декоративную заглушку для обычной news automation. Если у изображения есть авторство или подпись в источнике, сохрани это в raw-поле caption/source_label, если провайдер ответа это поддерживает. Если в source_dossier.event_context есть подтверждённые детали события, используй их естественно и только по делу: когда проходит матч или событие, где оно проходит, кто участвует, какая стадия, кто судит, что ждёт победителя дальше. Не выдумывай отсутствующие детали и не перенасыщай текст спортивным или сервисным фоном. Исходные тексты и сигналы могут быть на любом языке, но итоговый мастер-текст должен быть нормальным немецким newsroom-материалом без следов исходного языка. ' . $war_tone_hint . ' ' . $shape_hint;
+		$final_editorial_guard = 'Финальные жёсткие правила важнее любых пользовательских промптов ниже: не пиши списки служебных разделов, не добавляй подзаголовки "Контекст/Почему это важно/Что дальше", не растягивай короткий сигнал. Обычная новость должна быть умной, но лёгкой: короткие абзацы, простые предложения, без воды, без повторов и без фраз "es bleibt abzuwarten", "weitere Details werden bekannt", "Fans können sich freuen". Каждый существенный факт должен быть взят из original_* или source_dossier. Если фактов мало, пиши коротко и точно, а не длинно.';
 		$original_excerpt = self::trim_input_text((string) $item->original_excerpt, 1200);
 		$original_content = self::trim_input_text((string) $item->original_content, $reduced_context ? 4500 : 9000);
 		$input_dossier = self::compact_source_dossier($dossier, $reduced_context);
 		return [
 				[
 					'role' => 'system',
-					'content' => 'Ты редакционный AI для новостного сайта EuroPulse. Верни только JSON. Не добавляй комментарии. Не копируй исходный текст дословно. Сначала создай сильный мастер-материал только на немецком языке. Пиши как современное европейское цифровое медиа: профессионально, ясно, живо и плавно. Запрещены канцелярит, чиновничья сухость, язык пресс-релиза, советский бюллетень и рубленая структура из служебных подзаголовков. Не пиши блоками вида "Почему это важно:", "Контекст:", "Расширенный контекст:", "Что дальше:". Вместо этого строй цельную статью с естественными переходами, как в DW, Tagesschau, BBC, Reuters, AP или Al Jazeera. Начинай материал с проблемы, изменения, риска или главного последствия для читателя. Заголовок должен сообщать новость, а не просто тему: субъект + действие + главный поворот или последствие. Обычно держи заголовок в диапазоне 6-14 слов и без пустых общих формул. Лид должен состоять ровно из двух предложений и сразу объяснять, о чём статья и почему это важно. Для dek/lead держи рабочий диапазон примерно 25-55 слов суммарно. Основной текст строй по редакционному приоритету: сначала главный факт, затем подтверждение, затем ключевые детали, затем последствия, затем контекст и следующий шаг. Не перегружай текст полными официальными названиями законов и номерами параграфов, если это можно передать человеческим языком без потери точности. Для обычной новости не раздувай длину искусственно: если фактуры немного, лучше 4-7 сильных абзацев с плотной информацией, чем длинный пустой текст. Нужны человеческий ритм, сильный лид, понятные переходы, практическая польза для читателя и ясное объяснение, почему тема важна. Избегай длинных предложений: предпочитай короткие и средние конструкции. Соблюдай реальные лимиты интерфейса сайта: заголовки и лиды должны помещаться в карточки и слайдер без грязного обрезания. Если текст не помещается, не обрубай смысл, а переформулируй короче и чище. Особенно строго следи за украинской версией: она должна полностью влезать в самые узкие карточки сайта без троеточий и обрубленных хвостов. ' . $style_hint . ' ' . $format_hint . ' ' . $url_hint . ' ' . $citation_hint . ' ' . $source_hint . ' ' . $custom_prompt . ' Формат JSON: {"categories":["slug1","slug2"],"media_url":"...","languages":{"de":{"title":"","excerpt":"","content":"","media_url":""}}}',
+					'content' => 'Ты редакционный AI для новостного сайта EuroPulse. Верни только JSON. Не добавляй комментарии. Не копируй исходный текст дословно. Сначала создай сильный мастер-материал только на немецком языке. Это глубокий фактологический рерайт, а не выдумка: все твёрдые факты должны опираться на original_* или source_dossier. Запрещено придумывать даты, годы, время, место, числа, имена, должности, цитаты, причины, последствия, организации, участников, результаты и будущие шаги. Если в исходнике написано "gestern", "morgen", "am Abend", "kurz vor der Wahl" или другая относительная дата, не превращай её в конкретную календарную дату, если конкретной даты нет в исходнике. Если детали не хватает, пиши обобщённо или пропусти её; лучше короткий точный материал, чем длинный текст с заполнителями. Пиши как современное европейское цифровое медиа: профессионально, ясно, живо и плавно. Запрещены канцелярит, чиновничья сухость, язык пресс-релиза, советский бюллетень и рубленая структура из служебных подзаголовков. Не пиши блоками вида "Почему это важно:", "Контекст:", "Расширенный контекст:", "Что дальше:". Вместо этого строй цельную статью с естественными переходами, как в DW, Tagesschau, BBC, Reuters, AP или Al Jazeera. Начинай материал с проблемы, изменения, риска или главного последствия для читателя. Заголовок должен сообщать новость, а не просто тему: субъект + действие + главный поворот или последствие. Обычно держи заголовок в диапазоне 6-14 слов и без пустых общих формул. Лид должен состоять ровно из двух предложений и сразу объяснять, о чём статья и почему это важно. Для dek/lead держи рабочий диапазон примерно 25-55 слов суммарно. Основной текст строй по редакционному приоритету: сначала главный факт, затем подтверждение, затем ключевые детали, затем последствия, затем контекст и следующий шаг. Не перегружай текст полными официальными названиями законов и номерами параграфов, если это можно передать человеческим языком без потери точности. Для обычной новости не раздувай длину искусственно: если фактуры немного, лучше 4-7 сильных абзацев с плотной информацией, чем длинный пустой текст. Нужны человеческий ритм, сильный лид, понятные переходы, практическая польза для читателя и ясное объяснение, почему тема важна. Избегай длинных предложений: предпочитай короткие и средние конструкции. Соблюдай реальные лимиты интерфейса сайта: заголовки и лиды должны помещаться в карточки и слайдер без грязного обрезания. Если текст не помещается, не обрубай смысл, а переформулируй короче и чище. Особенно строго следи за украинской версией: она должна полностью влезать в самые узкие карточки сайта без троеточий и обрубленных хвостов. ' . $style_hint . ' ' . $format_hint . ' ' . $url_hint . ' ' . $citation_hint . ' ' . $source_hint . ' ' . $custom_prompt . ' ' . $final_editorial_guard . ' Формат JSON: {"categories":["slug1","slug2"],"media_url":"...","languages":{"de":{"title":"","excerpt":"","content":"","media_url":""}}}',
 				],
 			[
 				'role' => 'user',
@@ -6152,6 +7379,8 @@ final class EPV2_AI_Processor {
 							'lead_sentences' => 2,
 							'content_style' => $style,
 							'rewrite_depth' => 'deep_factual_rewrite',
+							'anti_hallucination' => 'no_new_dates_numbers_names_quotes_causes_consequences_unless_explicitly_supported_by_original_or_source_dossier',
+							'relative_time_rule' => 'do_not_convert_relative_time_words_to_calendar_dates_without_explicit_source_date',
 							'opening_mode' => 'start_with_problem_or_consequence',
 							'sentence_length' => 'short_to_medium',
 							'analysis_sources_target' => $story_format === 'analysis' ? 5 : 0,
@@ -7213,6 +8442,7 @@ final class EPV2_AI_Processor {
 			$combined = trim(implode(' ', array_filter([
 				(string) ($candidate['title'] ?? ''),
 				(string) ($candidate['excerpt'] ?? ''),
+				wp_strip_all_tags((string) ($candidate['content'] ?? '')),
 			])));
 			if ($combined === '') {
 				return false;
@@ -7301,19 +8531,19 @@ final class EPV2_AI_Processor {
 				'en' => '/\bukraine\b|\bukrainian\b/u',
 			],
 			'/\biran\b/u' => [
-				'uk' => '/\bіран[ауі]?\b/u',
+				'uk' => '/\bіран[а-яіїєґ]*\b/u',
 				'en' => '/\biran\b/u',
 			],
 			'/\bisrael\b/u' => [
-				'uk' => '/\bізраїл[юяії]?\b/u',
+				'uk' => '/\bізраїл[а-яіїєґ]*\b/u',
 				'en' => '/\bisrael\b/u',
 			],
 			'/\brussland\b|\brussisch\b|\bmoskau\b|\bkrim\b/u' => [
-				'uk' => '/\bрос(і|и)я|\bросійськ|\bмоскв|\bкрим/u',
+				'uk' => '/\bрос(і|и)(я|ї|єю|ю|йськ)|\bросійськ|\bмоскв|\bкрим/u',
 				'en' => '/\brussia\b|\brussian\b|\bmoscow\b|\bcrimea\b/u',
 			],
 			'/\bbundesregierung\b/u' => [
-				'uk' => '/\bфедеральн.*уряд\b|\bуряд німеччини\b|\bbundesregierung\b/u',
+				'uk' => '/\bфедеральн[а-яіїєґ]*.*уряд[а-яіїєґ]*\b|\bуряд[а-яіїєґ]* німеччин[а-яіїєґ]*\b|\bbundesregierung\b/u',
 				'en' => '/\bfederal government\b|\bgerman government\b|\bbundesregierung\b/u',
 			],
 			'/\bbbk\b|\bbundesamt für bevölkerungsschutz\b/u' => [
@@ -7406,9 +8636,9 @@ final class EPV2_AI_Processor {
 			],
 			[
 				// Restrict funding/research markers to actual Foerderung terms, not generic "fordert".
-				'source' => '/\bf[öo]rder(?:ung|mittel|programm|gelder|topf|projekt|projekte|linie|bescheid|bescheide|initiative)?\b|\bforschungsprojekt|\bforschung|\bnachwuchsgruppen|\bsozialpolitik|\bbundesministerium f[üu]r arbeit\b/u',
-				'uk' => '/\bфінансуван|\bгрант|\bдосліджен|\bдослідницьк|\bпроєкт|\bміністерств/u',
-				'en' => '/\bfunding\b|\bgrant\b|\bresearch\b|\bproject\b|\bministry\b/u',
+				'source' => '/\bf(?:örder|oerder)(?:ung|mittel|programm|gelder|topf|projekt|projekte|linie|bescheid|bescheide|initiative)\b|\bforschungsprojekt|\bforschung|\bnachwuchsgruppen|\bsozialpolitik|\bbundesministerium f[üu]r arbeit\b/u',
+				'uk' => '/\bфінансуван|\bгрант|\bдосліджен|\bдослідницьк|\bпроєкт|\bміністерств|\bпідтрим/u',
+				'en' => '/\bfunding\b|\bgrant\b|\bresearch\b|\bproject\b|\bministry\b|\bsubsid|\bsupport/u',
 			],
 		];
 		foreach ($topicMap as $group) {

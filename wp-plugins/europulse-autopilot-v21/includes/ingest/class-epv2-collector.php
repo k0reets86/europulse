@@ -180,6 +180,7 @@ final class EPV2_Collector {
 		$duplicate = EPV2_Deduplicator::is_duplicate((string) ($item['title'] ?? ''), (string) ($item['content'] ?? ''), (string) ($item['url'] ?? ''));
 		if (! empty($duplicate['duplicate'])) {
 			EPV2_Stats::bump('duplicates');
+			self::audit_candidate($item, $source, [], 'stage', 'duplicate_precheck', ['duplicate' => $duplicate]);
 			return;
 		}
 
@@ -189,13 +190,23 @@ final class EPV2_Collector {
 		$category = sanitize_text_field((string) ($analysis['category'] ?? $source_category));
 		$item['category'] = $category !== '' ? $category : $source_category;
 		if ($category === '' || ($analysis['decision'] ?? '') === 'reject') {
+			self::audit_candidate($item, $source, $analysis, 'stage', 'selection_reject');
 			return;
 		}
-		if (! self::candidate_is_fresh_enough($item, $analysis)) {
+		if (self::candidate_has_hard_editorial_block($item, $source, $analysis)) {
+			self::audit_candidate($item, $source, $analysis, 'stage', 'hard_editorial_block');
+			return;
+		}
+		if (! self::candidate_is_fresh_enough($item, $analysis, $source)) {
+			self::audit_candidate($item, $source, $analysis, 'stage', 'freshness_block');
 			return;
 		}
 		$active_load = EPV2_Queue::category_load(['new', 'processing_de', 'retry_process', 'ready_publish', 'publishing']);
 		if ((int) ($active_load[$category] ?? 0) >= self::effective_queue_new_max_per_category()) {
+			self::audit_candidate($item, $source, $analysis, 'stage', 'category_active_load_cap', [
+				'active_load' => (int) ($active_load[$category] ?? 0),
+				'queue_limit' => self::effective_queue_new_max_per_category(),
+			]);
 			return;
 		}
 
@@ -204,6 +215,7 @@ final class EPV2_Collector {
 			self::automation_requires_publish_grade()
 			&& ! in_array((string) ($analysis['decision'] ?? ''), ['review', 'strong', 'priority'], true)
 		) {
+			self::audit_candidate($item, $source, $analysis, 'stage', 'not_publish_grade', ['ai_gate' => $ai_gate]);
 			return;
 		}
 		if (
@@ -211,14 +223,26 @@ final class EPV2_Collector {
 			&& empty($ai_gate['allow'])
 			&& (string) ($ai_gate['reason'] ?? '') !== 'достигнут AI-бюджет дня'
 		) {
+			self::audit_candidate($item, $source, $analysis, 'stage', 'ai_gate_block', [
+				'ai_gate' => $ai_gate,
+				'gate_reason' => (string) ($ai_gate['reason'] ?? ''),
+			]);
 			return;
 		}
 		$queue_gate = EPV2_Budget_Manager::should_keep_in_queue($analysis);
 		if (empty($queue_gate['keep'])) {
+			self::audit_candidate($item, $source, $analysis, 'stage', 'queue_gate_block', [
+				'queue_gate' => $queue_gate,
+				'gate_reason' => (string) ($queue_gate['reason'] ?? ''),
+			]);
 			return;
 		}
 		$planner = EPV2_Category_Planner::decide_for_candidate($category, (int) ($analysis['score'] ?? 0), $analysis);
 		if (($planner['action'] ?? '') === 'reject') {
+			self::audit_candidate($item, $source, $analysis, 'stage', 'planner_reject', [
+				'planner' => $planner,
+				'planner_reason' => (string) ($planner['reason'] ?? ''),
+			]);
 			return;
 		}
 
@@ -229,6 +253,10 @@ final class EPV2_Collector {
 			'analysis' => $analysis,
 			'score' => self::candidate_rank_score($item, $source, $analysis),
 		];
+		self::audit_candidate($item, $source, $analysis, 'stage', 'staged_candidate', [
+			'ai_gate' => $ai_gate,
+			'planner' => $planner,
+		]);
 	}
 
 	private static function commit_staged_candidates(array $staged_candidates, array &$by_category): int {
@@ -272,6 +300,7 @@ final class EPV2_Collector {
 		$duplicate = EPV2_Deduplicator::is_duplicate((string) ($item['title'] ?? ''), (string) ($item['content'] ?? ''), (string) ($item['url'] ?? ''));
 		if (! empty($duplicate['duplicate'])) {
 			EPV2_Stats::bump('duplicates');
+			self::audit_candidate($item, $source, [], 'ingest', 'duplicate_precheck', ['duplicate' => $duplicate]);
 			return false;
 		}
 		$item['source_id'] = (int) ($source->id ?? 0);
@@ -280,9 +309,15 @@ final class EPV2_Collector {
 		$category = sanitize_text_field((string) ($analysis['category'] ?? $source_category));
 		$item['category'] = $category !== '' ? $category : $source_category;
 		if (($analysis['decision'] ?? '') === 'reject') {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'selection_reject');
 			return false;
 		}
-		if (! self::candidate_is_fresh_enough($item, $analysis)) {
+		if (self::candidate_has_hard_editorial_block($item, $source, $analysis)) {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'hard_editorial_block');
+			return false;
+		}
+		if (! self::candidate_is_fresh_enough($item, $analysis, $source)) {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'freshness_block');
 			return false;
 		}
 		$active_load = EPV2_Queue::category_load(['new', 'processing_de', 'retry_process', 'ready_publish', 'publishing']);
@@ -291,9 +326,17 @@ final class EPV2_Collector {
 		$collect_limit = self::effective_collect_per_category_limit();
 		$queue_limit = self::effective_queue_new_max_per_category();
 		if ($category !== '' && $by_category[$category] >= $collect_limit) {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'collect_category_cap', [
+				'by_category' => (int) $by_category[$category],
+				'collect_limit' => $collect_limit,
+			]);
 			return false;
 		}
 		if ($category !== '' && (int) ($active_load[$category] ?? 0) >= $queue_limit) {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'category_active_load_cap', [
+				'active_load' => (int) ($active_load[$category] ?? 0),
+				'queue_limit' => $queue_limit,
+			]);
 			return false;
 		}
 		$ai_gate = EPV2_Budget_Manager::should_send_to_ai($analysis);
@@ -301,6 +344,7 @@ final class EPV2_Collector {
 			self::automation_requires_publish_grade()
 			&& ! in_array((string) ($analysis['decision'] ?? ''), ['review', 'strong', 'priority'], true)
 		) {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'not_publish_grade', ['ai_gate' => $ai_gate]);
 			return false;
 		}
 		if (
@@ -308,20 +352,36 @@ final class EPV2_Collector {
 			&& empty($ai_gate['allow'])
 			&& (string) ($ai_gate['reason'] ?? '') !== 'достигнут AI-бюджет дня'
 		) {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'ai_gate_block', [
+				'ai_gate' => $ai_gate,
+				'gate_reason' => (string) ($ai_gate['reason'] ?? ''),
+			]);
 			return false;
 		}
 		$queue_gate = EPV2_Budget_Manager::should_keep_in_queue($analysis);
 		if (empty($queue_gate['keep'])) {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'queue_gate_block', [
+				'queue_gate' => $queue_gate,
+				'gate_reason' => (string) ($queue_gate['reason'] ?? ''),
+			]);
 			return false;
 		}
 		$planner = EPV2_Category_Planner::decide_for_candidate($category, (int) ($analysis['score'] ?? 0), $analysis);
 		if (($planner['action'] ?? '') === 'reject') {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'planner_reject', [
+				'planner' => $planner,
+				'planner_reason' => (string) ($planner['reason'] ?? ''),
+			]);
 			return false;
 		}
 		$cluster = EPV2_Story_Clusters::register_candidate($item, $source);
 		$story_duplicate = EPV2_Deduplicator::is_story_duplicate($item, $cluster);
 		if (! empty($story_duplicate['duplicate'])) {
 			EPV2_Stats::bump('duplicates');
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'story_duplicate', [
+				'duplicate' => $story_duplicate,
+				'cluster' => $cluster,
+			]);
 			return false;
 		}
 		$event_key = sanitize_title((string) ($story_duplicate['event_key'] ?? EPV2_Deduplicator::event_key_for_candidate($item, $cluster)));
@@ -332,6 +392,12 @@ final class EPV2_Collector {
 		$item['state'] = 'new';
 		$item['admin_notes'] = wp_json_encode(['selection' => $analysis, 'ai_gate' => $ai_gate, 'cluster' => $cluster, 'planner' => $planner, 'event_key' => $event_key], JSON_UNESCAPED_UNICODE);
 		$item_id = EPV2_Queue::add_item($item);
+		self::audit_candidate($item, $source, $analysis, 'ingest', $item_id > 0 ? 'queued' : 'queue_insert_failed', [
+			'ai_gate' => $ai_gate,
+			'planner' => $planner,
+			'cluster_id' => (int) ($cluster['id'] ?? 0),
+			'event_key' => $event_key,
+		], $item_id);
 		if ($item_id > 0 && ! empty($cluster['id'])) {
 			$cluster = EPV2_Story_Clusters::refresh_cluster_metrics((int) $cluster['id']);
 			EPV2_Queue::update_fields($item_id, [
@@ -344,7 +410,65 @@ final class EPV2_Collector {
 		return $item_id > 0;
 	}
 
-	private static function candidate_is_fresh_enough(array $item, array $analysis): bool {
+	private static function audit_candidate(array $item, object $source, array $analysis, string $phase, string $outcome, array $context = [], int $queue_id = 0): void {
+		if (! class_exists('EPV2_Selection_Audit')) {
+			return;
+		}
+		try {
+			EPV2_Selection_Audit::record_candidate($item, $source, $analysis, $phase, $outcome, $context, $queue_id);
+		} catch (Throwable $e) {
+			EPV2_Logger::warning('selection_audit', 'Selection audit write failed', [
+				'outcome' => $outcome,
+				'error' => $e->getMessage(),
+			]);
+		}
+	}
+
+	private static function candidate_has_hard_editorial_block(array $item, object $source, array $analysis): bool {
+		if (! empty($analysis['breaking_candidate']) || ! empty($analysis['top_story_candidate']) || (string) ($analysis['decision'] ?? '') === 'priority') {
+			return false;
+		}
+		$text = mb_strtolower(trim(implode(' ', array_filter([
+			(string) ($item['title'] ?? ''),
+			(string) ($item['excerpt'] ?? ''),
+			wp_strip_all_tags((string) ($item['content'] ?? '')),
+			(string) ($item['url'] ?? ''),
+		]))));
+		if ($text === '') {
+			return true;
+		}
+
+		if (preg_match('/[єіїґ]{2,}.*\b(open for business|business|planning)\b/iu', $text) === 1) {
+			return true;
+		}
+
+		$core_geo = preg_match('/\b(deutschland|bundes|berlin|bayern|m[üu]nchen|europa|eu\b|europe|ukraine|ukrain|україн|украин|russland|russian|moskau|br[üu]ssel|nato)\b/iu', $text) === 1;
+		$us_local = preg_match('/\b(white house|trump|us teacher|teacher pay|american school|washington dinner|press dinner|state governor|senate bill|u\\.s\\.|usa)\b/iu', $text) === 1;
+		if ($us_local && ! $core_geo) {
+			return true;
+		}
+
+		$biotech_pr = preg_match('/\b(therapeutics|phase\\s*[123]|clinical trial|gene editing|reports positive|hereditary angioedema|fda)\b/iu', $text) === 1;
+		if ($biotech_pr && ! $core_geo) {
+			return true;
+		}
+
+		$product_test = preg_match('/\b(öko-?test|stiftung warentest|vitamin-?d|präparate|ranking|die besten|produkttest|testbericht)\b/iu', $text) === 1;
+		$public_warning = preg_match('/\b(r[üu]ckruf|warnung|verbot|gesundheitsgefahr|beh[öo]rde warnt)\b/iu', $text) === 1;
+		if ($product_test && ! $public_warning) {
+			return true;
+		}
+
+		$event_page = preg_match('/\b(special opening hours|opening hours|programme at|concert version|gallery weekend|ausstellung|vernissage|programm am|sonder[öo]ffnungszeiten)\b/iu', $text) === 1;
+		$news_delta = preg_match('/\b(er[öo]ffnet|beschlossen|kritisiert|warnt|fordert|angek[üu]ndigt|streik|protest|urteil|gesetz|investition|angriff|tote|verletzte)\b/iu', $text) === 1;
+		if ($event_page && ! $news_delta) {
+			return true;
+		}
+
+		return false;
+	}
+
+	private static function candidate_is_fresh_enough(array $item, array $analysis, ?object $source = null): bool {
 		$date = trim((string) ($item['date'] ?? ''));
 		if ($date === '') {
 			return true;
@@ -372,7 +496,29 @@ final class EPV2_Collector {
 
 		$serviceCategory = in_array($category, ['leben-in-deutschland', 'community'], true);
 		$serviceText = preg_match('/jobcenter|arbeitsagentur|bamf|einb[üu]rger|wohngeld|kindergeld|sprachkurs|aufenthalt|community|beratung|krankenkasse|допомог|інтеграц|посвідк|страхов|громад/u', $text) === 1;
-		$window = ($serviceCategory || $serviceText) ? 18 * HOUR_IN_SECONDS : 8 * HOUR_IN_SECONDS;
+		$score = max(0, (int) ($analysis['score'] ?? 0));
+		$decision = sanitize_key((string) ($analysis['decision'] ?? ''));
+		$tier = strtoupper(sanitize_key((string) ($analysis['tier'] ?? '')));
+		$source_type = is_object($source) ? sanitize_key((string) ($source->type ?? '')) : '';
+		$source_risk = is_object($source) ? sanitize_key((string) ($source->risk_level ?? '')) : '';
+		$trusted_primary = $source_type !== 'google_news' && in_array($source_risk, ['safe', 'low', 'moderate'], true);
+		$seriousCategory = in_array($category, ['politik', 'welt', 'ukraine', 'europa', 'deutschland', 'wirtschaft', 'bayern', 'muenchen'], true);
+		$softCategory = in_array($category, ['sport', 'kultur'], true);
+		$window = ($serviceCategory || $serviceText) ? 24 * HOUR_IN_SECONDS : 8 * HOUR_IN_SECONDS;
+
+		if ($score >= 70 || $decision === 'priority' || $tier === 'A') {
+			$window = max($window, 48 * HOUR_IN_SECONDS);
+		} elseif ($score >= 52 || $decision === 'strong' || $tier === 'B') {
+			$window = max($window, $softCategory ? 24 * HOUR_IN_SECONDS : 36 * HOUR_IN_SECONDS);
+		} elseif ($decision === 'review' && $score >= 44 && ($seriousCategory || $trusted_primary)) {
+			$window = max($window, 18 * HOUR_IN_SECONDS);
+		} elseif ($decision === 'review' && $score >= 40 && $trusted_primary && $seriousCategory) {
+			$window = max($window, 18 * HOUR_IN_SECONDS);
+		}
+
+		if ($serviceCategory || $serviceText) {
+			$window = max($window, $score >= 52 ? 48 * HOUR_IN_SECONDS : 30 * HOUR_IN_SECONDS);
+		}
 
 		return $age <= $window;
 	}

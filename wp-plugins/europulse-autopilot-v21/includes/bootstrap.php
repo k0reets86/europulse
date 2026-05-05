@@ -85,11 +85,13 @@ final class EPV2_Bootstrap {
 
 			'EPV2_Media' => 'media/class-epv2-media.php',
 			'EPV2_Compliance' => 'compliance/class-epv2-compliance.php',
+			'EPV2_Publish_Gate' => 'publish/class-epv2-publish-gate.php',
 			'EPV2_Publisher' => 'publish/class-epv2-publisher.php',
 			'EPV2_Post_Audit' => 'publish/class-epv2-post-audit.php',
 			'EPV2_Manual_Mode' => 'manual/class-epv2-manual-mode.php',
 
 			'EPV2_Logger' => 'metrics/class-epv2-logger.php',
+			'EPV2_Selection_Audit' => 'metrics/class-epv2-selection-audit.php',
 			'EPV2_Stats' => 'metrics/class-epv2-stats.php',
 		];
 

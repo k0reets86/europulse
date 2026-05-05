@@ -94,6 +94,7 @@ class WorkerResponse:
     google_quality: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
+    ai_runtime: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

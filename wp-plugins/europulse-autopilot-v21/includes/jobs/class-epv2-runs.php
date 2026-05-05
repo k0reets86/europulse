@@ -6,6 +6,7 @@ if (! defined('ABSPATH')) {
 
 final class EPV2_Runs {
 	private const MAX_RECENT_ITEM_STREAK_LIMIT = 20;
+	private const MAX_RECENT_STATUS_STREAK_LIMIT = 20;
 
 	public static function start(string $job_name, array $payload = []): int {
 		global $wpdb;
@@ -49,6 +50,42 @@ final class EPV2_Runs {
 			"SELECT * FROM {$wpdb->prefix}epv2_runs WHERE job_name = %s ORDER BY started_at DESC, id DESC LIMIT 1",
 			$job_name
 		));
+	}
+
+	public static function health_snapshot(string $job_name, int $within_seconds = 300): array {
+		global $wpdb;
+		$within_seconds = max(15, $within_seconds);
+		$latest = self::latest($job_name);
+		$cutoff = gmdate('Y-m-d H:i:s', time() - $within_seconds);
+		$started_count = (int) $wpdb->get_var($wpdb->prepare(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_runs
+			WHERE job_name = %s
+			  AND status = 'started'",
+			$job_name
+		));
+		$recent_started_count = (int) $wpdb->get_var($wpdb->prepare(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_runs
+			WHERE job_name = %s
+			  AND status = 'started'
+			  AND started_at >= %s",
+			$job_name,
+			$cutoff
+		));
+		$latest_started_at = (string) ($latest->started_at ?? '');
+		$latest_started_ts = $latest_started_at !== '' ? strtotime($latest_started_at) : false;
+
+		return [
+			'job_name' => sanitize_key($job_name),
+			'latest_run_id' => (int) ($latest->id ?? 0),
+			'latest_status' => (string) ($latest->status ?? ''),
+			'latest_started_at' => $latest_started_at,
+			'latest_finished_at' => (string) ($latest->finished_at ?? ''),
+			'latest_error_count' => (int) ($latest->error_count ?? 0),
+			'started_count' => $started_count,
+			'recent_started_count' => $recent_started_count,
+			'recent_started' => $recent_started_count > 0,
+			'latest_started_age_seconds' => $latest_started_ts ? max(0, time() - (int) $latest_started_ts) : null,
+		];
 	}
 
 	public static function has_recent_started(string $job_name, int $within_seconds = 90): bool {
@@ -103,15 +140,14 @@ final class EPV2_Runs {
 				$payload = json_decode((string) ($row['payload'] ?? ''), true);
 				$payload = is_array($payload) ? $payload : [];
 				$payload['result'] = 'abandoned_started_run_cleaned';
-				$wpdb->update(
-					$wpdb->prefix . 'epv2_runs',
-					[
-						'status' => 'finished_with_errors',
-						'error_count' => max(1, (int) ($payload['error_count'] ?? 0)),
-						'payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
-						'finished_at' => current_time('mysql', true),
-					],
-					['id' => (int) $row['id']]
+				$payload['job_name'] = $job_name;
+				$payload['recovery_source'] = 'cleanup_abandoned_started';
+				self::finish(
+					(int) $row['id'],
+					'finished_with_errors',
+					0,
+					max(1, (int) ($payload['error_count'] ?? 0)),
+					$payload
 				);
 				$updated++;
 			}
@@ -145,6 +181,37 @@ final class EPV2_Runs {
 			$payload = is_array($payload) ? $payload : [];
 			$processed_id = (int) ($payload['processed_item_id'] ?? $payload['last_item_id'] ?? 0);
 			if ($processed_id !== $item_id) {
+				break;
+			}
+			$streak++;
+		}
+
+		return $streak;
+	}
+
+	public static function recent_status_streak(string $job_name, array $statuses, int $limit = 6): int {
+		global $wpdb;
+		$statuses = array_values(array_filter(array_map('sanitize_key', $statuses)));
+		if ($statuses === []) {
+			return 0;
+		}
+		$limit = max(1, min(self::MAX_RECENT_STATUS_STREAK_LIMIT, $limit));
+		$rows = $wpdb->get_col($wpdb->prepare(
+			"SELECT status FROM {$wpdb->prefix}epv2_runs
+			WHERE job_name = %s
+			  AND status != 'started'
+			ORDER BY id DESC
+			LIMIT %d",
+			$job_name,
+			$limit
+		));
+		if (! is_array($rows) || $rows === []) {
+			return 0;
+		}
+
+		$streak = 0;
+		foreach ($rows as $status) {
+			if (! in_array(sanitize_key((string) $status), $statuses, true)) {
 				break;
 			}
 			$streak++;

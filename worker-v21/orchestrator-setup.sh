@@ -38,10 +38,12 @@ EPV2_SITE_URL=${SITE_URL}
 EPV2_LOOP_SECONDS=15
 EPV2_MAINTENANCE_SECONDS=180
 EOF
+chmod 600 "${ENV_FILE}"
+chown root:root "${ENV_FILE}"
 
 cat > "${SERVICE_FILE}" << EOF
 [Unit]
-Description=EuroPulse AutoPilot v2.1 External Orchestrator
+Description=EuroPulse AutoPilot v21 External Orchestrator
 After=network.target nginx.service php8.3-fpm.service mariadb.service
 
 [Service]
@@ -60,6 +62,8 @@ TimeoutStopSec=30
 [Install]
 WantedBy=multi-user.target
 EOF
+chmod 644 "${SERVICE_FILE}"
+chown root:root "${SERVICE_FILE}"
 
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}"

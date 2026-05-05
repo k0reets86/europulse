@@ -1,6 +1,6 @@
-# EuroPulse AutoPilot v2.1 — Инструкция по установке
+# EuroPulse AutoPilot v21 — Инструкция по установке
 
-## Что нового в v2.1
+## Что входит в актуальный runtime v21
 
 - ✅ Google News RSS — исправлен (больше нет 503)
 - ✅ Python Worker — постоянный systemd-сервис на порту 8765
@@ -15,9 +15,9 @@
 ## Шаг 1 — Резервная копия (ОБЯЗАТЕЛЬНО)
 
 ```bash
-# Backup текущего плагина
-cp -r /var/www/europulse/wp-content/plugins/europulse-autopilot-v2/ \
-      /root/backup-epv2-$(date +%Y%m%d)/
+# Backup текущего live v21 plugin
+cp -r /var/www/europulse/public/wp-content/plugins/europulse-autopilot-v21/ \
+      /root/backup-epv21-$(date +%Y%m%d)/
 
 # Backup базы данных
 mysqldump -u root YOUR_DB_NAME > /root/backup-db-$(date +%Y%m%d).sql
@@ -26,8 +26,8 @@ mysqldump -u root YOUR_DB_NAME > /root/backup-db-$(date +%Y%m%d).sql
 ## Шаг 2 — Деактивация старого плагина
 
 1. Войдите в WordPress Admin → Плагины
-2. Деактивируйте **EuroPulse AutoPilot** (v2.0)
-3. НЕ удаляйте — просто деактивируйте
+2. Убедитесь, что активным останется только **EuroPulse AutoPilot v21**
+3. Любые старые `v2`/`v3` сборки рассматриваются только как архив и не используются в runtime
 
 ## Шаг 3 — Загрузка нового плагина
 
@@ -39,16 +39,15 @@ mysqldump -u root YOUR_DB_NAME > /root/backup-db-$(date +%Y%m%d).sql
 
 **Вариант B — через SSH:**
 ```bash
-cd /var/www/europulse/wp-content/plugins/
+cd /var/www/europulse/public/wp-content/plugins/
 unzip /root/europulse-autopilot-v21.zip
-# Папка будет называться europulse-autopilot-v21
 ```
 
 ## Шаг 4 — Установка Python Worker
 
 ```bash
-# Скопируйте папку worker на сервер
-scp -r worker/ root@YOUR_SERVER_IP:/opt/epv2-worker/
+# Скопируйте папку worker-v21 на сервер
+scp -r worker-v21/ root@YOUR_SERVER_IP:/opt/epv2-worker/
 
 # На сервере:
 cd /opt/epv2-worker
@@ -77,7 +76,7 @@ curl -s http://127.0.0.1:8765/health
 
 ## Шаг 5 — Активация и настройка плагина
 
-1. WordPress Admin → Активируйте **EuroPulse AutoPilot v2.1**
+1. WordPress Admin → Активируйте **EuroPulse AutoPilot v21**
 2. Перейдите в **EuroPulse → Настройки**
 3. Убедитесь что API-ключи заполнены:
    - OpenAI API Key
@@ -96,7 +95,7 @@ systemctl is-active epv2-worker
 ```
 
 В WordPress Admin → EuroPulse → Дашборд должна появиться надпись:
-> ✓ Python Worker активен (v2.1)
+> ✓ Python Worker активен (v21)
 
 ---
 
@@ -110,15 +109,15 @@ sudo systemctl status  epv2-worker   # статус
 journalctl -u epv2-worker -n 100     # последние 100 строк логов
 ```
 
-## Откат на v2.0
+## Откат на v21 backup
 
 Если что-то пошло не так:
 
 ```bash
-# Деактивируйте v2.1 через WordPress Admin
+# Деактивируйте v21 через WordPress Admin
 # Затем восстановите backup
-cp -r /root/backup-epv2-YYYYMMDD/ /var/www/europulse/wp-content/plugins/europulse-autopilot-v2/
-# Активируйте v2.0 в WordPress Admin
+cp -r /root/backup-epv21-YYYYMMDD/ /var/www/europulse/public/wp-content/plugins/europulse-autopilot-v21/
+# Активируйте v21 backup в WordPress Admin
 ```
 
 ---

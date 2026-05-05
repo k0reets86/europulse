@@ -2,21 +2,21 @@
 /**
  * EuroPulse AutoPilot v2.1 — Weekly Analytical Article Generator
  *
- * Every Sunday at 08:00 Berlin time:
+ * Runs once a week (Sunday 08:00 Berlin time):
  *  1. Finds Top Theme clusters (mentions_7d >= 5, developing_candidate = 1)
- *  2. Picks the cluster with the highest score
- *  3. Fetches 3-5 fresh supporting sources on the topic
- *  4. Generates a long-form analytical article (1500-2500 words) in DE → UK + EN
- *  5. Publishes as a special "Analyse" post with Top-Thema tag
+ *  2. Picks the cluster with the highest score (not already used this week)
+ *  3. Falls back to most-published topic from last 7 days if no cluster qualifies
+ *  4. Fetches 5 supporting sources on the topic via Google News
+ *  5. Generates a long-form analytical article (900-1400 words) via worker 'analysis' profile
+ *  6. Publishes as a special "Analyse" post with "Top-Thema" tag in DE/UK/EN
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 final class EPV2_Weekly_Analysis {
 
-    private const ANALYSE_TAG   = 'Top-Thema';
-    private const MIN_MENTIONS  = 5;
-    private const WORD_TARGET   = 2000;
+    private const ANALYSE_TAG  = 'Top-Thema';
+    private const MIN_MENTIONS = 5;
 
     // -------------------------------------------------------------------------
     // Cron registration
@@ -28,21 +28,26 @@ final class EPV2_Weekly_Analysis {
 
     public static function maybe_schedule(): void {
         if ( ! wp_next_scheduled( 'epv2_weekly_analysis' ) ) {
-            $next = self::next_sunday_08();
-            wp_schedule_event( $next, 'weekly', 'epv2_weekly_analysis' );
+            wp_schedule_event( self::next_weekday( 0, 8 ), 'weekly', 'epv2_weekly_analysis' ); // Sunday
         }
+        wp_clear_scheduled_hook( 'epv2_weekly_analysis_thursday' );
     }
 
-    private static function next_sunday_08(): int {
+    /**
+     * Returns the Unix timestamp for the next occurrence of $weekday (0=Mon…6=Sun ISO) at $hour Berlin time.
+     * N in PHP date(): 1=Mon … 7=Sun. We use ISO weekday internally.
+     */
+    private static function next_weekday( int $iso_weekday, int $hour ): int {
         $tz = new DateTimeZone( 'Europe/Berlin' );
         $dt = new DateTime( 'now', $tz );
-        // Advance to next Sunday
-        $days_until_sunday = ( 7 - (int) $dt->format( 'N' ) ) % 7;
-        if ( $days_until_sunday === 0 && (int) $dt->format( 'H' ) >= 8 ) {
-            $days_until_sunday = 7;
+        // PHP date('N'): 1=Mon … 7=Sun; our iso_weekday: 0=Mon … 6=Sun
+        $current_iso = (int) $dt->format( 'N' ) - 1; // 0-based Mon
+        $diff = ( $iso_weekday - $current_iso + 7 ) % 7;
+        if ( $diff === 0 && (int) $dt->format( 'H' ) >= $hour ) {
+            $diff = 7;
         }
-        $dt->modify( '+' . $days_until_sunday . ' days' );
-        $dt->setTime( 8, 0, 0 );
+        $dt->modify( '+' . $diff . ' days' );
+        $dt->setTime( $hour, 0, 0 );
         return $dt->getTimestamp();
     }
 
@@ -59,24 +64,26 @@ final class EPV2_Weekly_Analysis {
             return;
         }
 
-        $topic   = (string) ( $cluster->label ?? $cluster->cluster_key ?? '' );
+        $topic = (string) ( $cluster->topic_label ?? $cluster->title_seed ?? $cluster->cluster_key ?? '' );
         EPV2_Logger::info( 'weekly_analysis', 'Picked cluster', [ 'topic' => $topic ] );
 
-        // Fetch supporting sources via Google News
+        // Mark cluster as used for this week's analysis to avoid duplication on Thursday run
+        self::mark_cluster_used( $cluster );
+
+        // Fetch 5 supporting sources via Google News
         $sources = EPV2_Google_News::fetch( $topic, 'de', 'DE', 5 );
         if ( empty( $sources ) ) {
             EPV2_Logger::warning( 'weekly_analysis', 'No supporting sources found for ' . $topic );
         }
 
-        // Build a combined source text for AI
         $source_text = self::compile_sources( $sources );
 
-        // Send to worker for long-form article generation
         if ( ! EPV2_Worker_Client::is_available() ) {
             EPV2_Logger::error( 'weekly_analysis', 'Worker unavailable, aborting' );
             return;
         }
 
+        // Build a synthetic queue item for the worker; use 'analysis' length profile
         $fake_item = (object) [
             'id'               => 0,
             'original_url'     => '',
@@ -88,17 +95,11 @@ final class EPV2_Weekly_Analysis {
             'category_proposed'=> 'Analyse',
             'source_language'  => 'de',
             'story_format'     => 'analysis',
+            'length_profile'   => 'analysis', // EPV2_Worker_Client::build_payload() respects this
         ];
 
         try {
-            // Temporarily override length_profile
-            $original_profile = EPV2_Settings::get( 'length_profile', 'standard' );
-            EPV2_Settings::set_transient( 'length_profile', 'long' );
-
             $result = EPV2_Worker_Client::process( $fake_item, 'full_bundle' );
-
-            EPV2_Settings::set_transient( 'length_profile', $original_profile );
-
             self::publish_analysis( $topic, $result, $cluster );
         } catch ( Throwable $e ) {
             EPV2_Logger::error( 'weekly_analysis', 'Worker error: ' . $e->getMessage() );
@@ -113,21 +114,52 @@ final class EPV2_Weekly_Analysis {
         global $wpdb;
         $table = $wpdb->prefix . 'epv2_clusters';
 
-        // Check table exists first
         if ( $wpdb->get_var( "SHOW TABLES LIKE '{$table}'" ) !== $table ) {
             return null;
         }
 
+        // Primary: developing candidates not already used for analysis this week
+        $week_start = gmdate( 'Y-m-d', strtotime( 'monday this week' ) );
         $results = $wpdb->get_results( $wpdb->prepare(
             "SELECT * FROM `{$table}`
              WHERE developing_candidate = 1
                AND mentions_7d >= %d
+               AND ( last_promoted_analysis IS NULL OR last_promoted_analysis < %s )
+             ORDER BY mentions_7d DESC, source_count_7d DESC
+             LIMIT 1",
+            self::MIN_MENTIONS,
+            $week_start . ' 00:00:00'
+        ) );
+
+        if ( ! empty( $results[0] ) ) {
+            return $results[0];
+        }
+
+        // Fallback: any cluster with enough mentions (ignore analysis gate)
+        $fallback = $wpdb->get_results( $wpdb->prepare(
+            "SELECT * FROM `{$table}`
+             WHERE mentions_7d >= %d
              ORDER BY mentions_7d DESC, source_count_7d DESC
              LIMIT 1",
             self::MIN_MENTIONS
         ) );
 
-        return $results[0] ?? null;
+        return $fallback[0] ?? null;
+    }
+
+    private static function mark_cluster_used( object $cluster ): void {
+        global $wpdb;
+        $table = $wpdb->prefix . 'epv2_clusters';
+        if ( ! isset( $cluster->id ) ) {
+            return;
+        }
+        $wpdb->update(
+            $table,
+            [ 'last_promoted_analysis' => current_time( 'mysql', true ) ],
+            [ 'id' => (int) $cluster->id ],
+            [ '%s' ],
+            [ '%d' ]
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -137,7 +169,7 @@ final class EPV2_Weekly_Analysis {
     private static function compile_sources( array $sources ): string {
         $parts = [];
         foreach ( $sources as $i => $src ) {
-            $n = $i + 1;
+            $n       = $i + 1;
             $title   = (string) ( $src['title']   ?? '' );
             $excerpt = (string) ( $src['excerpt']  ?? '' );
             $url     = (string) ( $src['url']      ?? '' );
@@ -156,7 +188,7 @@ final class EPV2_Weekly_Analysis {
         $en = $result['english']       ?? [];
 
         if ( empty( $de['content'] ) ) {
-            EPV2_Logger::warning( 'weekly_analysis', 'Worker returned empty content' );
+            EPV2_Logger::warning( 'weekly_analysis', 'Worker returned empty content for topic: ' . $topic );
             return;
         }
 
@@ -182,7 +214,11 @@ final class EPV2_Weekly_Analysis {
             return;
         }
 
-        // Tag
+        if ( function_exists( 'pll_set_post_language' ) ) {
+            pll_set_post_language( $post_id, 'de' );
+        }
+
+        // Tag as Analyse
         wp_set_post_tags( $post_id, [ self::ANALYSE_TAG ], true );
 
         // Featured image
@@ -195,9 +231,9 @@ final class EPV2_Weekly_Analysis {
             'topic'   => $topic,
         ] );
 
-        // Multilingual: attempt WPML/Polylang parallel posts
+        // Polylang translations
         if ( function_exists( 'pll_set_post_language' ) ) {
-            self::create_polylang_translations( $post_id, $uk, $en, $topic, $result );
+            self::create_polylang_translations( $post_id, $uk, $en, $topic );
         }
     }
 
@@ -211,9 +247,12 @@ final class EPV2_Weekly_Analysis {
         }
     }
 
-    private static function create_polylang_translations( int $de_post_id, array $uk, array $en, string $topic, array $result ): void {
+    private static function create_polylang_translations( int $de_post_id, array $uk, array $en, string $topic ): void {
+        $translations = [ 'de' => $de_post_id ];
         foreach ( [ 'uk' => $uk, 'en' => $en ] as $lang => $pkg ) {
-            if ( empty( $pkg['content'] ) ) continue;
+            if ( empty( $pkg['content'] ) ) {
+                continue;
+            }
             $translated_id = wp_insert_post( [
                 'post_title'   => wp_strip_all_tags( (string) ( $pkg['title']   ?? 'Analyse: ' . $topic ) ),
                 'post_content' => wp_kses_post( (string) $pkg['content'] ),
@@ -224,9 +263,12 @@ final class EPV2_Weekly_Analysis {
             ] );
             if ( ! is_wp_error( $translated_id ) ) {
                 pll_set_post_language( $translated_id, $lang );
-                pll_save_post_translations( [ 'de' => $de_post_id, $lang => $translated_id ] );
+                $translations[ $lang ] = $translated_id;
                 wp_set_post_tags( $translated_id, [ self::ANALYSE_TAG ], true );
             }
+        }
+        if ( count( $translations ) > 1 ) {
+            pll_save_post_translations( $translations );
         }
     }
 }

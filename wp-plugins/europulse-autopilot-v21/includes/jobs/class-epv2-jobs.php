@@ -12,9 +12,13 @@ final class EPV2_Jobs {
 	private const HOOK_PROCESS_ASYNC = 'epv2_process_async';
 	private const HOOK_PUBLISH_ASYNC = 'epv2_publish_async';
 	private const OPTION_RUNTIME_MAINTENANCE_AT = 'epv2_runtime_maintenance_at';
+	private const OPTION_SERVER_ORCHESTRATOR_ENABLED = 'epv2_server_orchestrator_enabled';
+	private const OPTION_AUTOMATION_SAFEGUARD = 'epv2_automation_safeguard';
 	private const RUNTIME_MAINTENANCE_TTL = 15;
 	private const INLINE_PROCESS_HANDOFF_LIMIT = 12;
 	private const INLINE_PUBLISH_HANDOFF_LIMIT = 6;
+	private const PROCESS_ERROR_STREAK_THRESHOLD = 3;
+	private const PROCESS_SAME_ITEM_STREAK_THRESHOLD = 3;
 	private static int $inline_process_handoff_depth = 0;
 	private static int $inline_publish_handoff_depth = 0;
 
@@ -27,7 +31,23 @@ final class EPV2_Jobs {
 	}
 
 	public static function server_orchestrator_enabled(): bool {
-		return ! empty(get_option('epv2_server_orchestrator_enabled', false));
+		$value = get_option(self::OPTION_SERVER_ORCHESTRATOR_ENABLED, null);
+		if ($value === null) {
+			return true;
+		}
+		return ! empty($value);
+	}
+
+	public static function ensure_canonical_runtime_mode(): void {
+		if (! self::server_orchestrator_enabled()) {
+			update_option(self::OPTION_SERVER_ORCHESTRATOR_ENABLED, 1, false);
+		}
+		if (! self::orchestrator_v2_enabled()) {
+			$settings = EPV2_Settings::get_all();
+			$settings['orchestrator_v2_enabled'] = true;
+			EPV2_Settings::set_all($settings);
+		}
+		self::clear_scheduled();
 	}
 
 	public static function orchestrator_v2_enabled(): bool {
@@ -41,6 +61,7 @@ final class EPV2_Jobs {
 
 	public static function resume_automation(): void {
 		update_option('epv2_automation_paused', false, false);
+		delete_option(self::OPTION_AUTOMATION_SAFEGUARD);
 		self::schedule_recurring();
 	}
 
@@ -61,6 +82,11 @@ final class EPV2_Jobs {
 		}
 	}
 
+	public static function automation_safeguard_state(): array {
+		$state = get_option(self::OPTION_AUTOMATION_SAFEGUARD, []);
+		return is_array($state) ? $state : [];
+	}
+
 	public static function register(): void {
 		add_filter('cron_schedules', [self::class, 'cron_schedules']);
 		add_action(self::HOOK_COLLECT, [self::class, 'run_collect_windowed']);
@@ -71,6 +97,7 @@ final class EPV2_Jobs {
 		add_action(self::HOOK_PUBLISH_ASYNC, [self::class, 'run_publish_async']);
 		EPV2_Weekly_Analysis::register();
 		EPV2_Weekly_Analysis::maybe_schedule();
+		self::ensure_canonical_runtime_mode();
 	}
 
 	public static function schedule_recurring(): void {
@@ -209,6 +236,12 @@ final class EPV2_Jobs {
 	}
 
 	public static function run_collect_windowed(): void {
+		if (self::server_orchestrator_enabled()) {
+			EPV2_Logger::info('jobs', 'collect windowed skipped canonical orchestrator mode');
+			self::clear_hook(self::HOOK_COLLECT);
+			self::clear_hook(self::HOOK_COLLECT_ASYNC);
+			return;
+		}
 		if (self::collect_paused()) {
 			return;
 		}
@@ -223,6 +256,12 @@ final class EPV2_Jobs {
 	}
 
 	public static function run_process_windowed(): void {
+		if (self::server_orchestrator_enabled()) {
+			EPV2_Logger::info('jobs', 'process windowed skipped canonical orchestrator mode');
+			self::clear_hook(self::HOOK_PROCESS);
+			self::clear_hook(self::HOOK_PROCESS_ASYNC);
+			return;
+		}
 		EPV2_Logger::info('jobs', 'process windowed enter');
 		self::maybe_schedule();
 		self::maintain_runtime_state(false);
@@ -251,6 +290,12 @@ final class EPV2_Jobs {
 	}
 
 	public static function run_publish_windowed(): void {
+		if (self::server_orchestrator_enabled()) {
+			EPV2_Logger::info('jobs', 'publish windowed skipped canonical orchestrator mode');
+			self::clear_hook(self::HOOK_PUBLISH);
+			self::clear_hook(self::HOOK_PUBLISH_ASYNC);
+			return;
+		}
 		EPV2_Logger::info('jobs', 'publish windowed enter');
 		self::maybe_schedule();
 		self::maintain_runtime_state(false);
@@ -279,6 +324,11 @@ final class EPV2_Jobs {
 	}
 
 	public static function run_collect_async(): void {
+		if (self::server_orchestrator_enabled()) {
+			EPV2_Logger::info('jobs', 'collect async skipped canonical orchestrator mode');
+			self::clear_hook(self::HOOK_COLLECT_ASYNC);
+			return;
+		}
 		if (self::collect_paused()) {
 			return;
 		}
@@ -293,6 +343,11 @@ final class EPV2_Jobs {
 	}
 
 	public static function run_process_async(): void {
+		if (self::server_orchestrator_enabled()) {
+			EPV2_Logger::info('jobs', 'process async skipped canonical orchestrator mode');
+			self::clear_hook(self::HOOK_PROCESS_ASYNC);
+			return;
+		}
 		self::maybe_schedule();
 		self::maintain_runtime_state(false);
 		EPV2_Logger::info('jobs', 'process async after maintenance');
@@ -304,12 +359,19 @@ final class EPV2_Jobs {
 		}
 		if (self::orchestrator_v2_enabled()) {
 			self::run_process_owner_window();
+			self::maybe_pause_after_process_failures();
 			return;
 		}
 		EPV2_AI_Processor::process_scheduled(true, false);
+		self::maybe_pause_after_process_failures();
 	}
 
 	public static function run_publish_async(): void {
+		if (self::server_orchestrator_enabled()) {
+			EPV2_Logger::info('jobs', 'publish async skipped canonical orchestrator mode');
+			self::clear_hook(self::HOOK_PUBLISH_ASYNC);
+			return;
+		}
 		self::maybe_schedule();
 		self::maintain_runtime_state(false);
 		EPV2_Logger::info('jobs', 'publish async after maintenance');
@@ -382,6 +444,74 @@ final class EPV2_Jobs {
 				break;
 			}
 		}
+	}
+
+	private static function maybe_pause_after_process_failures(): void {
+		$health = EPV2_Runs::health_snapshot('process', 900);
+		$latest_run_id = (int) ($health['latest_run_id'] ?? 0);
+		$latest_status = sanitize_key((string) ($health['latest_status'] ?? ''));
+		if ($latest_run_id <= 0 || $latest_status === '' || $latest_status === 'started') {
+			return;
+		}
+
+		$current_guard = self::automation_safeguard_state();
+		if ((int) ($current_guard['run_id'] ?? 0) === $latest_run_id) {
+			return;
+		}
+
+		if ($latest_status !== 'finished_with_errors') {
+			if (! empty($current_guard['active']) && (string) ($current_guard['job_name'] ?? '') === 'process') {
+				delete_option(self::OPTION_AUTOMATION_SAFEGUARD);
+			}
+			return;
+		}
+
+		$payload = EPV2_Runs::latest_finished_payload('process');
+		$item_id = (int) ($payload['processed_item_id'] ?? $payload['last_item_id'] ?? 0);
+		if ($item_id <= 0) {
+			$item_id = (int) get_option('epv2_active_automation_item', 0);
+		}
+		$error_streak = EPV2_Runs::recent_status_streak('process', ['finished_with_errors'], self::PROCESS_ERROR_STREAK_THRESHOLD);
+		$same_item_streak = $item_id > 0
+			? EPV2_Runs::recent_processed_item_streak('process', $item_id, self::PROCESS_SAME_ITEM_STREAK_THRESHOLD)
+			: 0;
+
+		if ($error_streak < self::PROCESS_ERROR_STREAK_THRESHOLD && $same_item_streak < self::PROCESS_SAME_ITEM_STREAK_THRESHOLD) {
+			return;
+		}
+
+		$reason_parts = [];
+		if ($error_streak >= self::PROCESS_ERROR_STREAK_THRESHOLD) {
+			$reason_parts[] = 'подряд ошибок обработки: ' . $error_streak;
+		}
+		if ($same_item_streak >= self::PROCESS_SAME_ITEM_STREAK_THRESHOLD && $item_id > 0) {
+			$reason_parts[] = 'повторная обработка одного и того же материала #' . $item_id . ': ' . $same_item_streak . ' раза';
+		}
+		$reason = implode('; ', $reason_parts);
+		if ($reason === '') {
+			$reason = 'сработала аварийная защита обработки';
+		}
+
+		update_option('epv2_automation_paused', true, false);
+		update_option('epv2_collect_paused', true, false);
+		self::clear_scheduled();
+		update_option(self::OPTION_AUTOMATION_SAFEGUARD, [
+			'active' => true,
+			'job_name' => 'process',
+			'run_id' => $latest_run_id,
+			'item_id' => $item_id,
+			'error_streak' => $error_streak,
+			'same_item_streak' => $same_item_streak,
+			'reason' => $reason,
+			'detected_at' => time(),
+		], false);
+		EPV2_Logger::warning('jobs', 'automation paused by process safeguard', [
+			'run_id' => $latest_run_id,
+			'item_id' => $item_id,
+			'error_streak' => $error_streak,
+			'same_item_streak' => $same_item_streak,
+			'reason' => $reason,
+		]);
 	}
 
 	private static function maintain_runtime_state(bool $allow_heavy_cleanup = true): void {
@@ -542,6 +672,9 @@ final class EPV2_Jobs {
 	}
 
 	private static function can_run_inline_process_handoff(): bool {
+		if (self::server_orchestrator_enabled()) {
+			return false;
+		}
 		if (! (wp_doing_cron() || (defined('WP_CLI') && WP_CLI))) {
 			return false;
 		}
@@ -555,6 +688,9 @@ final class EPV2_Jobs {
 	}
 
 	private static function can_run_inline_publish_handoff(): bool {
+		if (self::server_orchestrator_enabled()) {
+			return false;
+		}
 		if (! (wp_doing_cron() || (defined('WP_CLI') && WP_CLI))) {
 			return false;
 		}
@@ -576,6 +712,36 @@ final class EPV2_Jobs {
 		update_option(self::OPTION_RUNTIME_MAINTENANCE_AT, time(), false);
 	}
 
+	private static function recover_process_item_to_retry(object $item, string $message): void {
+		$message = trim($message);
+		if ($message === '') {
+			$message = 'stale processing job recovered after runtime maintenance';
+		}
+		if (class_exists('EPV2_Resilience_Manager')) {
+			EPV2_Resilience_Manager::schedule_retry($item, 'retry_process', 'process', $message);
+			return;
+		}
+		EPV2_Queue::mark_state((int) $item->id, 'retry_process', [
+			'error_message' => $message,
+		]);
+	}
+
+	private static function finish_latest_started_run_if_older_than(string $job_name, int $threshold_ts, string $result): void {
+		$latest = EPV2_Runs::latest($job_name);
+		if (! $latest || (string) ($latest->status ?? '') !== 'started') {
+			return;
+		}
+		$started = strtotime((string) ($latest->started_at ?? '')) ?: 0;
+		if ($started <= 0 || $started > $threshold_ts) {
+			return;
+		}
+		EPV2_Runs::finish((int) $latest->id, 'finished_with_errors', 0, 1, [
+			'result' => $result,
+			'job_name' => $job_name,
+			'recovery_source' => 'jobs_runtime_recovery',
+		]);
+	}
+
 	private static function recover_orphan_process_lock(): void {
 		$lock = get_option('epv2_lock_process', false);
 		$processing_items = EPV2_Queue::get_queue_items_summary(['state' => 'processing_de', 'limit' => 3]);
@@ -587,20 +753,11 @@ final class EPV2_Jobs {
 		$workerless_processing_stale_after = time() - $workerless_processing_stale_window;
 		$stuck_without_item_after = time() - 30;
 		$has_worker = self::has_async_work_scheduled(self::HOOK_PROCESS_ASYNC);
-		$latest = EPV2_Runs::latest('process');
-		$latest_started = $latest ? (strtotime((string) ($latest->started_at ?? '')) ?: 0) : 0;
 		if (is_array($lock) && ! empty($lock['token']) && ! $has_processing_item) {
 			$heartbeat = (int) ($lock['heartbeat_at'] ?? 0);
 			if ($heartbeat > 0 && $heartbeat <= $stuck_without_item_after && ! $has_worker) {
 				delete_option('epv2_lock_process');
-				if ($latest && (string) ($latest->status ?? '') === 'started') {
-					$started = $latest_started;
-					if ($started > 0 && $started <= $stuck_without_item_after) {
-						EPV2_Runs::finish((int) $latest->id, 'finished_with_errors', 0, 1, [
-							'result' => 'stuck_without_processing_item_recovered',
-						]);
-					}
-				}
+				self::finish_latest_started_run_if_older_than('process', $stuck_without_item_after, 'stuck_without_processing_item_recovered');
 				if (EPV2_Queue::has_processable_items()) {
 					self::enqueue_process();
 				}
@@ -618,21 +775,11 @@ final class EPV2_Jobs {
 				if ($error === '') {
 					$error = 'Обработка прервалась: lock исчез до завершения, материал будет автоматически возобновлён с текущего этапа.';
 				}
-				EPV2_Queue::mark_state((int) $item->id, 'retry_process', [
-					'error_message' => $error,
-				]);
+				self::recover_process_item_to_retry($item, $error);
 				$requeued = true;
 			}
 			if ($requeued) {
-				$latest = EPV2_Runs::latest('process');
-				if ($latest && (string) ($latest->status ?? '') === 'started') {
-					$started = strtotime((string) ($latest->started_at ?? '')) ?: 0;
-					if ($started > 0 && $started <= $stale_after) {
-						EPV2_Runs::finish((int) $latest->id, 'finished_with_errors', 0, 1, [
-							'result' => 'missing_lock_recovered',
-						]);
-					}
-				}
+				self::finish_latest_started_run_if_older_than('process', $stale_after, 'missing_lock_recovered');
 			}
 			if ($requeued && EPV2_Queue::has_processable_items()) {
 				self::enqueue_process();
@@ -663,21 +810,12 @@ final class EPV2_Jobs {
 					$error = 'Обработка прервалась: worker исчез до завершения, материал будет автоматически возобновлён с текущего этапа.';
 				}
 				if ($updated <= 0 || $updated <= $effective_stale_after) {
-					EPV2_Queue::mark_state((int) $item->id, 'retry_process', [
-						'error_message' => $error,
-					]);
+					self::recover_process_item_to_retry($item, $error);
 					$requeued = true;
 				}
 			}
 			delete_option('epv2_lock_process');
-			if ($latest && (string) ($latest->status ?? '') === 'started') {
-				$started = $latest_started;
-				if ($started > 0 && $started <= $effective_stale_after) {
-					EPV2_Runs::finish((int) $latest->id, 'finished_with_errors', 0, 1, [
-						'result' => 'stale_processing_lock_recovered',
-					]);
-				}
-			}
+			self::finish_latest_started_run_if_older_than('process', $effective_stale_after, 'stale_processing_lock_recovered');
 			if ($requeued && EPV2_Queue::has_processable_items()) {
 				self::enqueue_process();
 			}
@@ -712,15 +850,7 @@ final class EPV2_Jobs {
 			return;
 		}
 		delete_option('epv2_lock_collect');
-		$latest = EPV2_Runs::latest('collect');
-		if ($latest && (string) ($latest->status ?? '') === 'started') {
-			$started = strtotime((string) ($latest->started_at ?? '')) ?: 0;
-			if ($started > 0 && $started <= $stale_after) {
-				EPV2_Runs::finish((int) $latest->id, 'finished_with_errors', 0, 1, [
-					'result' => 'stuck_collect_recovered',
-				]);
-			}
-		}
+		self::finish_latest_started_run_if_older_than('collect', $stale_after, 'stuck_collect_recovered');
 	}
 
 	private static function recover_orphan_publish_lock(): void {
@@ -733,15 +863,7 @@ final class EPV2_Jobs {
 			$heartbeat = (int) ($lock['heartbeat_at'] ?? 0);
 			if ($heartbeat > 0 && $heartbeat <= $stuck_without_item_after && ! $has_worker) {
 				delete_option('epv2_lock_publish');
-				$latest = EPV2_Runs::latest('publish');
-				if ($latest && (string) ($latest->status ?? '') === 'started') {
-					$started = strtotime((string) ($latest->started_at ?? '')) ?: 0;
-					if ($started > 0 && $started <= $stuck_without_item_after) {
-						EPV2_Runs::finish((int) $latest->id, 'finished_with_errors', 0, 1, [
-							'result' => 'stuck_without_publishing_item_recovered',
-						]);
-					}
-				}
+				self::finish_latest_started_run_if_older_than('publish', $stuck_without_item_after, 'stuck_without_publishing_item_recovered');
 				if (! self::server_orchestrator_enabled() && EPV2_Queue::next_item_for_publish()) {
 					self::enqueue_publish();
 				}

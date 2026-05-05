@@ -6,6 +6,7 @@ if (! defined('ABSPATH')) {
 
 	final class EPV2_Media {
 	public static function resolve_featured_media(string $title, string $excerpt = '', array $categories = [], string $existing_url = '', array $source_dossier = [], int $queue_id = 0): string {
+		$categories = self::normalize_media_categories($categories);
 		$story_context = self::story_context_from_dossier($title, $excerpt, $categories, $source_dossier);
 		$existing_url = esc_url_raw($existing_url);
 		$dossier_image = self::source_dossier_image($source_dossier, $title, $excerpt, $categories, $queue_id, $story_context);
@@ -45,18 +46,24 @@ if (! defined('ABSPATH')) {
 			}
 		}
 
-		if (! self::stock_fallback_allowed($title, $excerpt, $categories, $source_dossier, $story_context)) {
+		$wikimedia_fallback_allowed = self::stock_fallback_allowed($title, $excerpt, $categories, $source_dossier, $story_context, 'wikimedia');
+		$pexels_fallback_allowed = self::stock_fallback_allowed($title, $excerpt, $categories, $source_dossier, $story_context, 'pexels');
+		if (! $wikimedia_fallback_allowed && ! $pexels_fallback_allowed) {
 			return '';
 		}
 
-		$wikimedia_image = self::wikimedia_media($title, $excerpt, $categories, $queue_id, $source_dossier);
-		if ($wikimedia_image !== '' && self::media_relevant($wikimedia_image, $title, $excerpt, $categories, $source_dossier)) {
-			return $wikimedia_image;
+		if ($wikimedia_fallback_allowed) {
+			$wikimedia_image = self::wikimedia_media($title, $excerpt, $categories, $queue_id, $source_dossier);
+			if ($wikimedia_image !== '') {
+				return $wikimedia_image;
+			}
 		}
 
-		$pexels_image = self::pexels_media($title, $excerpt, $categories, $queue_id, $source_dossier);
-		if ($pexels_image !== '' && self::media_relevant($pexels_image, $title, $excerpt, $categories, $source_dossier)) {
-			return $pexels_image;
+		if ($pexels_fallback_allowed) {
+			$pexels_image = self::pexels_media($title, $excerpt, $categories, $queue_id, $source_dossier);
+			if ($pexels_image !== '') {
+				return $pexels_image;
+			}
 		}
 
 		return '';
@@ -353,7 +360,7 @@ if (! defined('ABSPATH')) {
 			'politik' => [[44, 24, 24], [112, 34, 34], [255, 196, 92]],
 			'wirtschaft' => [[24, 34, 52], [42, 86, 134], [136, 223, 255]],
 			'kultur' => [[58, 32, 44], [117, 54, 89], [255, 195, 221]],
-			'world' => [[28, 31, 61], [48, 67, 130], [189, 211, 255]],
+			'welt' => [[28, 31, 61], [48, 67, 130], [189, 211, 255]],
 			default => [[28, 30, 36], [54, 61, 73], [255, 210, 128]],
 		};
 	}
@@ -647,7 +654,7 @@ if (! defined('ABSPATH')) {
 			return ['ok' => false, 'reason' => 'изображение слишком маленькое или техническое', 'media' => $media];
 		}
 		if (! empty($media['attachment_id']) && $fallback_title !== '') {
-			update_post_meta((int) $media['attachment_id'], '_wp_attachment_image_alt', sanitize_text_field($fallback_title));
+			update_post_meta((int) $media['attachment_id'], '_wp_attachment_image_alt', sanitize_text_field(self::alt_context_title($fallback_title, 'source')));
 			self::apply_attachment_description((int) $media['attachment_id'], $url, $fallback_title);
 		}
 		return ['ok' => true, 'reason' => 'ok', 'media' => $media];
@@ -679,6 +686,39 @@ if (! defined('ABSPATH')) {
 	public static function is_fallback_stock_url(string $url): bool {
 		$host = mb_strtolower((string) wp_parse_url($url, PHP_URL_HOST));
 		return str_contains($host, 'pexels.com') || str_contains($host, 'wikimedia.org');
+	}
+
+	private static function fallback_stock_provider(string $url, array $details = []): string {
+		$provider = sanitize_key((string) ($details['provider'] ?? ''));
+		if (in_array($provider, ['pexels', 'wikimedia'], true)) {
+			return $provider;
+		}
+		$host = mb_strtolower((string) wp_parse_url($url, PHP_URL_HOST));
+		if (str_contains($host, 'pexels.com')) {
+			return 'pexels';
+		}
+		if (str_contains($host, 'wikimedia.org')) {
+			return 'wikimedia';
+		}
+		return '';
+	}
+
+	private static function normalize_media_categories(array $categories): array {
+		$normalized = [];
+		foreach ($categories as $category) {
+			$slug = sanitize_key((string) $category);
+			if ($slug === '') {
+				continue;
+			}
+			$slug = preg_replace('/-(de|uk|en)$/i', '', $slug) ?: $slug;
+			if (class_exists('EPV2_Taxonomy_Map')) {
+				$slug = EPV2_Taxonomy_Map::normalize_slug($slug);
+			}
+			if ($slug !== '') {
+				$normalized[$slug] = true;
+			}
+		}
+		return array_keys($normalized);
 	}
 
 	public static function is_generated_story_cover_url(string $url): bool {
@@ -728,10 +768,16 @@ if (! defined('ABSPATH')) {
 	}
 
 	public static function media_credit(string $url, string $lang = 'de'): string {
-		return self::media_caption($url, $lang);
+		$details = self::remote_media_details($url);
+		$label = trim((string) ($details['source_label'] ?? ''));
+		if ($label === '') {
+			$host = (string) wp_parse_url($url, PHP_URL_HOST);
+			$label = $host !== '' ? preg_replace('/^www\./i', '', $host) : '';
+		}
+		return $label !== '' ? self::credit_prefix($lang) . ': ' . $label : '';
 	}
 
-	public static function media_metadata(string $url, string $lang = 'de'): array {
+	public static function media_metadata(string $url, string $lang = 'de', string $fallback_title = ''): array {
 		$url = esc_url_raw(trim($url));
 		if ($url === '') {
 			return [
@@ -746,9 +792,51 @@ if (! defined('ABSPATH')) {
 		return [
 			'origin_url' => esc_url_raw((string) ($details['origin_url'] ?? $url)),
 			'credit' => self::media_credit($url, $lang),
-			'caption' => self::media_caption($url, $lang),
+			'caption' => self::media_caption($url, $lang, $fallback_title),
 			'source_label' => trim((string) ($details['source_label'] ?? '')),
 			'provider' => (string) ($details['provider'] ?? ''),
+		];
+	}
+
+	public static function media_diagnostics(string $url, string $title, string $excerpt = '', array $categories = [], array $source_dossier = []): array {
+		$url = esc_url_raw(trim($url));
+		$categories = self::normalize_media_categories($categories);
+		$details = $url !== '' ? self::remote_media_details($url) : [];
+		$story_context = self::story_context_from_dossier($title, $excerpt, $categories, $source_dossier);
+		$provider = sanitize_key((string) ($details['provider'] ?? ''));
+		$stock_provider = self::fallback_stock_provider($url, $details);
+		if ($provider === '' && $stock_provider !== '') {
+			$provider = $stock_provider;
+		}
+		$origin = esc_url_raw((string) ($details['origin_url'] ?? $url));
+		$origin_host = mb_strtolower((string) wp_parse_url($origin, PHP_URL_HOST));
+		$categories = self::normalize_media_categories($categories);
+		$stock_allowed = [
+			'wikimedia' => self::stock_fallback_allowed($title, $excerpt, $categories, $source_dossier, $story_context, 'wikimedia'),
+			'pexels' => self::stock_fallback_allowed($title, $excerpt, $categories, $source_dossier, $story_context, 'pexels'),
+		];
+		$fit_pass = $url !== '' && self::media_relevant_with_details($url, $title, $excerpt, $categories, $source_dossier, $details);
+		if ($stock_provider !== '') {
+			$fit_pass = $fit_pass && ! empty($stock_allowed[$stock_provider]);
+		}
+
+		return [
+			'provider' => $provider,
+			'origin_url' => $origin,
+			'origin_host' => $origin_host,
+			'source_label' => trim((string) ($details['source_label'] ?? '')),
+			'alt' => trim((string) ($details['alt'] ?? '')),
+			'is_stock_fallback' => $stock_provider !== '',
+			'is_source_host_media' => $url !== '' && self::is_source_host_media($url, $source_dossier),
+			'intent' => self::media_intent($title, $excerpt, $categories),
+			'fit_pass' => $fit_pass,
+			'stock_allowed' => $stock_allowed,
+			'risk_flags' => self::media_risk_flags($title, $excerpt, $categories, $details, $story_context, $source_dossier),
+			'context' => [
+				'categories' => $categories,
+				'tokens' => array_slice((array) ($story_context['tokens'] ?? []), 0, 12),
+				'phrases' => array_slice((array) ($story_context['phrases'] ?? []), 0, 12),
+			],
 		];
 	}
 
@@ -927,8 +1015,8 @@ if (! defined('ABSPATH')) {
 				'community' => 'people meeting community room',
 				'kultur' => 'museum exhibition stage audience',
 				'sport' => 'stadium sports action',
-				'world' => 'world map diplomacy conference',
-				'münchen' => 'munich street tram city',
+				'welt' => 'world map diplomacy conference',
+				'muenchen' => 'munich street tram city',
 				'bayern' => 'bavaria city building germany',
 				'europa' => 'european union flags building',
 				'ukraine' => 'ukraine people support center',
@@ -1227,6 +1315,10 @@ if (! defined('ABSPATH')) {
 
 	private static function wikimedia_query(string $title, string $excerpt, array $categories, array $source_dossier = []): string {
 		$text = mb_strtolower(trim(wp_strip_all_tags($title . ' ' . $excerpt)));
+		$entity_query = self::entity_media_query($text);
+		if ($entity_query !== '') {
+			return $entity_query;
+		}
 		if (self::is_heritage_story($text)) {
 			$precise = self::title_keyword_query($title, 8);
 			if ($precise !== '') {
@@ -1259,7 +1351,7 @@ if (! defined('ABSPATH')) {
 		}
 		foreach ($categories as $category) {
 			$category = (string) $category;
-			if ($category === 'münchen') {
+			if ($category === 'muenchen') {
 				return 'Munich street tram';
 			}
 			if ($category === 'bayern') {
@@ -1267,6 +1359,25 @@ if (! defined('ABSPATH')) {
 			}
 			if (in_array($category, ['deutschland', 'politik', 'wirtschaft', 'leben-in-deutschland'], true) && preg_match('/\b(tankstellen|sprit|benzin|diesel|kraftstoff|fuel)\b/u', $text)) {
 				return 'Germany Europe gas station refueling car';
+			}
+		}
+		return '';
+	}
+
+	private static function entity_media_query(string $text): string {
+		$entities = [
+			'/\bfriedrich\s+merz\b|\bmerz\b/u' => 'Friedrich Merz',
+			'/\bboris\s+pistorius\b|\bpistorius\b/u' => 'Boris Pistorius',
+			'/\bfrank-walter\s+steinmeier\b|\bsteinmeier\b/u' => 'Frank-Walter Steinmeier',
+			'/\bklingbeil\b/u' => 'Lars Klingbeil',
+			'/\bsoeder\b|\bsöder\b/u' => 'Markus Söder',
+			'/\bweidel\b/u' => 'Alice Weidel',
+			'/\bhabeck\b/u' => 'Robert Habeck',
+			'/\bbaerbock\b/u' => 'Annalena Baerbock',
+		];
+		foreach ($entities as $pattern => $query) {
+			if (preg_match($pattern, $text) === 1) {
+				return $query;
 			}
 		}
 		return '';
@@ -1362,7 +1473,7 @@ if (! defined('ABSPATH')) {
 		return implode(' ', array_slice($words, 0, max(3, min(10, $limit))));
 	}
 
-	private static function media_caption(string $url, string $lang = 'de'): string {
+	private static function media_caption(string $url, string $lang = 'de', string $fallback_title = ''): string {
 		$details = self::remote_media_details($url);
 		$label = trim((string) ($details['source_label'] ?? ''));
 		$alt = trim((string) ($details['alt'] ?? ''));
@@ -1375,6 +1486,10 @@ if (! defined('ABSPATH')) {
 		}
 		if ($alt !== '' && preg_match('/^[\p{L}\p{N}][\p{L}\p{N}\s\-]{2,72}$/u', $alt) && preg_match('/\b(image|photo|bild|foto)\b/ui', $alt) !== 1) {
 			return self::credit_prefix($lang) . ': ' . $alt . ' — ' . $label;
+		}
+		$fallback_title = self::caption_context_title($fallback_title);
+		if ($fallback_title !== '') {
+			return self::context_caption_prefix($lang, (string) ($details['provider'] ?? 'source')) . $fallback_title . '. ' . self::credit_prefix($lang) . ': ' . $label;
 		}
 		return self::credit_prefix($lang) . ': ' . $label;
 	}
@@ -1391,7 +1506,7 @@ if (! defined('ABSPATH')) {
 		$details = self::remote_media_details($resolved_url);
 		$source_label = trim((string) ($details['source_label'] ?? ''));
 		update_post_meta($attachment_id, '_epv2_remote_source_label', $source_label);
-		$caption = $source_label !== '' ? self::credit_prefix('de') . ': ' . $source_label : '';
+		$caption = $source_label !== '' ? self::media_caption($resolved_url, 'de', $fallback_title) : '';
 		$alt = trim((string) ($details['alt'] ?? ''));
 		$provider = (string) ($details['provider'] ?? '');
 		if ($caption === '' && $provider === 'source') {
@@ -1404,7 +1519,7 @@ if (! defined('ABSPATH')) {
 			]);
 		}
 		if ($fallback_title !== '' && ($alt === '' || in_array($provider, ['pexels', 'wikimedia', 'source'], true))) {
-			$alt = $fallback_title;
+			$alt = self::alt_context_title($fallback_title, $provider);
 		}
 		if ($alt !== '') {
 			update_post_meta($attachment_id, '_wp_attachment_image_alt', sanitize_text_field($alt));
@@ -1457,8 +1572,11 @@ if (! defined('ABSPATH')) {
 		}
 
 		if (str_contains($host, 'wikimedia.org')) {
-			$details['source_label'] = 'Wikimedia Commons';
-			$details['provider'] = 'wikimedia';
+			$wikimedia_details = self::wikimedia_details_from_url($resolved_url);
+			$details = array_merge($details, [
+				'source_label' => 'Wikimedia Commons',
+				'provider' => 'wikimedia',
+			], $wikimedia_details);
 		}
 
 		$site_host = (string) wp_parse_url(home_url('/'), PHP_URL_HOST);
@@ -1470,6 +1588,97 @@ if (! defined('ABSPATH')) {
 		return $details;
 	}
 
+	private static function wikimedia_details_from_url(string $url): array {
+		$title = self::wikimedia_file_title_from_url($url);
+		$details = [
+			'alt' => self::humanize_wikimedia_title($title),
+		];
+		if ($title === '') {
+			return $details;
+		}
+
+		$response = wp_remote_get('https://commons.wikimedia.org/w/api.php?action=query&titles=' . rawurlencode($title) . '&prop=imageinfo&iiprop=extmetadata|url&iiurlwidth=1600&format=json', [
+			'timeout' => 12,
+			'user-agent' => 'EuroPulse AutoPilot',
+		]);
+		if (is_wp_error($response)) {
+			return $details;
+		}
+		$code = (int) wp_remote_retrieve_response_code($response);
+		if ($code < 200 || $code >= 300) {
+			return $details;
+		}
+		$data = json_decode((string) wp_remote_retrieve_body($response), true);
+		if (! is_array($data)) {
+			return $details;
+		}
+		$page = null;
+		foreach ((array) ($data['query']['pages'] ?? []) as $candidate) {
+			if (is_array($candidate)) {
+				$page = $candidate;
+				break;
+			}
+		}
+		if (! is_array($page)) {
+			return $details;
+		}
+		$imageinfo = (array) ($page['imageinfo'][0] ?? []);
+		$metadata = (array) ($imageinfo['extmetadata'] ?? []);
+		$description = self::clean_wikimedia_text((string) ($metadata['ImageDescription']['value'] ?? ''));
+		$object_name = self::clean_wikimedia_text((string) ($metadata['ObjectName']['value'] ?? ''));
+		$artist = self::clean_wikimedia_text((string) ($metadata['Artist']['value'] ?? ''));
+		$attribution = self::clean_wikimedia_text((string) ($metadata['Attribution']['value'] ?? ''));
+		if ($object_name !== '') {
+			$details['alt'] = $object_name;
+		}
+		if ($description !== '') {
+			$details['caption'] = $description;
+		}
+		$credit = $attribution !== '' ? $attribution : $artist;
+		if ($credit !== '') {
+			$details['source_label'] = $credit . ' / Wikimedia Commons';
+		}
+		return $details;
+	}
+
+	private static function wikimedia_file_title_from_url(string $url): string {
+		$path = rawurldecode((string) wp_parse_url($url, PHP_URL_PATH));
+		if ($path === '') {
+			return '';
+		}
+		$parts = array_values(array_filter(explode('/', $path), static fn($part): bool => $part !== ''));
+		if ($parts === []) {
+			return '';
+		}
+		$filename = end($parts);
+		if (in_array('thumb', $parts, true) && count($parts) >= 2) {
+			$filename = $parts[count($parts) - 2];
+		}
+		$filename = preg_replace('/^\d+px-/i', '', (string) $filename) ?: (string) $filename;
+		$filename = trim($filename);
+		if ($filename === '') {
+			return '';
+		}
+		return str_starts_with($filename, 'File:') ? $filename : ('File:' . $filename);
+	}
+
+	private static function humanize_wikimedia_title(string $title): string {
+		$title = preg_replace('/^File:/i', '', $title) ?: $title;
+		$title = preg_replace('/\.(jpe?g|png|webp|gif|svg)$/i', '', $title) ?: $title;
+		$title = preg_replace('/[_]+/u', ' ', $title) ?: $title;
+		$title = preg_replace('/\s+/u', ' ', $title) ?: $title;
+		return trim($title);
+	}
+
+	private static function clean_wikimedia_text(string $value): string {
+		$value = html_entity_decode($value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+		$value = trim(preg_replace('/\s+/u', ' ', wp_strip_all_tags($value)) ?: '');
+		if ($value === '') {
+			return '';
+		}
+		return sanitize_text_field((string) mb_substr($value, 0, 360));
+	}
+
 	private static function media_relevant(string $url, string $title, string $excerpt, array $categories, array $source_dossier = []): bool {
 		$story_context = self::story_context_from_dossier($title, $excerpt, $categories, $source_dossier);
 		$details = self::remote_media_details($url);
@@ -1477,6 +1686,7 @@ if (! defined('ABSPATH')) {
 	}
 
 	private static function media_relevant_with_details(string $url, string $title, string $excerpt, array $categories, array $source_dossier, array $details): bool {
+		$categories = self::normalize_media_categories($categories);
 		$story_context = self::story_context_from_dossier($title, $excerpt, $categories, $source_dossier);
 		$context = mb_strtolower(trim(wp_strip_all_tags(implode(' ', array_filter([
 			$title,
@@ -1491,6 +1701,13 @@ if (! defined('ABSPATH')) {
 		$source_label = mb_strtolower(trim((string) ($details['source_label'] ?? '')));
 		$host = mb_strtolower((string) wp_parse_url($url, PHP_URL_HOST));
 		$intent = self::media_intent($title, $excerpt, $categories);
+		$stock_provider = self::fallback_stock_provider($url, $details);
+		if (
+			$stock_provider !== ''
+			&& ! self::stock_fallback_allowed($title, $excerpt, $categories, $source_dossier, $story_context, $stock_provider)
+		) {
+			return false;
+		}
 		$context_has_crypto_mismatch = (
 			preg_match('/\b(world|welt|politics|politik|iran|israel|lebanon|libanon|middle east|nahost|trump|reeves|war|krieg|conflict|konflikt)\b/u', $context) === 1
 			&& preg_match('/\b(bitcoin|crypto|kryptow[aä]hr|coinbase|ripple|token|blockchain)\b/u', $haystack) === 1
@@ -1510,6 +1727,18 @@ if (! defined('ABSPATH')) {
 			return true;
 		}
 
+		$is_culture_story = in_array('kultur', array_map('sanitize_key', $categories), true)
+			|| preg_match('/\b(kultur|museum|galerie|gallery|exhibition|ausstellung|installation|artist|k[üu]nstler|kunst|beeple|regular animals|nationalgalerie)\b/u', $context) === 1;
+		if (
+			$is_culture_story
+			&& (str_contains($host, 'museum') || str_contains($host, 'museen'))
+			&& $haystack !== ''
+			&& preg_match('/\b(beeple|regular animals|nationalgalerie|gallery|galerie|museum|exhibition|ausstellung|installation|kunst|art)\b/u', $haystack) === 1
+			&& preg_match('/\b(logo|icon|sprite|pdf|document|scan|map|flag|seal|coat of arms)\b/u', $haystack) !== 1
+		) {
+			return true;
+		}
+
 		if (
 			$is_sport_story
 			&& self::is_editorial_news_source($host, $source_label)
@@ -1523,6 +1752,7 @@ if (! defined('ABSPATH')) {
 			$is_sport_story
 			&& (str_contains($host, 'pexels.com') || str_contains($host, 'wikimedia.org'))
 			&& preg_match('/\b(camel|desert|parliament|government building|flag|gas station|royal palace|politician)\b/u', $haystack) !== 1
+			&& preg_match('/\b(player|players|football|soccer|stadium|match|training|coach|team|sport|hockey|basketball|goalkeeper|champions league|uefa|live stream|fc bayern|bayern|real madrid|atalanta|galatasaray|liverpool)\b/u', $haystack) === 1
 		) {
 			return true;
 		}
@@ -1805,6 +2035,7 @@ if (! defined('ABSPATH')) {
 	}
 
 	private static function media_intent(string $title, string $excerpt, array $categories): string {
+		$categories = self::normalize_media_categories($categories);
 		$text = mb_strtolower(trim(wp_strip_all_tags($title . ' ' . $excerpt . ' ' . implode(' ', $categories))));
 
 		$rules = [
@@ -1868,7 +2099,7 @@ if (! defined('ABSPATH')) {
 			'border_airport' => '/\b(passport|border|airport|control|traveler|terminal)\b/u',
 			'rail_transit' => '/\b(train|rail|station|platform|tram|commuter|bus)\b/u',
 			'bundestag_memorial' => '/\b(bundestag|parliament|memorial|museum|exhibition|document|historical|berlin)\b/u',
-			'german_government' => '/\b(government|parliament|building|bundestag|bundesregierung|minister|berlin)\b/u',
+			'german_government' => '/\b(government|parliament|building|bundestag|bundesregierung|minister|berlin|politician|portrait|merz|friedrich merz|pistorius|steinmeier|cdu|spd)\b/u',
 			'ukraine_attack' => '/\b(damage|destroyed|firefighters|rescue|debris|ukraine|kyiv|kiew|emergency|explosion|smoke|drone|missile|airfield|radar|oil depot|refinery|crimea|krim|krym|sevastopol|black sea|military)\b/u',
 			'middle_east_diplomacy' => '/\b(diplomatic|delegation|meeting|conference|minister|leaders|middle east|israel|iran|lebanon|netanjahu|netanyahu|araghtschi|araghchi|witkoff|foreign minister|aussenminister|außenminister|prime minister|premier)\b/u',
 			'paralympic_official_visit' => '/\b(paralympic|parasport|wheelchair|athlete|athletes|team germany|deutsches team|sport delegation|minister visiting athletes|sports hall|training hall|track and field)\b/u',
@@ -1903,7 +2134,7 @@ if (! defined('ABSPATH')) {
 			[
 				'need' => '/\b(bundesregierung|bundeskanzler|kanzleramt|merz|steinmeier|bundespräsident)\b/u',
 				'deny' => '/\b(riksdag|stockholm|sweden|swedish|schweden|schweiz|switzerland|swiss|canberra|brisbane)\b/u',
-				'allow' => '/\b(bundesregierung|bundeskanzleramt|berlin|regierung|kanzleramt|minister)\b/u',
+				'allow' => '/\b(bundesregierung|bundeskanzleramt|berlin|regierung|kanzleramt|minister|merz|friedrich merz|steinmeier|pistorius|politician|portrait|cdu|spd)\b/u',
 			],
 			[
 				'need' => '/\b(ukraine|ukrain|kyiv|kiew|одеса|одес|харків|kharkiv|львів|lviv|обстріл|обстрел|ракетн|дрон)\b/u',
@@ -1939,6 +2170,9 @@ if (! defined('ABSPATH')) {
 
 	private static function is_editorial_news_source(string $host, string $source_label): bool {
 		$known = [
+			'deutschlandfunk.de',
+			'www.deutschlandfunk.de',
+			'bilder.deutschlandfunk.de',
 			'br.de',
 			'img.br.de',
 			'kicker.de',
@@ -1974,24 +2208,21 @@ if (! defined('ABSPATH')) {
 		if ($host !== '' && in_array($host, $known, true)) {
 			return true;
 		}
-		return preg_match('/\b(br|kicker|tagesschau|dw|zdf|bundesregierung|bundestag|cnbc|merkur|fr|express|tagesspiegel|t-online|unian)\b/u', $source_label) === 1;
+		return preg_match('/\b(deutschlandfunk|br|kicker|tagesschau|dw|zdf|bundesregierung|bundestag|cnbc|merkur|fr|express|tagesspiegel|t-online|unian)\b/u', $source_label) === 1;
 	}
 
 	private static function prefer_no_stock_fallback(string $title, string $excerpt, array $categories): bool {
+		$categories = self::normalize_media_categories($categories);
 		$context = mb_strtolower(trim(wp_strip_all_tags($title . ' ' . $excerpt . ' ' . implode(' ', $categories))));
 		return preg_match('/\b(lebanon|libanon|israel|hezbollah|hamas|iran|nahost|middle east|gaza|krieg|war|escalation|eskalation|joint statement|gemeinsame erkl[aä]rung|diplomatic|diplom|sanctions|waffenruhe|ukraine|kyiv|kiew|polizei|police|innenminister|bayerische polizei|bayern|bavaria|bundesregierung|bundestag|regierung|ministerium|minister|beh[oö]rden|deutschland|germany|protest|proteste|protesten|kundgebung|demonstration|demo|afd|bischof|bishop|katholik|katholiken|catholic|church|kirche|religion|religi[oö]s)\b/u', $context) === 1;
 	}
 
-	private static function stock_fallback_allowed(string $title, string $excerpt, array $categories, array $source_dossier, array $story_context): bool {
+	private static function stock_fallback_allowed(string $title, string $excerpt, array $categories, array $source_dossier, array $story_context, string $provider = 'any'): bool {
+		$categories = self::normalize_media_categories($categories);
 		$has_publishable_source_media = self::has_publishable_source_media($source_dossier);
 		$supporting_count = count((array) ($source_dossier['supporting'] ?? []));
 		$used_search = ! empty($source_dossier['used_search']);
-		if (self::prefer_no_stock_fallback($title, $excerpt, $categories)) {
-			if ($supporting_count < 1 || ! $used_search) {
-				return false;
-			}
-			return ! $has_publishable_source_media;
-		}
+		$provider = sanitize_key($provider);
 		$story_context = self::normalize_story_context($story_context);
 		$phrases = array_map(static fn($value): string => mb_strtolower(trim((string) $value)), (array) ($story_context['phrases'] ?? []));
 		$text = mb_strtolower(trim(wp_strip_all_tags(implode(' ', array_filter([
@@ -2001,6 +2232,26 @@ if (! defined('ABSPATH')) {
 			(string) ($story_context['text'] ?? ''),
 			implode(' ', $phrases),
 		])))));
+
+		if ($provider === 'pexels' && self::pexels_fallback_forbidden($text, $categories)) {
+			return false;
+		}
+		if (self::specific_sport_stock_forbidden($text, $categories)) {
+			return false;
+		}
+		if ($provider === 'pexels' && self::entity_media_query($text) !== '') {
+			return false;
+		}
+		if ($provider === 'wikimedia' && self::entity_media_query($text) !== '') {
+			return ! $has_publishable_source_media;
+		}
+
+		if (self::prefer_no_stock_fallback($title, $excerpt, $categories)) {
+			if ($supporting_count < 1 || ! $used_search) {
+				return false;
+			}
+			return ! $has_publishable_source_media;
+		}
 		if (preg_match('/\b(polizei|police|bundesregierung|bundestag|ministerium|minister|regierung|beh[oö]rde|bayern|bavaria|münchen|munich|berlin|hamburg|ukraine|kyiv|kiew|libanon|lebanon|israel|iran|gaza|merz|steinmeier|nato|eu|europa)\b/u', $text) === 1) {
 			if ($supporting_count < 1 || ! $used_search) {
 				return false;
@@ -2024,6 +2275,78 @@ if (! defined('ABSPATH')) {
 			return ! $has_publishable_source_media;
 		}
 		return true;
+	}
+
+	private static function pexels_fallback_forbidden(string $text, array $categories): bool {
+		$categories = self::normalize_media_categories($categories);
+		$primary = (string) ($categories[0] ?? '');
+		$is_public_news = array_intersect($categories, ['politik', 'deutschland', 'welt', 'ukraine', 'europa', 'bayern', 'muenchen']) !== [];
+
+		if (
+			$is_public_news
+			&& preg_match('/\b(merz|cdu|csu|spd|gruene|grüne|afd|fdp|linke|rente|renten|pension|basisabsicherung|bundesregierung|bundestag|kanzler|minister|ministerium|regierung|parlament|wahl|migration|migrationspolitik|migrant|migranten|asyl|flucht|geflüchtete|gefluechtete|einbürgerung|einbuergerung|bamf|grenze|grenzkontrolle|grenzkontrollen|kontrolle|kontrollen|luxemburg|gericht|urteil|rechtswidrig|ukraine|israel|iran|gaza|libanon|lebanon|hisbollah|hamas|krieg|war|waffenruhe)\b/u', $text) === 1
+		) {
+			return true;
+		}
+
+		if (
+			$is_public_news
+			&& preg_match('/\b(bayern|bavaria|freistaat|ministerrat|innenminister|herrmann|polizei|feuerwehr|rettungsdienst|luftrettung|rettungshubschrauber|katastrophenschutz|beh[oö]rde|amt|verwaltung|gericht|staatsanwaltschaft)\b/u', $text) === 1
+		) {
+			return true;
+		}
+
+		if (self::specific_sport_stock_forbidden($text, $categories)) {
+			return true;
+		}
+
+		if (
+			in_array($primary, ['wirtschaft', 'gesundheit'], true)
+			&& preg_match('/\b(intellia|therapeutics|biotech|biotechnologie|pharma|phase-?3|phase iii|clinical trial|klinische studie|gentherapie|gene editing|in-vivo|angio[oö]dem|zulassung|studienergebnis)\b/u', $text) === 1
+		) {
+			return true;
+		}
+
+		return false;
+	}
+
+	private static function specific_sport_stock_forbidden(string $text, array $categories): bool {
+		$categories = self::normalize_media_categories($categories);
+		$primary = (string) ($categories[0] ?? '');
+		if ($primary !== 'sport') {
+			return false;
+		}
+		return preg_match('/\b(adidas|dfl|dfb|fifa|uefa|bundesliga|champions league|europa league|conference league|trainer|coach|gefeuert|entlassen|vertrag|acht-jahres-vertrag|millionen|derby|istanbul|galatasaray|fenerbah[cç]e|fc bayern|borussia|dortmund|liverpool|real madrid|nationalmannschaft)\b/u', $text) === 1;
+	}
+
+	private static function media_risk_flags(string $title, string $excerpt, array $categories, array $details, array $story_context, array $source_dossier = []): array {
+		$categories = self::normalize_media_categories($categories);
+		$provider = sanitize_key((string) ($details['provider'] ?? ''));
+		$text = mb_strtolower(trim(wp_strip_all_tags(implode(' ', array_filter([
+			$title,
+			$excerpt,
+			implode(' ', $categories),
+			(string) ($story_context['text'] ?? ''),
+			implode(' ', (array) ($story_context['phrases'] ?? [])),
+		])))));
+		$flags = [];
+		if ($provider === '') {
+			$origin = esc_url_raw((string) ($details['origin_url'] ?? ''));
+			$provider = self::fallback_stock_provider($origin, $details);
+		}
+		if ($provider === 'pexels' && self::pexels_fallback_forbidden($text, $categories)) {
+			$flags[] = 'pexels_blocked_for_high_context_story';
+		}
+		if (in_array($provider, ['pexels', 'wikimedia'], true)) {
+			$flags[] = 'stock_fallback';
+			if (! self::stock_fallback_allowed($title, $excerpt, $categories, $source_dossier, $story_context, $provider)) {
+				$flags[] = 'stock_fallback_not_allowed_for_context';
+			}
+		}
+		if ($provider === 'source') {
+			$flags[] = 'source_first';
+		}
+		return array_values(array_unique($flags));
 	}
 
 	private static function has_publishable_source_media(array $source_dossier): bool {
@@ -2082,6 +2405,42 @@ if (! defined('ABSPATH')) {
 		}
 
 		return false;
+	}
+
+	private static function caption_context_title(string $title): string {
+		$title = trim(wp_strip_all_tags($title));
+		if ($title === '') {
+			return '';
+		}
+		$title = preg_replace('/\s+/u', ' ', $title) ?: $title;
+		$title = preg_replace('/\s*[|–-]\s*EuroPulse.*$/iu', '', $title) ?: $title;
+		if (mb_strlen($title) > 96) {
+			$title = mb_substr($title, 0, 96);
+			$space = mb_strrpos($title, ' ');
+			if ($space !== false) {
+				$title = mb_substr($title, 0, $space);
+			}
+		}
+		return rtrim($title, " \t\n\r\0\x0B.,;:!?");
+	}
+
+	private static function context_caption_prefix(string $lang, string $provider): string {
+		$is_stock = in_array($provider, ['pexels', 'wikimedia'], true);
+		return match ($lang) {
+			'uk' => $is_stock ? 'Тематичне фото: ' : 'Зображення до теми: ',
+			'en' => $is_stock ? 'Thematic image: ' : 'Image for the story: ',
+			default => $is_stock ? 'Themenbild: ' : 'Bild zum Thema: ',
+		};
+	}
+
+	private static function alt_context_title(string $title, string $provider): string {
+		$title = self::caption_context_title($title);
+		if ($title === '') {
+			return '';
+		}
+		return in_array($provider, ['pexels', 'wikimedia'], true)
+			? 'Themenbild zu: ' . $title
+			: 'Bild zum Thema: ' . $title;
 	}
 
 	private static function credit_prefix(string $lang): string {

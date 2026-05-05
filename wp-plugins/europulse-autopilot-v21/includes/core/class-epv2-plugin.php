@@ -13,6 +13,7 @@ final class EPV2_Plugin {
 		EPV2_Upgrader::maybe_run();
 		EPV2_Capabilities::register();
 		EPV2_Jobs::register();
+		EPV2_Jobs::maybe_schedule();
 		EPV2_Publisher::register();
 		EPV2_News_Sitemap::register();
 		EPV2_News_Sitemap::maybe_render_early();

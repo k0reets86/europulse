@@ -58,12 +58,25 @@ final class EPV2_Manual_Mode {
 		}
 		$data = EPV2_HTML_Reader::fetch_document($url);
 		$draft['source_url'] = (string) ($data['url'] ?? $url);
-		$draft['title'] = (string) ($data['title'] ?? $draft['title']);
-		$draft['excerpt'] = (string) ($data['excerpt'] ?? $draft['excerpt']);
-		$draft['content'] = (string) ($data['content'] ?? $draft['content']);
-		$draft['languages']['de']['title'] = (string) ($draft['title'] ?? '');
-		$draft['languages']['de']['excerpt'] = (string) ($draft['excerpt'] ?? '');
-		$draft['languages']['de']['content'] = (string) ($draft['content'] ?? '');
+		$detected_lang = self::detect_import_lang($data);
+		if ($detected_lang === 'de') {
+			$draft['title'] = (string) ($data['title'] ?? $draft['title']);
+			$draft['excerpt'] = (string) ($data['excerpt'] ?? $draft['excerpt']);
+			$draft['content'] = (string) ($data['content'] ?? $draft['content']);
+			// normalize_draft() will sync these to languages['de'] automatically
+		} else {
+			// UK or EN source: populate only the detected language block.
+			// Clear top-level and DE so normalize_draft() does not override other blocks.
+			$draft['title'] = '';
+			$draft['excerpt'] = '';
+			$draft['content'] = '';
+			$draft['languages']['de'] = ['title' => '', 'excerpt' => '', 'content' => ''];
+			$draft['languages'][$detected_lang] = [
+				'title' => (string) ($data['title'] ?? ''),
+				'excerpt' => (string) ($data['excerpt'] ?? ''),
+				'content' => (string) ($data['content'] ?? ''),
+			];
+		}
 		$draft['featured_media_url'] = (string) ($data['image'] ?? $draft['featured_media_url']);
 		if (! empty($data['video'])) {
 			array_unshift($draft['inline_media_urls'], (string) $data['video']);
@@ -212,6 +225,8 @@ final class EPV2_Manual_Mode {
 		$payload['seo'] = $draft['seo'];
 		$payload['_meta']['style'] = $draft['style'];
 		$payload['_meta']['manual_mode'] = true;
+		$payload['_meta']['media_caption'] = (string) ($draft['media_caption'] ?? '');
+		$payload['_meta']['media_credit'] = (string) ($draft['media_credit'] ?? '');
 		$payload['_meta']['breaking'] = ! empty($draft['editorial']['breaking']);
 		$payload['_meta']['top_story'] = ! empty($draft['editorial']['top_story']);
 		$payload['_meta']['breaking_hours'] = max(1, min(24, (int) ($draft['editorial']['breaking_hours'] ?? EPV2_Settings::get('auto_breaking_hours', 6))));
@@ -304,6 +319,8 @@ final class EPV2_Manual_Mode {
 			'categories' => ['deutschland'],
 			'style' => (string) EPV2_Settings::get('rewrite_style', 'strict'),
 			'featured_media_url' => '',
+			'media_caption' => '',
+			'media_credit' => '',
 			'inline_media_urls' => [],
 			'seo' => [
 				'seo_title' => '',
@@ -349,6 +366,8 @@ final class EPV2_Manual_Mode {
 		}
 		$draft['style'] = in_array((string) $draft['style'], ['strict', 'analytic', 'lively'], true) ? (string) $draft['style'] : (string) EPV2_Settings::get('rewrite_style', 'strict');
 		$draft['featured_media_url'] = esc_url_raw((string) $draft['featured_media_url']);
+		$draft['media_caption'] = sanitize_textarea_field((string) $draft['media_caption']);
+		$draft['media_credit'] = sanitize_text_field((string) $draft['media_credit']);
 		$draft['inline_media_urls'] = EPV2_Media::normalize_media_list($draft['inline_media_urls']);
 		$draft['seo'] = wp_parse_args(is_array($draft['seo']) ? $draft['seo'] : [], $defaults['seo']);
 		$draft['seo']['seo_title'] = sanitize_text_field((string) $draft['seo']['seo_title']);
@@ -416,6 +435,19 @@ final class EPV2_Manual_Mode {
 		$draft['content'] = $draft['languages']['de']['content'];
 
 		return $draft;
+	}
+
+	private static function detect_import_lang(array $data): string {
+		$lang = strtolower(substr((string) ($data['lang'] ?? ''), 0, 2));
+		if (in_array($lang, ['de', 'uk', 'en'], true)) {
+			return $lang;
+		}
+		// Cyrillic in title or content → assume Ukrainian
+		$sample = (string) ($data['title'] ?? '') . ' ' . (string) ($data['content'] ?? '');
+		if (preg_match('/\p{Cyrillic}/u', $sample) === 1) {
+			return 'uk';
+		}
+		return 'de';
 	}
 
 	private static function pick_source_language_block(array $draft): array {

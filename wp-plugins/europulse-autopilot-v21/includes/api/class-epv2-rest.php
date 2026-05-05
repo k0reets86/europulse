@@ -20,7 +20,7 @@ final class EPV2_REST {
 
 		register_rest_route('epv2/v1', '/queue', [
 			'methods' => 'GET',
-			'callback' => static fn() => rest_ensure_response(EPV2_Queue::get_queue_items_summary(['limit' => 50])),
+			'callback' => static fn() => rest_ensure_response(EPV2_Queue::queue_items_user_facing_summary(EPV2_Queue::get_queue_items_summary(['limit' => 50]))),
 			'permission_callback' => [self::class, 'can_manage'],
 		]);
 
@@ -122,39 +122,97 @@ final class EPV2_REST {
 	}
 
 	public static function bridge_health(WP_REST_Request $request): WP_REST_Response {
+		$worker = class_exists('EPV2_Worker_Client')
+			? EPV2_Worker_Client::health_snapshot()
+			: [
+				'enabled' => false,
+				'mode' => 'missing',
+				'available' => false,
+				'http_code' => 0,
+				'error' => 'worker client class missing',
+				'payload' => [],
+			];
+		$queue = EPV2_Queue::bridge_health_snapshot();
+		$checks = [
+			'worker' => [
+				'status' => ! empty($worker['enabled']) && empty($worker['available']) ? 'failed' : 'ok',
+				'details' => $worker,
+			],
+			'locks' => [
+				'collect' => EPV2_Lock_Manager::status_snapshot('collect'),
+				'process' => EPV2_Lock_Manager::status_snapshot('process'),
+				'publish' => EPV2_Lock_Manager::status_snapshot('publish'),
+			],
+			'runs' => [
+				'collect' => EPV2_Runs::health_snapshot('collect', 300),
+				'process' => EPV2_Runs::health_snapshot('process', 300),
+				'publish' => EPV2_Runs::health_snapshot('publish', 180),
+			],
+			'queue' => [
+				'status' => (($queue['queue_contract']['violations_count'] ?? 0) > 0) ? 'warn' : 'ok',
+				'details' => $queue,
+			],
+			'acceptance' => [
+				'status' => (($queue['acceptance']['status'] ?? 'not_proven') === 'accepted')
+					? 'ok'
+					: ((($queue['acceptance']['consecutive_autonomous_publish_grade'] ?? 0) > 0) ? 'in_progress' : 'warn'),
+				'details' => $queue['acceptance'] ?? [],
+			],
+		];
+		$status = 'ok';
+		foreach ($checks as $check) {
+			if (($check['status'] ?? 'ok') === 'failed') {
+				$status = 'degraded';
+				break;
+			}
+			if (($check['status'] ?? 'ok') === 'warn' && $status === 'ok') {
+				$status = 'warn';
+			}
+		}
+
 		return rest_ensure_response([
-			'status' => 'ok',
+			'status' => $status,
 			'plugin_version' => defined('EPV2_VERSION') ? EPV2_VERSION : 'unknown',
+			'runtime_mode' => 'server_orchestrator',
+			'cron_orchestration_policy' => 'compatibility_only',
 			'automation_paused' => EPV2_Jobs::automation_paused(),
 			'collect_paused' => EPV2_Jobs::collect_paused(),
 			'server_orchestrator_enabled' => EPV2_Jobs::server_orchestrator_enabled(),
-			'worker_enabled' => class_exists('EPV2_Worker_Client') ? EPV2_Worker_Client::enabled() : false,
-			'worker_available' => class_exists('EPV2_Worker_Client') && EPV2_Worker_Client::enabled() ? EPV2_Worker_Client::is_available() : false,
+			'worker_enabled' => ! empty($worker['enabled']),
+			'worker_available' => ! empty($worker['available']),
+			'checks' => $checks,
 		]);
 	}
 
 	public static function bridge_state(WP_REST_Request $request): WP_REST_Response {
 		global $wpdb;
-		$queue_table = $wpdb->prefix . 'epv2_queue';
 		$run_table = $wpdb->prefix . 'epv2_runs';
-		$queue_states = $wpdb->get_results("SELECT state, COUNT(*) c FROM {$queue_table} GROUP BY state ORDER BY c DESC", ARRAY_A);
+		$runtime = EPV2_Queue::bridge_runtime_snapshot();
 		$recent_runs = $wpdb->get_results("SELECT id, job_name, status, item_count, error_count, started_at, finished_at FROM {$run_table} ORDER BY id DESC LIMIT 10", ARRAY_A);
 		$settings = EPV2_Settings::get_all();
 		$summary = [
+			'runtime_mode' => 'server_orchestrator',
+			'cron_orchestration_policy' => 'compatibility_only',
 			'automation_paused' => EPV2_Jobs::automation_paused(),
 			'collect_paused' => EPV2_Jobs::collect_paused(),
 			'server_orchestrator_enabled' => EPV2_Jobs::server_orchestrator_enabled(),
-			'active_automation_item' => (int) get_option('epv2_active_automation_item', 0),
+			'active_automation_item' => (int) ($runtime['active_automation_item'] ?? 0),
+			'has_processable_items' => ! empty($runtime['has_processable_items']),
 			'next_collect' => self::timestamp_to_gmt(wp_next_scheduled('epv2_collect')),
 			'next_process' => self::timestamp_to_gmt(wp_next_scheduled('epv2_process')),
 			'next_publish' => self::timestamp_to_gmt(wp_next_scheduled('epv2_publish')),
-			'next_ready_publish' => self::timestamp_to_gmt(EPV2_Queue::next_ready_publish_timestamp()),
+			'next_ready_publish' => self::timestamp_to_gmt((int) ($runtime['next_ready_publish'] ?? 0)),
 			'publish_interval_minutes' => (int) ($settings['publish_interval_minutes'] ?? 5),
 			'process_interval_minutes' => (int) ($settings['process_interval_minutes'] ?? 5),
 			'collect_interval_minutes' => (int) ($settings['collect_interval_minutes'] ?? 30),
 			'daily_publish_target' => (int) ($settings['daily_publish_target'] ?? 0),
 			'enforce_daily_publish_target' => ! empty($settings['enforce_daily_publish_target']),
-			'queue_states' => $queue_states,
+			'queue_states' => is_array($runtime['queue_states'] ?? null) ? $runtime['queue_states'] : [],
+			'health_checks' => [
+				'queue_contract' => EPV2_Queue::bridge_health_snapshot()['queue_contract'] ?? [],
+				'acceptance' => EPV2_Queue::bridge_health_snapshot()['acceptance'] ?? [],
+				'worker_available' => class_exists('EPV2_Worker_Client') && EPV2_Worker_Client::enabled() ? EPV2_Worker_Client::is_available() : false,
+			],
 			'recent_runs' => $recent_runs,
 		];
 		return rest_ensure_response($summary);
@@ -200,6 +258,9 @@ final class EPV2_REST {
 	}
 
 	public static function bridge_collect(WP_REST_Request $request): WP_REST_Response {
+		if (EPV2_Jobs::server_orchestrator_enabled()) {
+			return self::bridge_long_job_disabled_response('collect');
+		}
 		EPV2_Collector::run_scheduled(true);
 		return rest_ensure_response([
 			'ok' => true,
@@ -208,6 +269,9 @@ final class EPV2_REST {
 	}
 
 	public static function bridge_process(WP_REST_Request $request): WP_REST_Response {
+		if (EPV2_Jobs::server_orchestrator_enabled()) {
+			return self::bridge_long_job_disabled_response('process');
+		}
 		$ignore_retry_after = ! empty($request->get_json_params()['ignore_retry_after'] ?? false);
 		EPV2_AI_Processor::process_scheduled(true, $ignore_retry_after);
 		return rest_ensure_response([
@@ -218,17 +282,35 @@ final class EPV2_REST {
 	}
 
 	public static function bridge_publish(WP_REST_Request $request): WP_REST_Response {
-		EPV2_Publisher::publish_scheduled(false);
+		EPV2_Publisher::publish_scheduled(true);
 		return rest_ensure_response([
 			'ok' => true,
 			'action' => 'publish',
 		]);
 	}
 
+	private static function bridge_long_job_disabled_response(string $action): WP_REST_Response {
+		$response = rest_ensure_response([
+			'ok' => false,
+			'action' => sanitize_key($action),
+			'skipped' => 'http_long_job_disabled',
+			'reason' => 'server_orchestrator mode runs long jobs through WP-CLI to avoid HTTP gateway timeouts and ghost locks',
+			'runner' => 'wp-cli-orchestrator',
+		]);
+		$response->set_status(202);
+		return $response;
+	}
+
 	public static function bridge_maintenance(WP_REST_Request $request): WP_REST_Response {
 		$cleanup = [];
+		$cleanup['abandoned_started_runs'] = EPV2_Runs::cleanup_abandoned_started(120);
 		$cleanup['promoted_live_published_rows'] = EPV2_Queue::promote_live_published_rows(20);
 		$cleanup['reactivated_media_rows'] = EPV2_Queue::reactivate_media_recoverable_rows(5);
+		$cleanup['reactivated_planner_soft_rejected_rows'] = EPV2_Queue::reactivate_planner_selected_soft_rejected_items(50);
+		$cleanup['rejected_non_publish_grade_new_rows'] = EPV2_Queue::sanitize_non_publish_grade_new_items(150);
+		$cleanup['rejected_low_grade_ready_publish_rows'] = EPV2_Queue::sanitize_low_grade_ready_publish_items(50);
+		$cleanup['workflow_quarantine'] = EPV2_Queue::quarantine_pathological_workflow_loops(100);
+		$cleanup['promoted_ready_like_rows'] = EPV2_Queue::promote_ready_like_rows(50);
 		return rest_ensure_response([
 			'ok' => true,
 			'action' => 'maintenance',

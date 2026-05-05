@@ -63,12 +63,16 @@ final class EPV2_Taxonomy_Map {
 		return '';
 	}
 
-	private static function normalize_slug(string $slug): string {
+	public static function normalize_slug(string $slug): string {
 		$slug = sanitize_title($slug);
 
 		return match ($slug) {
 			'münchen', 'munchen', 'munich' => 'muenchen',
 			'world' => 'welt',
+			'leben_in_deutschland' => 'leben-in-deutschland',
+			'ukrainische_initiativen' => 'ukrainische-initiativen',
+			'vereine_projekte' => 'vereine-projekte',
+			'treffen_networking' => 'treffen-networking',
 			'events' => 'veranstaltungen',
 			'ukrainian-initiatives' => 'ukrainische-initiativen',
 			'associations-projects' => 'vereine-projekte',

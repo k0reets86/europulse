@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -16,10 +17,13 @@ SITE_URL = os.getenv("EPV2_SITE_URL", "http://127.0.0.1").rstrip("/")
 BRIDGE_TOKEN = os.getenv("EPV2_BRIDGE_TOKEN", "").strip()
 LOOP_SECONDS = max(5, int(os.getenv("EPV2_LOOP_SECONDS", "15")))
 MAINTENANCE_SECONDS = max(60, int(os.getenv("EPV2_MAINTENANCE_SECONDS", "180")))
-IDLE_PROCESS_COOLDOWN_SECONDS = max(15, int(os.getenv("EPV2_IDLE_PROCESS_COOLDOWN_SECONDS", "30")))
+IDLE_PROCESS_COOLDOWN_SECONDS = max(60, int(os.getenv("EPV2_IDLE_PROCESS_COOLDOWN_SECONDS", "120")))
+ACTIVE_PROCESS_COOLDOWN_SECONDS = max(60, int(os.getenv("EPV2_ACTIVE_PROCESS_COOLDOWN_SECONDS", "120")))
 WP_PATH = os.getenv("EPV2_WP_PATH", "/var/www/europulse/public").strip()
 WP_CLI = os.getenv("EPV2_WP_CLI", "/usr/local/bin/wp").strip()
 PROCESS_TIMEOUT_SECONDS = max(180, int(os.getenv("EPV2_PROCESS_TIMEOUT_SECONDS", "900")))
+COLLECT_TIMEOUT_SECONDS = max(300, int(os.getenv("EPV2_COLLECT_TIMEOUT_SECONDS", "1200")))
+PUBLISH_RETRY_COOLDOWN_SECONDS = max(15, int(os.getenv("EPV2_PUBLISH_RETRY_COOLDOWN_SECONDS", "30")))
 
 
 def utc_now() -> datetime:
@@ -73,29 +77,193 @@ def request_json(path: str, method: str = "GET", payload: dict | None = None) ->
         return json.loads(response.read().decode("utf-8"))
 
 
+def run_wp_eval(code: str, timeout: int = 45) -> dict:
+    process = subprocess.run(
+        [WP_CLI, "--path=" + WP_PATH, "--allow-root", "eval", code],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+    stdout = (process.stdout or "").strip()
+    stderr = (process.stderr or "").strip()
+    try:
+        payload = json.loads(stdout.rsplit("\n", 1)[-1]) if stdout else {}
+    except json.JSONDecodeError:
+        payload = {"raw_stdout": stdout[-1000:]}
+    payload["returncode"] = process.returncode
+    if stderr:
+        payload["stderr"] = stderr[-1000:]
+    return payload
+
+
+def recover_timed_out_process_job() -> dict:
+    code = r"""
+$active = (int) get_option('epv2_active_automation_item', 0);
+$closed_runs = 0;
+delete_option('epv2_lock_process');
+if (class_exists('EPV2_Runs')) {
+    global $wpdb;
+    $rows = $wpdb->get_results($wpdb->prepare(
+        "SELECT id FROM {$wpdb->prefix}epv2_runs WHERE job_name = %s AND status = %s AND started_at <= %s",
+        'process',
+        'started',
+        gmdate('Y-m-d H:i:s', time() - 10)
+    ));
+    foreach ((array) $rows as $row) {
+        EPV2_Runs::finish((int) $row->id, 'finished_with_errors', 0, 1, [
+            'result' => 'process_timeout_recovered',
+            'last_item_id' => $active,
+            'processed_item_id' => $active,
+            'recovery_source' => 'external_orchestrator_timeout',
+        ]);
+        $closed_runs++;
+    }
+}
+if ($active > 0 && class_exists('EPV2_Queue')) {
+    $item = EPV2_Queue::get_item($active);
+    $notes = $item ? json_decode((string) $item->admin_notes, true) : [];
+    $notes = is_array($notes) ? $notes : [];
+    $notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+    $notes['_system']['workflow_step'] = sanitize_key((string) ($notes['_system']['workflow_step'] ?? 'build_de_master')) ?: 'build_de_master';
+    $notes['_system']['workflow_step_status'] = 'pending';
+    $notes['_system']['workflow_owner_token'] = '';
+    $notes['_system']['workflow_heartbeat_at'] = '';
+    $notes['_system']['workflow_last_error'] = 'Previous process exceeded external orchestrator timeout and was recovered automatically.';
+    unset($notes['_system']['workflow_not_before'], $notes['_system']['retry_after']);
+    EPV2_Queue::mark_state($active, 'retry_process', [
+        'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+        'error_message' => 'Восстановлено автоматикой: предыдущий процесс превысил timeout, материал возвращён в bounded retry.',
+    ]);
+}
+delete_option('epv2_active_automation_item');
+echo wp_json_encode([
+    'ok' => true,
+    'active_item' => $active,
+    'closed_runs' => $closed_runs,
+], JSON_UNESCAPED_UNICODE);
+"""
+    return run_wp_eval(code)
+
+
+def recover_timed_out_collect_job() -> dict:
+    code = r"""
+$closed_runs = 0;
+delete_option('epv2_lock_collect');
+update_option('epv2_collect_progress', [
+    'status' => 'finished_with_errors',
+    'total_sources' => 0,
+    'processed_sources' => 0,
+    'current_source' => '',
+    'collected_items' => 0,
+    'errors' => 1,
+    'updated_at' => current_time('mysql'),
+    'updated_at_ts' => time(),
+], false);
+if (class_exists('EPV2_Runs')) {
+    global $wpdb;
+    $rows = $wpdb->get_results($wpdb->prepare(
+        "SELECT id FROM {$wpdb->prefix}epv2_runs WHERE job_name = %s AND status = %s AND started_at <= %s",
+        'collect',
+        'started',
+        gmdate('Y-m-d H:i:s', time() - 10)
+    ));
+    foreach ((array) $rows as $row) {
+        EPV2_Runs::finish((int) $row->id, 'finished_with_errors', 0, 1, [
+            'result' => 'collect_timeout_recovered',
+            'recovery_source' => 'external_orchestrator_timeout',
+        ]);
+        $closed_runs++;
+    }
+}
+echo wp_json_encode([
+    'ok' => true,
+    'closed_runs' => $closed_runs,
+], JSON_UNESCAPED_UNICODE);
+"""
+    return run_wp_eval(code)
+
+
+def run_collect_job() -> dict:
+    code = (
+        "if (class_exists('EPV2_Lock_Manager') && EPV2_Lock_Manager::is_active('collect')) { "
+        "echo wp_json_encode(['ok'=>true,'action'=>'collect','runner'=>'wp-cli','skipped'=>'active_lock'], JSON_UNESCAPED_UNICODE); "
+        "return; "
+        "} "
+        "EPV2_Collector::run_scheduled(true); "
+        "echo wp_json_encode(['ok'=>true,'action'=>'collect','runner'=>'wp-cli'], JSON_UNESCAPED_UNICODE);"
+    )
+    process = subprocess.Popen(
+        [WP_CLI, "--path=" + WP_PATH, "--allow-root", "eval", code],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=COLLECT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+        recovery = recover_timed_out_collect_job()
+        log("collect timeout recovered", recovery=recovery)
+        raise TimeoutError(
+            f"wp-cli collect timed out after {COLLECT_TIMEOUT_SECONDS} seconds and process group was killed"
+        ) from exc
+    stdout = (stdout or "").strip()
+    stderr = (stderr or "").strip()
+    try:
+        payload = json.loads(stdout.rsplit("\n", 1)[-1]) if stdout else {}
+    except json.JSONDecodeError:
+        payload = {"ok": False, "action": "collect", "runner": "wp-cli", "raw_stdout": stdout[-1000:]}
+    payload["returncode"] = process.returncode
+    if stderr:
+        payload["stderr"] = stderr[-1000:]
+    if process.returncode != 0:
+        raise RuntimeError(f"wp-cli collect failed: rc={process.returncode} stderr={stderr[-1000:]}")
+    return payload
+
+
 def run_process_job(ignore_retry_after: bool = False) -> dict:
     code = (
         f"EPV2_AI_Processor::process_scheduled(true, {'true' if ignore_retry_after else 'false'}); "
         "echo wp_json_encode(['ok'=>true,'action'=>'process','runner'=>'wp-cli'], JSON_UNESCAPED_UNICODE);"
     )
-    result = subprocess.run(
+    process = subprocess.Popen(
         [WP_CLI, "--path=" + WP_PATH, "--allow-root", "eval", code],
         text=True,
-        capture_output=True,
-        timeout=PROCESS_TIMEOUT_SECONDS,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
-    stdout = result.stdout.strip()
-    stderr = result.stderr.strip()
+    try:
+        stdout, stderr = process.communicate(timeout=PROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+        recovery = recover_timed_out_process_job()
+        log("process timeout recovered", recovery=recovery)
+        raise TimeoutError(
+            f"wp-cli process timed out after {PROCESS_TIMEOUT_SECONDS} seconds and process group was killed"
+        ) from exc
+    stdout = (stdout or "").strip()
+    stderr = (stderr or "").strip()
     try:
         payload = json.loads(stdout.rsplit("\n", 1)[-1]) if stdout else {}
     except json.JSONDecodeError:
         payload = {"ok": False, "action": "process", "runner": "wp-cli", "raw_stdout": stdout[-1000:]}
-    payload["returncode"] = result.returncode
+    payload["returncode"] = process.returncode
     if stderr:
         payload["stderr"] = stderr[-1000:]
-    if result.returncode != 0:
-        raise RuntimeError(f"wp-cli process failed: rc={result.returncode} stderr={stderr[-1000:]}")
+    if process.returncode != 0:
+        raise RuntimeError(f"wp-cli process failed: rc={process.returncode} stderr={stderr[-1000:]}")
     return payload
 
 
@@ -120,6 +288,9 @@ def ensure_server_orchestrator(state: dict) -> None:
 
 
 def should_process(state: dict) -> bool:
+    has_processable = state.get("has_processable_items")
+    if isinstance(has_processable, bool):
+        return has_processable
     return (
         bool(state.get("active_automation_item"))
         or state_count(state, "new") > 0
@@ -146,8 +317,12 @@ def should_process_immediately(previous_state: dict, current_state: dict) -> boo
 
 def should_process_from_idle(state: dict, now_ts: float, last_process: float) -> bool:
     if int(state.get("active_automation_item") or 0) > 0:
-        return False
-    if state_count(state, "new") <= 0 and state_count(state, "retry_process") <= 0:
+        return now_ts - last_process >= ACTIVE_PROCESS_COOLDOWN_SECONDS
+    has_processable = state.get("has_processable_items")
+    if isinstance(has_processable, bool):
+        if not has_processable:
+            return False
+    elif state_count(state, "new") <= 0 and state_count(state, "retry_process") <= 0:
         return False
     return now_ts - last_process >= IDLE_PROCESS_COOLDOWN_SECONDS
 
@@ -158,7 +333,7 @@ def main() -> int:
         return 1
 
     log("orchestrator starting", site_url=SITE_URL, loop_seconds=LOOP_SECONDS)
-    last_collect = 0.0
+    last_collect = time.time()
     last_process = 0.0
     last_publish = 0.0
     last_maintenance = 0.0
@@ -182,12 +357,17 @@ def main() -> int:
 
             collect_every = max(300, int(state.get("collect_interval_minutes", 60)) * 60)
             process_every = max(60, int(state.get("process_interval_minutes", 5)) * 60)
-            publish_every = max(60, int(state.get("publish_interval_minutes", 5)) * 60)
 
             if (not state.get("collect_paused")) and now_ts - last_collect >= collect_every:
-                result = request_json("/bridge/collect", method="POST", payload={})
+                result = run_collect_job()
                 log("collect executed", result=result)
-                last_collect = now_ts
+                last_collect = time.time()
+
+            if should_publish(state, utc_now()) and now_ts - last_publish >= PUBLISH_RETRY_COOLDOWN_SECONDS:
+                result = request_json("/bridge/publish", method="POST", payload={})
+                log("publish executed", next_ready_publish=state.get("next_ready_publish"), result=result)
+                last_publish = time.time()
+                state = request_json("/bridge/state")
 
             if should_process(state) and (
                 now_ts - last_process >= process_every
@@ -195,7 +375,7 @@ def main() -> int:
             ):
                 result = run_process_job()
                 log("process executed", active_item=state.get("active_automation_item"), result=result)
-                last_process = now_ts
+                last_process = time.time()
                 refreshed_state = request_json("/bridge/state")
                 if should_process_immediately(state, refreshed_state):
                     handoff_result = run_process_job()
@@ -207,11 +387,19 @@ def main() -> int:
                     )
                     last_process = time.time()
                 state = refreshed_state
+            elif not should_process(state) and now_ts - last_process >= process_every:
+                log(
+                    "process idle",
+                    active_item=state.get("active_automation_item"),
+                    has_processable_items=state.get("has_processable_items"),
+                    queue_states=state.get("queue_states", []),
+                )
+                last_process = now_ts
 
-            if should_publish(state, now) and now_ts - last_publish >= publish_every:
+            if should_publish(state, utc_now()) and time.time() - last_publish >= PUBLISH_RETRY_COOLDOWN_SECONDS:
                 result = request_json("/bridge/publish", method="POST", payload={})
                 log("publish executed", next_ready_publish=state.get("next_ready_publish"), result=result)
-                last_publish = now_ts
+                last_publish = time.time()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             log("bridge http error", status=exc.code, detail=detail[:1000])

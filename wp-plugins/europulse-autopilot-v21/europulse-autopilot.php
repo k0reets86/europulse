@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name: EuroPulse AutoPilot v2.1 Sandbox
+ * Plugin Name: EuroPulse AutoPilot v21
  * Plugin URI: https://europulse.today
  * Description: Configurable source ingestion, queue, AI rewrite, compliance and multilingual publishing engine for EuroPulse.
  * Version: 2.1.0

@@ -10,13 +10,13 @@ final class EPV2_Category_Planner {
 	public static function defaults(): array {
 		return [
 			'deutschland' => ['min' => 2, 'target' => 4, 'max' => 5, 'upgrade_threshold' => 7],
-			'münchen' => ['min' => 0, 'target' => 1, 'max' => 2, 'upgrade_threshold' => 7],
+			'muenchen' => ['min' => 0, 'target' => 1, 'max' => 2, 'upgrade_threshold' => 7],
 			'bayern' => ['min' => 1, 'target' => 2, 'max' => 3, 'upgrade_threshold' => 7],
 			'ukraine' => ['min' => 2, 'target' => 4, 'max' => 5, 'upgrade_threshold' => 8],
 			'europa' => ['min' => 0, 'target' => 1, 'max' => 2, 'upgrade_threshold' => 7],
 			'politik' => ['min' => 2, 'target' => 4, 'max' => 5, 'upgrade_threshold' => 8],
 			'wirtschaft' => ['min' => 1, 'target' => 2, 'max' => 3, 'upgrade_threshold' => 8],
-			'world' => ['min' => 2, 'target' => 3, 'max' => 5, 'upgrade_threshold' => 8],
+			'welt' => ['min' => 2, 'target' => 3, 'max' => 5, 'upgrade_threshold' => 8],
 			'leben-in-deutschland' => ['min' => 1, 'target' => 3, 'max' => 4, 'upgrade_threshold' => 7],
 			'kultur' => ['min' => 0, 'target' => 2, 'max' => 3, 'upgrade_threshold' => 10],
 			'sport' => ['min' => 1, 'target' => 3, 'max' => 4, 'upgrade_threshold' => 10],
@@ -25,7 +25,8 @@ final class EPV2_Category_Planner {
 	}
 
 	public static function category_plan(string $category): array {
-		$plans = EPV2_Settings::get('category_plans', self::defaults());
+		$category = self::canonical_category($category);
+		$plans = self::canonicalize_plan_keys(EPV2_Settings::get('category_plans', self::defaults()));
 		$plan = is_array($plans[$category] ?? null) ? $plans[$category] : (self::defaults()[$category] ?? ['min' => 0, 'target' => 1, 'max' => 2, 'upgrade_threshold' => 8]);
 		return [
 			'min' => max(0, (int) ($plan['min'] ?? 0)),
@@ -37,14 +38,13 @@ final class EPV2_Category_Planner {
 
 	public static function target_shares(): array {
 		return [
-			'world' => 0.125,
+			'welt' => 0.125,
 			'politik' => 0.125,
 			'ukraine' => 0.125,
 			'deutschland' => 0.125,
 			'wirtschaft' => 0.0833,
 			'sport' => 0.0833,
 			'kultur' => 0.0583,
-			'münchen' => 0.0583,
 			'muenchen' => 0.0583,
 			'bayern' => 0.05,
 			'leben-in-deutschland' => 0.10,
@@ -54,14 +54,13 @@ final class EPV2_Category_Planner {
 
 	public static function burst_caps_6h(): array {
 		return [
-			'world' => 4,
+			'welt' => 4,
 			'politik' => 4,
 			'ukraine' => 4,
 			'deutschland' => 4,
 			'wirtschaft' => 3,
 			'sport' => 3,
 			'kultur' => 2,
-			'münchen' => 2,
 			'muenchen' => 2,
 			'bayern' => 2,
 			'leben-in-deutschland' => 2,
@@ -88,18 +87,18 @@ final class EPV2_Category_Planner {
 		if ($total24 < 8) {
 			return ['delta' => 0, 'reason' => 'insufficient_density', 'stats' => $stats];
 		}
-		if ($target > 0 && $share24 < max(0.01, $target - 0.05)) {
-			return ['delta' => 8, 'reason' => 'underrepresented_24h', 'stats' => $stats];
-		}
-		if ($cat6 === 0 && $target > 0 && $share24 < $target) {
-			return ['delta' => 4, 'reason' => 'missing_recent_presence', 'stats' => $stats];
-		}
-		if ($cat6 >= $cap6 + 2 && $share24 > ($target + 0.08)) {
-			return ['delta' => -12, 'reason' => 'burst_and_overrepresented', 'stats' => $stats];
-		}
-		if ($cat6 >= $cap6 && $share24 > ($target + 0.04)) {
-			return ['delta' => -6, 'reason' => 'burst_soft_throttle', 'stats' => $stats];
-		}
+			if ($target > 0 && $share24 < max(0.01, $target - 0.05)) {
+				return ['delta' => -4, 'reason' => 'underrepresented_24h_threshold_relief', 'stats' => $stats];
+			}
+			if ($cat6 === 0 && $target > 0 && $share24 < $target) {
+				return ['delta' => -2, 'reason' => 'missing_recent_presence_threshold_relief', 'stats' => $stats];
+			}
+			if ($cat6 >= $cap6 + 2 && $share24 > ($target + 0.08)) {
+				return ['delta' => 6, 'reason' => 'burst_and_overrepresented_threshold_raise', 'stats' => $stats];
+			}
+			if ($cat6 >= $cap6 && $share24 > ($target + 0.04)) {
+				return ['delta' => 4, 'reason' => 'burst_soft_threshold_raise', 'stats' => $stats];
+			}
 
 		return ['delta' => 0, 'reason' => '', 'stats' => $stats];
 	}
@@ -119,9 +118,9 @@ final class EPV2_Category_Planner {
 		if ((int) ($mix['total_24h'] ?? 0) >= 8 && $target > 0 && $share24 < max(0.01, $target - 0.05)) {
 			return ['action' => 'select', 'reason' => 'underrepresented_24h', 'plan' => $plan, 'stats' => $stats, 'mix' => $mix];
 		}
-		if ((int) ($mix['category_6h'] ?? 0) >= ($cap6 + 2) && $share24 > ($target + 0.08) && $score < 58) {
-			return ['action' => 'reject', 'reason' => 'soft_mix_burst_reject', 'plan' => $plan, 'stats' => $stats, 'mix' => $mix];
-		}
+			if ((int) ($mix['category_6h'] ?? 0) >= ($cap6 + 2) && $share24 > ($target + 0.08) && $score < 58) {
+				return ['action' => 'select', 'reason' => 'soft_mix_threshold_governed', 'plan' => $plan, 'stats' => $stats, 'mix' => $mix];
+			}
 
 		if ($stats['selected_count'] < $plan['target']) {
 			return ['action' => 'select', 'reason' => 'below_target', 'plan' => $plan, 'stats' => $stats, 'mix' => $mix];
@@ -158,7 +157,12 @@ final class EPV2_Category_Planner {
 		$share24 = $total24 > 0 ? ($cat24 / $total24) : 0.0;
 		$cap6 = (int) (self::burst_caps_6h()[$category] ?? 3);
 
-		return $total24 >= 8 && $cat6 >= $cap6 && $target > 0 && $share24 > ($target + 0.04);
+			$score = (int) ($analysis['score'] ?? 0);
+			$tier = sanitize_key((string) ($analysis['tier'] ?? ''));
+			if ($score >= 52 || in_array($tier, ['a', 'b'], true)) {
+				return false;
+			}
+			return $total24 >= 8 && $cat6 >= $cap6 && $target > 0 && $share24 > ($target + 0.04);
 	}
 
 	public static function today_stats(string $category): array {
@@ -211,6 +215,10 @@ final class EPV2_Category_Planner {
 		if ($category === '') {
 			return ['total_24h' => 0, 'category_24h' => 0, 'category_6h' => 0];
 		}
+		static $cache = [];
+		if (array_key_exists($category, $cache)) {
+			return $cache[$category];
+		}
 
 		$states = self::ACTIVE_MIX_STATES;
 		$placeholders = implode(',', array_fill(0, count($states), '%s'));
@@ -242,11 +250,12 @@ final class EPV2_Category_Planner {
 			}
 		}
 
-		return [
+		$cache[$category] = [
 			'total_24h' => $total24,
 			'category_24h' => $category24,
 			'category_6h' => $category6,
 		];
+		return $cache[$category];
 	}
 
 	private static function row_categories_from_array(array $row): array {
@@ -261,10 +270,27 @@ final class EPV2_Category_Planner {
 
 	private static function canonical_category(string $category): string {
 		$category = sanitize_text_field($category);
-		if ($category === 'münchen') {
-			return 'muenchen';
+		if (class_exists('EPV2_Taxonomy_Map') && method_exists('EPV2_Taxonomy_Map', 'normalize_slug')) {
+			return EPV2_Taxonomy_Map::normalize_slug($category);
 		}
-		return $category;
+
+		return match (sanitize_title($category)) {
+			'world' => 'welt',
+			'münchen', 'munchen', 'munich' => 'muenchen',
+			default => sanitize_title($category),
+		};
+	}
+
+	private static function canonicalize_plan_keys(array $plans): array {
+		$normalized = [];
+		foreach ($plans as $category => $plan) {
+			$canonical = self::canonical_category((string) $category);
+			if ($canonical === '' || ! is_array($plan)) {
+				continue;
+			}
+			$normalized[$canonical] = $plan;
+		}
+		return $normalized;
 	}
 
 	private static function is_priority_override(array $analysis): bool {

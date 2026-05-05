@@ -5,6 +5,11 @@ if (! defined('ABSPATH')) {
 }
 
 final class EPV2_Admin {
+	private const QUEUE_PAGE_FETCH_LIMIT = 80;
+	private const QUEUE_SNAPSHOT_CACHE_TTL = 2;
+	private const QUEUE_SNAPSHOT_REFRESH_MS = 5000;
+	private const QUEUE_SNAPSHOT_REQUEST_COOLDOWN = 2;
+
 	private static function require_manage_capability(): void {
 		if (! current_user_can('manage_europulse_autopilot')) {
 			wp_die('Недостаточно прав.');
@@ -65,7 +70,7 @@ final class EPV2_Admin {
 	public static function menus(): void {
 		$menu_cap = 'manage_options';
 		$page_cap = 'manage_europulse_autopilot';
-		add_menu_page('EuroPulse AutoPilot v2.1 Sandbox', 'AutoPilot v2.1', $menu_cap, 'epv2-dashboard', [self::class, 'dashboard'], 'dashicons-rss', 58);
+		add_menu_page('EuroPulse AutoPilot v21', 'AutoPilot v21', $menu_cap, 'epv2-dashboard', [self::class, 'dashboard'], 'dashicons-rss', 58);
 		add_submenu_page('epv2-dashboard', 'Обзор', 'Обзор', $page_cap, 'epv2-dashboard', [self::class, 'dashboard']);
 		add_submenu_page('epv2-dashboard', 'Источники', 'Источники', $page_cap, 'epv2-sources', [self::class, 'sources']);
 		add_submenu_page('epv2-dashboard', 'Очередь', 'Очередь', $page_cap, 'epv2-queue', [self::class, 'queue']);
@@ -91,6 +96,7 @@ final class EPV2_Admin {
 		$last_payload = $last_collect && ! empty($last_collect->payload) ? json_decode((string) $last_collect->payload, true) : [];
 		$issues = self::latest_human_issues();
 		echo '<div class="wrap"><h1>EuroPulse AutoPilot</h1>';
+		self::render_automation_safeguard_notice();
 		echo '<p>Текущий контракт сайта загружен для языков: <strong>' . esc_html(implode(', ', EPV2_Site_Profile::get_languages())) . '</strong></p>';
 		echo '<div style="margin:16px 0;padding:14px 16px;background:#fff;border:1px solid #dcdcde;border-radius:8px;max-width:980px">';
 		echo '<h2 style="margin:0 0 8px">Автоматический режим</h2>';
@@ -268,24 +274,13 @@ final class EPV2_Admin {
 		$order = strtolower((string) ($_GET['order'] ?? 'desc')) === 'asc' ? 'asc' : 'desc';
 		$state_filter = sanitize_key((string) ($_GET['state_filter'] ?? ''));
 		$category_filter = sanitize_title((string) ($_GET['category_filter'] ?? ''));
-			$items = EPV2_Queue::get_queue_items_summary([
-				'limit' => 200,
-				'state' => $state_filter !== '' ? $state_filter : null,
-			]);
-		if ($category_filter !== '') {
-			$items = array_values(array_filter($items, static function ($item) use ($category_filter) {
-				$categories = self::normalize_selected_categories((string) ($item->category_final ?: $item->category_proposed));
-				return in_array($category_filter, $categories, true);
-			}));
-		}
-		$items = self::sort_queue_items($items, $orderby, $order);
 		$category_options = EPV2_Taxonomy_Map::categories();
 		$automation_paused = EPV2_Jobs::automation_paused();
 		$collect_paused = EPV2_Jobs::collect_paused();
 		$progress = get_option('epv2_collect_progress', []);
 		$next_collect = EPV2_Jobs::next_collect_timestamp();
-		$next_publish = null;
-			echo '<div class="wrap"><h1>Очередь</h1>';
+		echo '<div class="wrap"><h1>Очередь</h1>';
+		self::render_automation_safeguard_notice();
 		$queue_notice = sanitize_key((string) ($_GET['queue_notice'] ?? ''));
 		if ($queue_notice !== '') {
 			$queue_transient = get_transient('epv2_queue_notice_' . get_current_user_id());
@@ -348,14 +343,6 @@ final class EPV2_Admin {
 		echo '<div><label for="epv2-order"><strong>Порядок</strong></label><br><select id="epv2-order" name="order"><option value="desc"' . selected($order, 'desc', false) . '>По убыванию</option><option value="asc"' . selected($order, 'asc', false) . '>По возрастанию</option></select></div>';
 		echo '<div><button class="button button-secondary" type="submit">Применить</button></div>';
 		echo '</form>';
-		$active_item_id = self::active_queue_item_id();
-		$active_work_items = array_values(array_filter($items, static fn($item) => self::is_active_work_item($item, $active_item_id)));
-		$ready_publish_items = array_values(array_filter($items, static fn($item) => self::is_ready_publish_item($item, $active_item_id)));
-		$new_queue_items = array_values(array_filter($items, static fn($item) => self::is_new_queue_item($item, $active_item_id)));
-		$rejected_items = array_values(array_filter($items, static fn($item) => (string) $item->state === 'rejected'));
-		$published_items = array_values(array_filter($items, static fn($item) => (string) $item->state === 'published'));
-		$published_recent_items = array_slice($published_items, 0, 12);
-		$published_archive_items = array_slice($published_items, 12);
 		echo '<form id="epv2-bulk-delete-form" method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="display:inline-block;margin-right:8px">';
 		wp_nonce_field('epv2_delete_queue_items');
 		echo '<input type="hidden" name="action" value="epv2_delete_queue_items">';
@@ -364,26 +351,96 @@ final class EPV2_Admin {
 		echo '</form>';
 		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_clear_queue'), 'epv2_clear_queue')) . '" onclick="return confirm(\'Очистить всю очередь?\')">Очистить очередь</a>';
 		echo '<div id="epv2-queue-blocks">';
-		$next_publish = $ready_publish_items !== [] ? EPV2_Queue::next_ready_publish_timestamp(false) : null;
-		$deferred_publish_summary = $ready_publish_items !== [] ? EPV2_Queue::ready_publish_deferred_by_daily_limit_summary() : ['count' => 0, 'next_timestamp' => null];
-		echo self::queue_blocks_html($active_work_items, $new_queue_items, $ready_publish_items, $rejected_items, $published_recent_items, $published_archive_items, $orderby, $order, $state_filter, $category_filter, $automation_paused, $next_publish, $deferred_publish_summary);
+		echo self::queue_lightweight_blocks_html();
 		echo '</div>';
 		echo '</div>';
 	}
 
 	public static function queue_snapshot(): void {
+		if (! check_ajax_referer('epv2_queue_snapshot', '_wpnonce', false)) {
+			wp_send_json_error(['message' => 'invalid_nonce'], 403);
+		}
 		if (! current_user_can('manage_europulse_autopilot')) {
 			wp_send_json_error(['message' => 'forbidden'], 403);
 		}
-		$progress = get_option('epv2_collect_progress', []);
 		$orderby = sanitize_key((string) ($_GET['orderby'] ?? 'created_at'));
 		$order = strtolower((string) ($_GET['order'] ?? 'desc')) === 'asc' ? 'asc' : 'desc';
 		$state_filter = sanitize_key((string) ($_GET['state_filter'] ?? ''));
 		$category_filter = sanitize_title((string) ($_GET['category_filter'] ?? ''));
+		$cache_key = 'epv2_queue_snapshot_' . get_current_user_id() . '_' . md5(wp_json_encode([$orderby, $order, $state_filter, $category_filter]));
+		$guard_key = 'epv2_queue_snapshot_guard_' . get_current_user_id();
+		$cached = get_transient($cache_key);
+		if (is_array($cached)) {
+			wp_send_json_success($cached);
+		}
+		$last_request_at = (int) get_transient($guard_key);
+		if ($last_request_at > 0 && ($last_request_at + self::QUEUE_SNAPSHOT_REQUEST_COOLDOWN) > time()) {
+			wp_send_json_success(self::queue_lightweight_snapshot_payload());
+		}
+		set_transient($guard_key, time(), self::QUEUE_SNAPSHOT_REQUEST_COOLDOWN);
+		$snapshot = self::queue_snapshot_payload($orderby, $order, $state_filter, $category_filter);
+		set_transient($cache_key, $snapshot, self::QUEUE_SNAPSHOT_CACHE_TTL);
+		wp_send_json_success($snapshot);
+	}
+
+	private static function render_automation_safeguard_notice(): void {
+		$safeguard = EPV2_Jobs::automation_safeguard_state();
+		if (empty($safeguard['active'])) {
+			return;
+		}
+		$detected_at = (int) ($safeguard['detected_at'] ?? 0);
+		$detected_label = $detected_at > 0 ? wp_date('Y-m-d H:i:s', $detected_at) : 'только что';
+		$reason = trim((string) ($safeguard['reason'] ?? ''));
+		$item_id = (int) ($safeguard['item_id'] ?? 0);
+		echo '<div class="notice notice-error"><p><strong>Защита остановила автоматизацию.</strong> ';
+		echo esc_html($reason !== '' ? $reason : 'Обработка была аварийно прервана.');
+		if ($item_id > 0) {
+			echo ' ' . esc_html('Проблемный материал: #' . $item_id . '.');
+		}
+		echo ' ' . esc_html('Время фиксации: ' . $detected_label . '.');
+		echo '</p></div>';
+	}
+
+	private static function queue_lightweight_snapshot_payload(): array {
+		$progress = get_option('epv2_collect_progress', []);
+		$collect_paused = EPV2_Jobs::collect_paused();
+		$automation_paused = EPV2_Jobs::automation_paused();
+		$active_id = self::active_queue_item_id();
+		$active_items = $active_id > 0 ? self::queue_light_rows_by_ids([$active_id]) : [];
+		$new_items = self::queue_light_rows_by_states(['new', 'retry_process', 'ready_review', 'reserve', 'processing_de'], 30, [$active_id]);
+		$publish_items = self::queue_light_rows_by_states(['ready_publish', 'retry_publish', 'publishing'], 30);
+		$rejected_items = self::queue_light_rows_by_states(['rejected', 'error', 'duplicate'], 30);
+		$published_items = self::queue_light_rows_by_states(['published'], 30);
+		$next_publish = self::queue_next_publish_timestamp($publish_items);
+		$sections = self::queue_lightweight_sections_payload(
+			$active_items,
+			$new_items,
+			$publish_items,
+			$rejected_items,
+			$published_items,
+			$automation_paused,
+			$next_publish
+		);
+		return [
+			'html' => implode('', $sections),
+			'sections' => $sections,
+			'next_collect' => $collect_paused ? 0 : (int) (EPV2_Jobs::next_collect_timestamp() ?: 0),
+			'next_publish' => (int) ($next_publish ?: 0),
+			'collect_running' => is_array($progress) && (($progress['status'] ?? '') === 'running'),
+			'throttled' => true,
+		];
+	}
+
+	private static function queue_snapshot_payload(string $orderby, string $order, string $state_filter, string $category_filter): array {
+		$progress = get_option('epv2_collect_progress', []);
 		$items = EPV2_Queue::get_queue_items_summary([
-			'limit' => 200,
-			'state' => $state_filter !== '' ? $state_filter : null,
+			'limit' => self::queue_page_fetch_limit($state_filter),
 		]);
+		if ($state_filter !== '') {
+			$items = array_values(array_filter($items, static function ($item) use ($state_filter) {
+				return self::queue_matches_state_filter($item, $state_filter);
+			}));
+		}
 		if ($category_filter !== '') {
 			$items = array_values(array_filter($items, static function ($item) use ($category_filter) {
 				$categories = self::normalize_selected_categories((string) ($item->category_final ?: $item->category_proposed));
@@ -395,7 +452,7 @@ final class EPV2_Admin {
 		$active_work_items = array_values(array_filter($items, static fn($item) => self::is_active_work_item($item, $active_item_id)));
 		$ready_publish_items = array_values(array_filter($items, static fn($item) => self::is_ready_publish_item($item, $active_item_id)));
 		$new_queue_items = array_values(array_filter($items, static fn($item) => self::is_new_queue_item($item, $active_item_id)));
-		$rejected_items = array_values(array_filter($items, static fn($item) => (string) $item->state === 'rejected'));
+		$rejected_items = array_values(array_filter($items, static fn($item) => in_array(EPV2_Queue::user_facing_state_for_row($item), ['rejected', 'error', 'duplicate'], true)));
 		$published_items = array_values(array_filter($items, static fn($item) => (string) $item->state === 'published'));
 		$published_recent_items = array_slice($published_items, 0, 12);
 		$published_archive_items = array_slice($published_items, 12);
@@ -404,22 +461,39 @@ final class EPV2_Admin {
 		$next_collect = $collect_paused ? null : EPV2_Jobs::next_collect_timestamp();
 		$next_publish = $ready_publish_items !== [] ? EPV2_Queue::next_ready_publish_timestamp(false) : null;
 		$deferred_publish_summary = $ready_publish_items !== [] ? EPV2_Queue::ready_publish_deferred_by_daily_limit_summary() : ['count' => 0, 'next_timestamp' => null];
-		wp_send_json_success([
-			'html' => self::queue_blocks_html($active_work_items, $new_queue_items, $ready_publish_items, $rejected_items, $published_recent_items, $published_archive_items, $orderby, $order, $state_filter, $category_filter, $automation_paused, $next_publish, $deferred_publish_summary),
+
+		$sections = self::queue_lightweight_sections_payload(
+			$active_work_items,
+			$new_queue_items,
+			$ready_publish_items,
+			$rejected_items,
+			$published_recent_items,
+			$automation_paused,
+			self::queue_next_publish_timestamp($ready_publish_items)
+		);
+
+		return [
+			'html' => implode('', $sections),
+			'sections' => $sections,
 			'next_collect' => $next_collect ? (int) $next_collect : 0,
 			'next_publish' => $next_publish ? (int) $next_publish : 0,
 			'collect_running' => is_array($progress) && (($progress['status'] ?? '') === 'running'),
-		]);
+		];
+	}
+
+	private static function queue_full_blocks_html(string $orderby, string $order, string $state_filter, string $category_filter): string {
+		$snapshot = self::queue_snapshot_payload($orderby, $order, $state_filter, $category_filter);
+		return (string) ($snapshot['html'] ?? '');
 	}
 
 	private static function queue_blocks_html(array $active_work_items, array $new_queue_items, array $ready_publish_items, array $rejected_items, array $published_recent_items, array $published_archive_items, string $orderby, string $order, string $state_filter, string $category_filter, bool $automation_paused, ?int $next_publish, array $deferred_publish_summary = []): string {
 		ob_start();
-		echo '<h2 style="margin-top:18px">В работе</h2>';
-		self::render_queue_block_actions($active_work_items, 'active');
-		self::render_queue_table($active_work_items, $orderby, $order, $state_filter, $category_filter, 'epv2-queue-table-wrap epv2-queue-table-wrap--live', 'active');
-		echo '<h2 style="margin-top:24px">Новые</h2>';
+		echo '<h2 style="margin-top:18px">Новые</h2>';
 		self::render_queue_block_actions($new_queue_items, 'new');
 		self::render_queue_table($new_queue_items, $orderby, $order, $state_filter, $category_filter, 'epv2-queue-table-wrap epv2-queue-table-wrap--new', 'new');
+		echo '<h2 style="margin-top:24px">В работе</h2>';
+		self::render_queue_block_actions($active_work_items, 'active');
+		self::render_queue_table($active_work_items, $orderby, $order, $state_filter, $category_filter, 'epv2-queue-table-wrap epv2-queue-table-wrap--live', 'active');
 		$deferred_count = max(0, (int) ($deferred_publish_summary['count'] ?? 0));
 		$deferred_next_timestamp = (int) ($deferred_publish_summary['next_timestamp'] ?? 0);
 		$next_publish = $next_publish ?: self::fallback_next_publish_from_items($ready_publish_items, false);
@@ -477,6 +551,565 @@ final class EPV2_Admin {
 		echo '</div>';
 	}
 
+	private static function queue_lightweight_blocks_html(): string {
+		$active_id = self::active_queue_item_id();
+		$active_items = $active_id > 0 ? self::queue_light_rows_by_ids([$active_id]) : [];
+		$new_items = self::queue_light_rows_by_states(['new', 'retry_process', 'ready_review', 'reserve', 'processing_de'], 30, [$active_id]);
+		$publish_items = self::queue_light_rows_by_states(['ready_publish', 'retry_publish', 'publishing'], 30);
+		$rejected_items = self::queue_light_rows_by_states(['rejected', 'error', 'duplicate'], 30);
+		$published_items = self::queue_light_rows_by_states(['published'], 30);
+		$automation_paused = EPV2_Jobs::automation_paused();
+		$next_publish = self::queue_next_publish_timestamp($publish_items);
+
+		ob_start();
+		self::render_light_queue_section('Новые', $new_items, 'new');
+		self::render_light_queue_section('В работе', $active_items, 'active');
+		self::render_light_queue_section('Готово к публикации', $publish_items, 'publish', [
+			'automation_paused' => $automation_paused,
+			'next_publish' => $next_publish,
+		]);
+		self::render_light_queue_section('Отклонённые', $rejected_items, 'rejected');
+		self::render_light_queue_section('Опубликованные материалы', $published_items, 'published');
+		return (string) ob_get_clean();
+	}
+
+	private static function queue_lightweight_sections_payload(array $active_items, array $new_items, array $publish_items, array $rejected_items, array $published_items, bool $automation_paused, int $next_publish): array {
+		$sections = [];
+
+		ob_start();
+		self::render_light_queue_section('Новые', $new_items, 'new');
+		$sections['new'] = (string) ob_get_clean();
+
+		ob_start();
+		self::render_light_queue_section('В работе', $active_items, 'active');
+		$sections['active'] = (string) ob_get_clean();
+
+		ob_start();
+		self::render_light_queue_section('Готово к публикации', $publish_items, 'publish', [
+			'automation_paused' => $automation_paused,
+			'next_publish' => $next_publish,
+		]);
+		$sections['publish'] = (string) ob_get_clean();
+
+		ob_start();
+		self::render_light_queue_section('Отклонённые', $rejected_items, 'rejected');
+		$sections['rejected'] = (string) ob_get_clean();
+
+		ob_start();
+		self::render_light_queue_section('Опубликованные материалы', $published_items, 'published');
+		$sections['published'] = (string) ob_get_clean();
+
+		return $sections;
+	}
+
+	private static function render_light_queue_section(string $title, array $items, string $table_type, array $context = []): void {
+		echo '<section id="epv2-queue-section-' . esc_attr($table_type) . '" data-queue-section="' . esc_attr($table_type) . '">';
+		echo '<h2 style="margin-top:24px">';
+		echo esc_html($title);
+		if ($table_type === 'publish') {
+			$automation_paused = ! empty($context['automation_paused']);
+			$next_publish = (int) ($context['next_publish'] ?? 0);
+			if ($next_publish > 0) {
+				$publish_remaining = max(0, $next_publish - time());
+				$publish_minutes = (int) floor($publish_remaining / MINUTE_IN_SECONDS);
+				$publish_seconds = (int) ($publish_remaining % MINUTE_IN_SECONDS);
+				echo ' <span style="font-size:13px;font-weight:400;color:#50575e">до следующего слота: <strong id="epv2-next-publish-countdown" data-target="' . esc_attr((string) ($next_publish * 1000)) . '" data-interval="' . esc_attr((string) (max(5, (int) EPV2_Settings::get('publish_interval_minutes', 5)) * MINUTE_IN_SECONDS * 1000)) . '">' . esc_html(sprintf('%02d:%02d', $publish_minutes, $publish_seconds)) . '</strong></span>';
+				if ($automation_paused) {
+					echo ' <span style="font-size:12px;font-weight:400;color:#8a6d3b">(автопилот на паузе)</span>';
+				}
+			}
+		}
+		echo '</h2>';
+		self::render_queue_block_actions($items, $table_type);
+		self::render_light_queue_table($items, $table_type);
+		echo '</section>';
+	}
+
+	private static function render_light_queue_table(array $items, string $table_type): void {
+		$orderby = sanitize_key((string) ($_GET['orderby'] ?? 'updated_at'));
+		$order = strtolower((string) ($_GET['order'] ?? 'desc')) === 'asc' ? 'asc' : 'desc';
+		$state_filter = sanitize_key((string) ($_GET['state_filter'] ?? ''));
+		$category_filter = sanitize_title((string) ($_GET['category_filter'] ?? ''));
+		$time_sort = $table_type === 'published' ? 'published_at' : ($table_type === 'publish' ? 'ready_publish_at' : 'updated_at');
+		echo '<div class="epv2-queue-table-wrap" style="max-height:420px;overflow:auto;border:1px solid #dcdcde;border-radius:8px;background:#fff">';
+		echo '<table class="widefat striped"><thead><tr>';
+		echo '<th><input type="checkbox" onclick="document.querySelectorAll(\'.epv2-queue-check[data-block=&quot;' . esc_attr($table_type) . '&quot;]\').forEach(cb => cb.checked = this.checked)"></th>';
+		echo '<th>' . self::queue_sort_link('id', 'ID', $orderby, $order, $state_filter, $category_filter) . '</th>';
+		echo '<th>' . self::queue_sort_link('state', 'Статус', $orderby, $order, $state_filter, $category_filter) . '</th>';
+		echo '<th>' . self::queue_sort_link('priority', 'Приоритет', $orderby, $order, $state_filter, $category_filter) . '</th>';
+		echo '<th>' . self::queue_sort_link('quality', 'Качество', $orderby, $order, $state_filter, $category_filter) . '</th>';
+		echo '<th>' . self::queue_sort_link('seo', 'SEO', $orderby, $order, $state_filter, $category_filter) . '</th>';
+		echo '<th>Готовность</th><th>Медиа</th><th>Что не ок</th><th>Заголовок</th>';
+		echo '<th>' . self::queue_sort_link('category', 'Категории', $orderby, $order, $state_filter, $category_filter) . '</th>';
+		echo '<th>URL</th><th>' . self::queue_sort_link('created_at', 'Создано', $orderby, $order, $state_filter, $category_filter) . '</th>';
+		echo '<th>' . self::queue_sort_link($time_sort, $table_type === 'publish' ? 'Готово с' : ($table_type === 'published' ? 'Опубликовано' : 'Обновлено'), $orderby, $order, $state_filter, $category_filter) . '</th><th>Действия</th>';
+		echo '</tr></thead><tbody>';
+		if ($items === []) {
+			echo '<tr><td colspan="15" style="color:#646970">Нет материалов.</td></tr>';
+		}
+		foreach ($items as $item) {
+			$categories = self::normalize_selected_categories((string) ($item->category_final ?: $item->category_proposed));
+			$category_label = $categories !== [] ? implode(', ', array_map([self::class, 'category_label'], $categories)) : '—';
+			echo '<tr>';
+			echo '<td><input class="epv2-queue-check" data-block="' . esc_attr($table_type) . '" type="checkbox" name="ids[]" value="' . (int) $item->id . '"></td>';
+			echo '<td>' . (int) $item->id . '</td>';
+			echo '<td>' . esc_html(self::queue_light_state_label($item)) . '</td>';
+			echo '<td>' . self::queue_light_priority_badge($item) . '</td>';
+			echo '<td>' . self::queue_light_metric_badge(self::queue_light_quality_score($item), 'quality') . '</td>';
+			echo '<td>' . self::queue_light_metric_badge(self::queue_light_seo_score($item), 'seo') . '</td>';
+			echo '<td>' . self::queue_light_release_badge(self::queue_light_release_score($item), self::queue_light_google_score($item)) . '</td>';
+			echo '<td>' . self::queue_light_media_summary($item) . '</td>';
+			echo '<td>' . self::queue_light_issue_summary(self::queue_light_issue_list($item)) . '</td>';
+			echo '<td>' . esc_html(wp_trim_words((string) ($item->original_title ?? ''), 12, '')) . '</td>';
+			echo '<td>' . esc_html($category_label) . '</td>';
+			echo '<td>' . ((string) ($item->original_url ?? '') !== '' ? '<a href="' . esc_url((string) $item->original_url) . '" target="_blank" rel="noopener">Открыть</a>' : '<span style="color:#8c8f94">—</span>') . '</td>';
+			echo '<td>' . esc_html(self::queue_site_datetime((string) ($item->created_at ?? ''))) . '</td>';
+			echo '<td>' . esc_html($table_type === 'publish' ? self::queue_ready_publish_at($item) : self::queue_site_datetime((string) ($item->updated_at ?? ''))) . '</td>';
+			echo '<td>';
+			echo '<a class="button button-small" href="' . esc_url(admin_url('admin.php?page=epv2-review&item=' . (int) $item->id)) . '">Проверить</a> ';
+			if ((string) ($item->state ?? '') === 'ready_review') {
+				echo '<a class="button button-small" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_queue_to_publish&id=' . (int) $item->id), 'epv2_queue_to_publish_' . (int) $item->id)) . '">Готово к публикации</a> ';
+			}
+			if (in_array((string) ($item->state ?? ''), ['ready_publish', 'retry_publish', 'ready_review'], true)) {
+				echo '<a class="button button-small" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_publish_now&id=' . (int) $item->id), 'epv2_publish_now_' . (int) $item->id)) . '">Опубликовать</a> ';
+			}
+			if ((string) ($item->state ?? '') === 'published') {
+				$edit_url = self::queue_post_edit_url($item);
+				if ($edit_url !== '') {
+					echo '<a class="button button-small" href="' . esc_url($edit_url) . '">Редактировать пост</a> ';
+				}
+			}
+			echo '<a class="button button-small" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_delete_queue_item&id=' . (int) $item->id), 'epv2_delete_queue_item_' . (int) $item->id)) . '" onclick="return confirm(\'Удалить этот материал?\')">Удалить</a>';
+			echo '<div style="margin-top:6px;color:#646970;font-size:12px">' . esc_html(self::queue_action_hint(EPV2_Queue::user_facing_state_for_row($item), $item)) . '</div>';
+			echo '</td>';
+			echo '</tr>';
+		}
+		echo '</tbody></table></div>';
+	}
+
+	private static function queue_light_rows_by_ids(array $ids): array {
+		$ids = array_values(array_filter(array_map('intval', $ids), static fn($id) => $id > 0));
+		if ($ids === []) {
+			return [];
+		}
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$placeholders = implode(',', array_fill(0, count($ids), '%d'));
+		return $wpdb->get_results($wpdb->prepare(
+			"SELECT id, state, original_title, category_proposed, category_final, original_url, source_image_url, created_at, updated_at, admin_notes, error_message, publish_payload, post_id,
+				CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$.selection.score')) AS UNSIGNED) AS _epv2_selection_score,
+				JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$.selection.tier')) AS _epv2_selection_tier,
+				CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.quality.score')) AS UNSIGNED) AS _epv2_quality_score,
+				CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.seo_quality.score')) AS UNSIGNED) AS _epv2_seo_score,
+				CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.release_quality.score')) AS UNSIGNED) AS _epv2_release_score,
+				CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.google_quality.score')) AS UNSIGNED) AS _epv2_google_score,
+				JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$.featured_media_url')) AS _epv2_featured_media_url,
+				JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$.media_url')) AS _epv2_media_url,
+				JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$.languages.de.media_url')) AS _epv2_de_media_url
+			FROM {$table}
+			WHERE id IN ({$placeholders})
+			ORDER BY updated_at DESC, id DESC",
+			...$ids
+		));
+	}
+
+	private static function queue_light_rows_by_states(array $states, int $limit = 30, array $exclude_ids = []): array {
+		$states = array_values(array_filter(array_map('sanitize_text_field', $states)));
+		if ($states === []) {
+			return [];
+		}
+		$limit = max(1, min(100, $limit));
+		$exclude_ids = array_values(array_filter(array_map('intval', $exclude_ids), static fn($id) => $id > 0));
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$state_placeholders = implode(',', array_fill(0, count($states), '%s'));
+		$sql = "SELECT id, state, original_title, category_proposed, category_final, original_url, source_image_url, created_at, updated_at, admin_notes, error_message, publish_payload, post_id,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$.selection.score')) AS UNSIGNED) AS _epv2_selection_score,
+			JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$.selection.tier')) AS _epv2_selection_tier,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.quality.score')) AS UNSIGNED) AS _epv2_quality_score,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.seo_quality.score')) AS UNSIGNED) AS _epv2_seo_score,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.release_quality.score')) AS UNSIGNED) AS _epv2_release_score,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.google_quality.score')) AS UNSIGNED) AS _epv2_google_score,
+			JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$.featured_media_url')) AS _epv2_featured_media_url,
+			JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$.media_url')) AS _epv2_media_url,
+			JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$.languages.de.media_url')) AS _epv2_de_media_url
+			FROM {$table}
+			WHERE state IN ({$state_placeholders})";
+		$args = $states;
+		if ($exclude_ids !== []) {
+			$id_placeholders = implode(',', array_fill(0, count($exclude_ids), '%d'));
+			$sql .= " AND id NOT IN ({$id_placeholders})";
+			$args = array_merge($args, $exclude_ids);
+		}
+		$sql .= ' ORDER BY ' . self::queue_light_sql_order_clause() . ' LIMIT %d';
+		$args[] = $limit;
+		return $wpdb->get_results($wpdb->prepare($sql, ...$args));
+	}
+
+	private static function queue_light_sql_order_clause(): string {
+		$orderby = sanitize_key((string) ($_GET['orderby'] ?? 'updated_at'));
+		$order = strtolower((string) ($_GET['order'] ?? 'desc')) === 'asc' ? 'ASC' : 'DESC';
+		$column = match ($orderby) {
+			'id' => 'id',
+			'state' => 'state',
+			'priority' => "_epv2_selection_score",
+			'quality' => "_epv2_quality_score",
+			'seo' => "_epv2_seo_score",
+			'category' => 'category_final',
+			'created_at' => 'created_at',
+			'published_at', 'ready_publish_at', 'updated_at' => 'updated_at',
+			default => 'updated_at',
+		};
+		return $column . ' ' . $order . ', id ' . $order;
+	}
+
+	private static function queue_light_state_label(object $item): string {
+		$item_id = (int) ($item->id ?? 0);
+		$active_id = self::active_queue_item_id();
+			$notes = self::queue_item_notes($item);
+			$system = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$state = sanitize_key((string) ($item->state ?? ''));
+			$user_state = EPV2_Queue::user_facing_state_for_row($item);
+			if (in_array($user_state, ['ready_publish', 'retry_publish'], true)) {
+				$deferred_label = self::queue_deferred_publish_label($item, $system);
+				if ($deferred_label !== '') {
+					return $deferred_label;
+				}
+				$retry_after = trim((string) ($system['retry_after'] ?? ''));
+				if ($retry_after !== '') {
+					$retry_ts = strtotime($retry_after);
+					if ($retry_ts) {
+						return 'Готов к публикации до ' . wp_date('H:i', $retry_ts);
+					}
+				}
+				return 'Готов к публикации';
+			}
+			if ($item_id > 0 && $item_id === $active_id) {
+				if (self::queue_light_item_is_stalled($item, $system)) {
+					return 'Остановлено защитой · 0% · обработка прервана';
+				}
+			return sprintf(
+				'В работе · %d%% · %s',
+				self::queue_light_progress_percent($item, $system),
+					self::queue_light_progress_stage_label($item, $system)
+				);
+			}
+			if ($state === 'publishing') {
+				return 'Публикуется';
+			}
+			if ($state === 'new') {
+				$retry_after = trim((string) ($system['retry_after'] ?? ''));
+				$retry_ts = $retry_after !== '' ? strtotime($retry_after) : false;
+				if ($retry_ts && $retry_ts > time()) {
+					return 'Пауза доводки до ' . wp_date('H:i', $retry_ts);
+				}
+			}
+		return match ($state) {
+			'processing_de', 'new', 'retry_process', 'ready_review', 'reserve' => 'Новый',
+			'published' => 'Опубликован',
+			'rejected' => 'Отклонён',
+			'duplicate' => 'Дубликат',
+			'error' => 'Ошибка',
+			default => $state !== '' ? $state : '—',
+		};
+	}
+
+	private static function queue_item_notes(object $item): array {
+		$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+		return is_array($notes) ? $notes : [];
+	}
+
+	private static function queue_light_priority_badge(object $item): string {
+		$score = (int) ($item->_epv2_selection_score ?? 0);
+		$tier = trim((string) ($item->_epv2_selection_tier ?? ''));
+		if ($score <= 0 && $tier === '') {
+			$analysis = self::queue_analysis($item);
+			$score = (int) ($analysis['score'] ?? ($item->story_score ?? 0));
+			$tier = trim((string) ($analysis['tier'] ?? ''));
+		}
+		if ($score <= 0 && $tier === '') {
+			return '<span style="color:#8c8f94">—</span>';
+		}
+		$bg = match ($tier) {
+			'A' => '#fee2e2',
+			'B' => '#fef3c7',
+			'C' => '#e0f2fe',
+			default => '#f3f4f6',
+		};
+		$color = match ($tier) {
+			'A' => '#991b1b',
+			'B' => '#92400e',
+			'C' => '#075985',
+			default => '#6b7280',
+		};
+		return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:' . esc_attr($bg) . ';color:' . esc_attr($color) . ';font-size:11px;font-weight:700">' . esc_html(($tier !== '' ? $tier : '—') . ' / ' . $score) . '</span>';
+	}
+
+	private static function queue_light_quality_score(object $item): int {
+		return self::queue_light_payload_score($item, '_epv2_quality_score', 'quality');
+	}
+
+	private static function queue_light_seo_score(object $item): int {
+		return self::queue_light_payload_score($item, '_epv2_seo_score', 'seo_quality');
+	}
+
+	private static function queue_light_release_score(object $item): int {
+		return self::queue_light_payload_score($item, '_epv2_release_score', 'release_quality');
+	}
+
+	private static function queue_light_google_score(object $item): int {
+		return self::queue_light_payload_score($item, '_epv2_google_score', 'google_quality');
+	}
+
+	private static function queue_light_payload_score(object $item, string $property, string $meta_key): int {
+		if (isset($item->{$property}) && is_numeric($item->{$property})) {
+			return (int) $item->{$property};
+		}
+		$payload = self::queue_cached_payload($item);
+		return (int) ($payload['_meta'][$meta_key]['score'] ?? 0);
+	}
+
+	private static function queue_light_metric_badge(int $score, string $type): string {
+		if ($score <= 0) {
+			return '<span style="color:#8c8f94">—</span>';
+		}
+		if ($type === 'seo') {
+			$bg = $score >= 90 ? '#dbeafe' : ($score >= 78 ? '#e0f2fe' : '#fee2e2');
+			$color = $score >= 90 ? '#1d4ed8' : ($score >= 78 ? '#075985' : '#991b1b');
+		} else {
+			$bg = $score >= 90 ? '#dcfce7' : ($score >= 80 ? '#fef3c7' : '#fee2e2');
+			$color = $score >= 90 ? '#166534' : ($score >= 80 ? '#92400e' : '#991b1b');
+		}
+		return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:' . esc_attr($bg) . ';color:' . esc_attr($color) . ';font-size:11px;font-weight:700">' . esc_html((string) $score) . '</span>';
+	}
+
+	private static function queue_light_release_badge(int $release_score, int $google_score): string {
+		if ($release_score <= 0 && $google_score <= 0) {
+			return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#fee2e2;color:#991b1b;font-size:11px;font-weight:700">0 / 0</span>';
+		}
+		$bg = ($release_score >= 90 && $google_score >= 90) ? '#dcfce7' : (($release_score >= 80 && $google_score >= 80) ? '#fef3c7' : '#fee2e2');
+		$color = ($release_score >= 90 && $google_score >= 90) ? '#166534' : (($release_score >= 80 && $google_score >= 80) ? '#92400e' : '#991b1b');
+		return '<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:' . esc_attr($bg) . ';color:' . esc_attr($color) . ';font-size:11px;font-weight:700">' . esc_html($release_score . ' / ' . $google_score) . '</span>';
+	}
+
+	private static function queue_light_media_summary(object $item): string {
+		$info = self::queue_light_media_info($item);
+		$provider = (string) ($info['provider'] ?? '');
+		$url = (string) ($info['url'] ?? '');
+		$label = match ($provider) {
+			'pexels_risk' => 'Pexels риск',
+			'pexels' => 'Pexels',
+			'wikimedia' => 'Wikimedia',
+			'generated' => 'Generated',
+			'source' => 'Source',
+			default => $url !== '' ? 'External' : 'Нет',
+		};
+		$bg = match ($provider) {
+			'source' => '#dcfce7',
+			'wikimedia', 'generated' => '#e0f2fe',
+			'pexels_risk' => '#fee2e2',
+			'pexels' => '#fef3c7',
+			default => $url !== '' ? '#f3f4f6' : '#fee2e2',
+		};
+		$color = match ($provider) {
+			'source' => '#166534',
+			'wikimedia', 'generated' => '#075985',
+			'pexels_risk' => '#991b1b',
+			'pexels' => '#92400e',
+			default => $url !== '' ? '#374151' : '#991b1b',
+		};
+		$title = implode(' | ', array_filter([
+			(string) ($info['reason'] ?? ''),
+			$url,
+			(string) ($info['source_image_url'] ?? ''),
+		]));
+		return '<span title="' . esc_attr($title) . '" style="display:inline-block;padding:2px 8px;border-radius:999px;background:' . esc_attr($bg) . ';color:' . esc_attr($color) . ';font-size:11px;font-weight:700">' . esc_html($label) . '</span>';
+	}
+
+	private static function queue_light_media_info(object $item): array {
+		$url = esc_url_raw((string) (
+			$item->_epv2_featured_media_url
+			?? $item->_epv2_media_url
+			?? $item->_epv2_de_media_url
+			?? ''
+		));
+		$source_image_url = esc_url_raw((string) ($item->source_image_url ?? ''));
+		if ($url === '' && $source_image_url !== '') {
+			$url = $source_image_url;
+		}
+		if ($url === '') {
+			return [
+				'provider' => '',
+				'url' => '',
+				'source_image_url' => $source_image_url,
+				'reason' => 'featured media отсутствует',
+			];
+		}
+		$host = mb_strtolower((string) wp_parse_url($url, PHP_URL_HOST));
+		$provider = 'external';
+		$reason = $host !== '' ? $host : $url;
+		if (class_exists('EPV2_Media') && EPV2_Media::is_generated_story_cover_url($url)) {
+			$provider = 'generated';
+			$reason = 'сгенерированная обложка';
+		} elseif (str_contains($host, 'pexels.com')) {
+			$provider = self::queue_light_media_is_high_context($item) ? 'pexels_risk' : 'pexels';
+			$reason = $provider === 'pexels_risk' ? 'Pexels fallback для high-context темы' : 'Pexels fallback';
+		} elseif (str_contains($host, 'wikimedia.org')) {
+			$provider = 'wikimedia';
+			$reason = 'Wikimedia fallback';
+		} elseif ($source_image_url !== '' && self::queue_light_same_host($url, $source_image_url)) {
+			$provider = 'source';
+			$reason = 'source-first image';
+		}
+		return [
+			'provider' => $provider,
+			'url' => $url,
+			'source_image_url' => $source_image_url,
+			'reason' => $reason,
+		];
+	}
+
+	private static function queue_light_media_is_high_context(object $item): bool {
+		$category = sanitize_key((string) ($item->category_final ?: $item->category_proposed));
+		if (! in_array($category, ['politik', 'deutschland', 'welt', 'ukraine', 'europa', 'bayern', 'muenchen'], true)) {
+			return false;
+		}
+		$text = mb_strtolower(trim(wp_strip_all_tags((string) ($item->original_title ?? '') . ' ' . (string) ($item->original_excerpt ?? ''))));
+		return preg_match('/\b(merz|cdu|csu|spd|afd|fdp|rente|renten|bundesregierung|bundestag|kanzler|minister|regierung|wahl|migration|asyl|ukraine|israel|iran|gaza|krieg|war)\b/u', $text) === 1;
+	}
+
+	private static function queue_light_same_host(string $left, string $right): bool {
+		$left_host = preg_replace('/^www\./i', '', mb_strtolower((string) wp_parse_url($left, PHP_URL_HOST)));
+		$right_host = preg_replace('/^www\./i', '', mb_strtolower((string) wp_parse_url($right, PHP_URL_HOST)));
+		return $left_host !== '' && $left_host === $right_host;
+	}
+
+	private static function queue_light_issue_list(object $item): array {
+		$issues = [];
+		$error = trim((string) ($item->error_message ?? ''));
+		if ($error !== '') {
+			$issues[] = $error;
+		}
+		$quality_score = self::queue_light_quality_score($item);
+		$seo_score = self::queue_light_seo_score($item);
+		$release_score = self::queue_light_release_score($item);
+		$google_score = self::queue_light_google_score($item);
+		if ($quality_score > 0 && $quality_score < 90) {
+			$issues[] = 'редакционное качество ниже нормы';
+		}
+		if ($seo_score > 0 && $seo_score < 90) {
+			$issues[] = 'SEO требует доводки';
+		}
+		if ($release_score > 0 && $release_score < 90) {
+			$issues[] = 'готовность к выпуску не дотянута';
+		} elseif ($release_score <= 0 && ($quality_score > 0 || $seo_score > 0)) {
+			$issues[] = 'готовность к выпуску не подтверждена';
+		}
+		if ($google_score > 0 && $google_score < 90) {
+			$issues[] = 'Google preflight не пройден';
+		} elseif ($google_score <= 0 && ($quality_score > 0 || $seo_score > 0)) {
+			$issues[] = 'Google preflight не подтверждён';
+		}
+		$media_info = self::queue_light_media_info($item);
+		if (($media_info['provider'] ?? '') === 'pexels_risk') {
+			$issues[] = 'медиа: Pexels fallback для high-context темы';
+		} elseif (($media_info['url'] ?? '') === '' && ! in_array((string) ($item->state ?? ''), ['new', 'rejected', 'duplicate'], true)) {
+			$issues[] = 'медиа: нет featured image';
+		}
+		return array_values(array_unique($issues));
+	}
+
+	private static function queue_light_item_is_stalled(object $item, array $system): bool {
+		$item_id = (int) ($item->id ?? 0);
+		if ($item_id <= 0 || $item_id !== self::active_queue_item_id()) {
+			return false;
+		}
+		if (! EPV2_Jobs::automation_paused()) {
+			return false;
+		}
+		$state = sanitize_key((string) ($item->state ?? ''));
+		$step_status = sanitize_key((string) ($system['workflow_step_status'] ?? ''));
+		$workflow_step = sanitize_key((string) ($system['workflow_step'] ?? ''));
+		$heartbeat_at = strtotime((string) ($system['workflow_heartbeat_at'] ?? '')) ?: 0;
+		$claimed_at = strtotime((string) ($system['workflow_claimed_at'] ?? '')) ?: 0;
+		$updated_at = strtotime((string) ($item->updated_at ?? '')) ?: 0;
+		$fresh_until = max($heartbeat_at, $claimed_at, $updated_at);
+
+		if (in_array($step_status, ['claimed', 'started'], true) && $fresh_until > 0 && $fresh_until <= (time() - 300)) {
+			return true;
+		}
+
+		return $state === 'new' && in_array($workflow_step, ['publish_ready_gate', 'publish_finish', ''], true);
+	}
+
+	private static function queue_light_progress_percent(object $item, array $system): int {
+		if (self::queue_light_item_is_stalled($item, $system)) {
+			return 0;
+		}
+		$state = sanitize_key((string) ($item->state ?? ''));
+		if (in_array($state, ['publishing', 'published'], true)) {
+			return 100;
+		}
+		if (in_array($state, ['ready_publish', 'retry_publish'], true)) {
+			return 95;
+		}
+		$step = sanitize_key((string) ($system['workflow_step'] ?? ''));
+		$status = sanitize_key((string) ($system['workflow_step_status'] ?? ''));
+		$map = [
+			'claimed' => 10,
+			'build_de_master' => 25,
+			'translate_uk' => 50,
+			'translate_en' => 70,
+			'publish_ready_gate' => 90,
+			'initial_analysis' => 20,
+			'context_analysis' => 35,
+			'dossier' => 50,
+			'de_master' => 65,
+			'translations' => 80,
+			'publish_finish' => 90,
+			'ready_publish' => 95,
+		];
+		$percent = (int) ($map[$step] ?? ($state === 'new' ? 0 : 15));
+		if (in_array($status, ['done', 'finished', 'completed'], true)) {
+			$percent += 5;
+		}
+		return max(0, min(95, $percent));
+	}
+
+	private static function queue_light_progress_stage_label(object $item, array $system): string {
+		if (self::queue_light_item_is_stalled($item, $system)) {
+			return 'обработка прервана';
+		}
+		$state = sanitize_key((string) ($item->state ?? ''));
+		if ($state === 'publishing') {
+			return 'публикует на сайт';
+		}
+		if (in_array($state, ['ready_publish', 'retry_publish'], true)) {
+			$deferred_label = self::queue_deferred_publish_label($item, $system, false);
+			return $deferred_label !== '' ? mb_strtolower($deferred_label) : 'ждёт слот публикации';
+		}
+		$attempt_label = self::queue_finish_attempt_label($system);
+		$live_status = trim((string) ($system['live_status'] ?? ''));
+		if ($live_status !== '') {
+			return mb_strtolower($live_status . $attempt_label);
+		}
+		return match (sanitize_key((string) ($system['workflow_step'] ?? ''))) {
+			'claimed' => 'материал взят в работу',
+			'build_de_master' => 'собирает DE master',
+			'translate_uk' => 'готовит украинскую версию',
+			'translate_en' => 'готовит английскую версию',
+			'publish_ready_gate' => 'финальная publish-ready проверка' . $attempt_label,
+			'initial_analysis' => 'анализирует материал',
+			'context_analysis' => 'собирает фактуру',
+			'dossier' => 'готовит досье',
+			'de_master' => 'пишет DE master',
+			'translations' => 'готовит переводы',
+			'publish_finish' => 'собирает пакет публикации' . $attempt_label,
+			'ready_publish' => 'ждёт слот публикации',
+			default => 'обрабатывает материал',
+		};
+	}
+
 	private static function fallback_next_publish_from_items(array $items, bool $includeDeferredByDailyLimit = true): ?int {
 		$candidate = 0;
 		foreach ($items as $item) {
@@ -499,6 +1132,11 @@ final class EPV2_Admin {
 		return $candidate > 0 ? $candidate : null;
 	}
 
+	private static function queue_next_publish_timestamp(array $items): int {
+		$next_publish = (int) (self::fallback_next_publish_from_items($items, false) ?: 0);
+		return max(0, $next_publish);
+	}
+
 	private static function active_queue_item_id(): int {
 		return (int) get_option('epv2_active_automation_item', 0);
 	}
@@ -508,19 +1146,11 @@ final class EPV2_Admin {
 	}
 
 	private static function is_active_work_item(object $item, int $active_item_id): bool {
-		return (int) ($item->id ?? 0) === $active_item_id
-			&& self::is_recoverable_queue_item($item)
-			&& ! self::is_ready_publish_item($item, $active_item_id);
+		return EPV2_Queue::user_facing_state_for_row($item) === 'active';
 	}
 
 	private static function is_new_queue_item(object $item, int $active_item_id): bool {
-		if ((int) ($item->id ?? 0) === $active_item_id) {
-			return false;
-		}
-		if (! self::is_recoverable_queue_item($item)) {
-			return false;
-		}
-		return ! self::is_ready_publish_item($item, $active_item_id);
+		return EPV2_Queue::user_facing_state_for_row($item) === 'new';
 	}
 
 	private static function is_manual_confirmation_item(object $item, int $active_item_id): bool {
@@ -550,14 +1180,18 @@ final class EPV2_Admin {
 	}
 
 	private static function is_ready_publish_item(object $item, int $active_item_id): bool {
-		if ((int) ($item->id ?? 0) === $active_item_id) {
-			return false;
-		}
-		return in_array((string) ($item->state ?? ''), ['ready_publish', 'retry_publish', 'publishing'], true);
+		return in_array(EPV2_Queue::user_facing_state_for_row($item), ['ready_publish', 'publishing'], true);
 	}
 
 	private static function is_recoverable_queue_item(object $item): bool {
-		return in_array((string) ($item->state ?? ''), ['new', 'processing_de', 'retry_process', 'ready_review', 'ready_publish', 'retry_publish', 'publishing', 'reserve'], true);
+		return in_array(EPV2_Queue::user_facing_state_for_row($item), ['new', 'active', 'ready_publish', 'publishing'], true);
+	}
+
+	private static function queue_matches_state_filter(object $item, string $state_filter): bool {
+		if ($state_filter === '') {
+			return true;
+		}
+		return EPV2_Queue::user_facing_state_for_row($item) === $state_filter;
 	}
 
 	private static function render_queue_table(array $items, string $orderby, string $order, string $state_filter, string $category_filter, string $wrap_class = 'epv2-queue-table-wrap', string $table_type = 'default'): void {
@@ -615,7 +1249,7 @@ final class EPV2_Admin {
 			} else {
 				echo '<a class="button button-small" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_delete_queue_item&id=' . (int) $item->id), 'epv2_delete_queue_item_' . (int) $item->id)) . '" onclick="return confirm(\'Удалить этот материал?\')">Удалить</a> ';
 			}
-			echo '<div style="margin-top:6px;color:#646970;font-size:12px">' . esc_html(self::queue_action_hint((string) $item->state, $item)) . '</div>';
+			echo '<div style="margin-top:6px;color:#646970;font-size:12px">' . esc_html(self::queue_action_hint(EPV2_Queue::user_facing_state_for_row($item), $item)) . '</div>';
 			echo '</td></tr>';
 			}
 		echo '</tbody></table></div>';
@@ -746,7 +1380,7 @@ final class EPV2_Admin {
 			echo '<h2>' . esc_html(strtoupper($lang)) . '</h2>';
 			// v2.1: DE-specific notice when worker is available
 			if ( $is_de && EPV2_Worker_Client::is_available() ) {
-				echo '<p style="color:#2e7d32;font-size:12px">✓ Python Worker доступен — кнопки «AI ↺» используют v2.1 pipeline</p>';
+				echo '<p style="color:#2e7d32;font-size:12px">✓ Python Worker доступен — кнопки «AI ↺» используют актуальный pipeline v21</p>';
 			}
 			echo '<table class="form-table"><tbody>';
 			$media_id = 'epv2-media-' . $lang . '-' . $item_id;
@@ -833,16 +1467,16 @@ final class EPV2_Admin {
 		self::row('Резервный провайдер', self::provider_select('ai_fallback_provider', (string) $settings['ai_fallback_provider'], 'epv2-ai-fallback-provider'));
 		self::row('Резервная модель', self::model_select('ai_fallback_model', (string) $settings['ai_fallback_provider'], (string) $settings['ai_fallback_model'], 'epv2-ai-fallback-model') . self::usage_hint((string) $settings['ai_fallback_provider'], (string) $settings['ai_fallback_model'], $ai_usage, 'epv2-ai-usage-fallback'));
 		self::row('Стиль рерайта по умолчанию', self::style_select('rewrite_style', (string) $settings['rewrite_style']));
-		self::row('Gemini API ключ', '<input name="ai_keys[gemini]" value="' . esc_attr($settings['ai_keys']['gemini']) . '" class="regular-text">');
+		self::row('Gemini API ключ', self::secret_input('ai_keys[gemini]', (string) ($settings['ai_keys']['gemini'] ?? '')));
 		self::row('Gemini: web grounding', '<label><input type="checkbox" name="gemini_search_grounding_enabled"' . checked(! empty($settings['gemini_search_grounding_enabled']), true, false) . '> использовать Google Search для черновиков и тестов</label>');
 		self::row('Gemini: URL context', '<label><input type="checkbox" name="gemini_url_context_enabled"' . checked(! empty($settings['gemini_url_context_enabled']), true, false) . '> учитывать URL первоисточника как контекст</label>');
 		self::row('Gemini: URL в промте', '<label><input type="checkbox" name="gemini_use_source_url_in_prompt"' . checked(! empty($settings['gemini_use_source_url_in_prompt']), true, false) . '> явно передавать URL источника в prompt</label>');
 		self::row('Gemini: требовать ссылки', '<label><input type="checkbox" name="gemini_require_citations"' . checked(! empty($settings['gemini_require_citations']), true, false) . '> просить модель вернуть цитаты/ссылочные опоры в raw-ответе</label>');
-		self::row('DeepSeek API ключ', '<input name="ai_keys[deepseek]" value="' . esc_attr($settings['ai_keys']['deepseek']) . '" class="regular-text">');
-		self::row('OpenAI API ключ', '<input name="ai_keys[openai]" value="' . esc_attr($settings['ai_keys']['openai']) . '" class="regular-text">');
-		self::row('Anthropic API ключ', '<input name="ai_keys[anthropic]" value="' . esc_attr($settings['ai_keys']['anthropic']) . '" class="regular-text">');
-		self::row('Pexels API ключ', '<input name="image_keys[pexels]" value="' . esc_attr($settings['image_keys']['pexels']) . '" class="regular-text">');
-		self::row('Unsplash API ключ', '<input name="image_keys[unsplash]" value="' . esc_attr($settings['image_keys']['unsplash']) . '" class="regular-text">');
+		self::row('DeepSeek API ключ', self::secret_input('ai_keys[deepseek]', (string) ($settings['ai_keys']['deepseek'] ?? '')));
+		self::row('OpenAI API ключ', self::secret_input('ai_keys[openai]', (string) ($settings['ai_keys']['openai'] ?? '')));
+		self::row('Anthropic API ключ', self::secret_input('ai_keys[anthropic]', (string) ($settings['ai_keys']['anthropic'] ?? '')));
+		self::row('Pexels API ключ', self::secret_input('image_keys[pexels]', (string) ($settings['image_keys']['pexels'] ?? '')));
+		self::row('Unsplash API ключ', self::secret_input('image_keys[unsplash]', (string) ($settings['image_keys']['unsplash'] ?? '')));
 		self::row('Интервал сбора (мин)', '<input name="collect_interval_minutes" type="number" value="' . (int) $settings['collect_interval_minutes'] . '" class="small-text">');
 		self::row('Интервал обработки (мин)', '<input name="process_interval_minutes" type="number" value="' . (int) $settings['process_interval_minutes'] . '" class="small-text"> <span class="description">Рекомендуется 5 минут как backstop. Основная обработка идёт сразу по очереди.</span>');
 		self::row('Интервал публикации (мин)', '<input name="publish_interval_minutes" type="number" value="' . (int) $settings['publish_interval_minutes'] . '" class="small-text"> <span class="description">Рекомендуется 5 минут.</span>');
@@ -856,9 +1490,9 @@ final class EPV2_Admin {
 		self::row('Внешний worker', '<select name="worker_mode"><option value="disabled"' . selected((string) ($settings['worker_mode'] ?? 'disabled'), 'disabled', false) . '>выключен</option><option value="cli"' . selected((string) ($settings['worker_mode'] ?? 'disabled'), 'cli', false) . '>CLI worker</option></select><p class="description">Пока это подготовка контура вынесения тяжёлой обработки из WordPress. По умолчанию отключено.</p>');
 		self::row('Worker: Python', '<input name="worker_python_bin" value="' . esc_attr((string) ($settings['worker_python_bin'] ?? 'python3')) . '" class="regular-text">');
 		self::row('Worker: команда', '<input name="worker_cli_command" value="' . esc_attr((string) ($settings['worker_cli_command'] ?? 'python3 -m epv2_worker')) . '" class="regular-text code">');
-		self::row('Worker: PYTHONPATH', '<input name="worker_src_dir" value="' . esc_attr((string) ($settings['worker_src_dir'] ?? '/root/projects/europulse/worker/src')) . '" class="regular-text code">');
+		self::row('Worker: PYTHONPATH', '<input name="worker_src_dir" value="' . esc_attr((string) ($settings['worker_src_dir'] ?? '/root/projects/europulse/worker-v21/src')) . '" class="regular-text code">');
 		self::row('Worker: timeout (сек)', '<input name="worker_timeout_seconds" type="number" value="' . (int) ($settings['worker_timeout_seconds'] ?? 180) . '" class="small-text">');
-		self::row('Worker: shared secret', '<input name="worker_shared_secret" value="' . esc_attr((string) ($settings['worker_shared_secret'] ?? '')) . '" class="regular-text code">');
+		self::row('Worker: shared secret', self::secret_input('worker_shared_secret', (string) ($settings['worker_shared_secret'] ?? ''), 'regular-text code'));
 		self::row('Хранить завершённые элементы очереди (дней)', '<input name="queue_retention_days" type="number" value="' . (int) $settings['queue_retention_days'] . '" class="small-text">');
 		self::row('TTL для новых элементов очереди (часы)', '<input name="queue_new_ttl_hours" type="number" value="' . (int) $settings['queue_new_ttl_hours'] . '" class="small-text">');
 		self::row('Максимум новых элементов на рубрику', '<input name="queue_new_max_per_category" type="number" value="' . (int) $settings['queue_new_max_per_category'] . '" class="small-text">');
@@ -1057,9 +1691,8 @@ final class EPV2_Admin {
 					$payload = EPV2_Review::ensure_payload($item);
 				}
 				$payload = EPV2_Review::refresh_review_metrics($payload);
-				if (EPV2_AI_Processor::payload_is_publish_ready($payload)) {
+				if (EPV2_AI_Processor::transition_item_to_ready_publish($id, $payload)) {
 					EPV2_Review::save_payload($id, $payload);
-					EPV2_Queue::mark_state($id, 'ready_publish');
 				} else {
 					wp_safe_redirect(admin_url('admin.php?page=epv2-queue&queue_notice=not_publish_ready'));
 					exit;
@@ -1156,9 +1789,8 @@ final class EPV2_Admin {
 					$payload = EPV2_Review::ensure_payload($item);
 				}
 				$payload = EPV2_Review::refresh_review_metrics($payload);
-				if (EPV2_AI_Processor::payload_is_publish_ready($payload)) {
+				if (EPV2_AI_Processor::transition_item_to_ready_publish($id, $payload)) {
 					EPV2_Review::save_payload($id, $payload);
-					EPV2_Queue::mark_state($id, 'ready_publish');
 				} else {
 					wp_safe_redirect(admin_url('admin.php?page=epv2-review&item=' . $id . '&queue_notice=not_publish_ready'));
 					exit;
@@ -1455,6 +2087,13 @@ final class EPV2_Admin {
 		echo '<tr><th scope="row">' . esc_html($label) . '</th><td>' . $field . '</td></tr>';
 	}
 
+	private static function secret_input(string $name, string $current_value, string $class = 'regular-text'): string {
+		$has_value = trim($current_value) !== '';
+		$placeholder = $has_value ? 'Сохранён — введите новый для замены' : 'Вставьте ключ';
+		$hint = $has_value ? '<p class="description">Ключ сохранён и не выводится на страницу. Оставьте поле пустым, чтобы не менять его.</p>' : '';
+		return '<input type="password" autocomplete="new-password" name="' . esc_attr($name) . '" value="" placeholder="' . esc_attr($placeholder) . '" class="' . esc_attr($class) . '">' . $hint;
+	}
+
 	private static function provider_select(string $name, string $selected, string $id = ''): string {
 		$options = EPV2_Settings::ai_provider_options();
 		$html = '<select name="' . esc_attr($name) . '"' . ($id !== '' ? ' id="' . esc_attr($id) . '"' : '') . '>';
@@ -1532,25 +2171,72 @@ final class EPV2_Admin {
 		return $is_active ? 'Активен' : 'Пауза';
 	}
 
+	private static function queue_deferred_publish_label(object $item, array $system, bool $capitalized = true): string {
+		$not_before = (int) ($system['publish_not_before'] ?? 0);
+		if (! empty($system['publish_deferred_by_category_limit'])) {
+			$category = trim((string) (! empty($item->category_final) ? $item->category_final : ($item->category_proposed ?? '')));
+			$label = 'Отложено: лимит рубрики';
+			if ($category !== '') {
+				$label .= ' ' . $category;
+			}
+			if ($not_before > 0) {
+				$label .= ' до ' . wp_date('H:i', $not_before);
+			}
+			return $capitalized ? $label : mb_strtolower($label);
+		}
+		if (! empty($system['publish_deferred_by_daily_limit'])) {
+			$label = 'Отложено: дневной лимит';
+			if ($not_before > 0) {
+				$label .= ' до ' . wp_date('H:i', $not_before);
+			}
+			return $capitalized ? $label : mb_strtolower($label);
+		}
+		return '';
+	}
+
+	private static function queue_finish_attempt_label(array $system): string {
+		$retries = is_array($system['retries'] ?? null) ? $system['retries'] : [];
+		$attempt = (int) ($retries['review_finish'] ?? 0);
+		if ($attempt <= 0) {
+			return '';
+		}
+		return ' · попытка ' . $attempt . '/2';
+	}
+
 	private static function queue_state_label(object $item): string {
 		$notes = json_decode((string) ($item->admin_notes ?? ''), true);
 		$notes = is_array($notes) ? $notes : [];
 		$live_status = trim((string) ($notes['_system']['live_status'] ?? ''));
 		$retry_after = trim((string) ($notes['_system']['retry_after'] ?? ''));
 		$state = (string) $item->state;
+		$user_state = EPV2_Queue::user_facing_state_for_row($item);
+		$classification = EPV2_Queue::workflow_classification_for_row($item);
 		$active_item_id = self::active_queue_item_id();
+		$deferred_label = self::queue_deferred_publish_label($item, is_array($notes['_system'] ?? null) ? $notes['_system'] : []);
+		if (in_array($user_state, ['ready_publish', 'publishing'], true)) {
+			return $deferred_label !== '' ? $deferred_label : 'Готов к публикации';
+		}
 		if (self::orchestrator_v2_ui_enabled() && self::is_recoverable_queue_item($item)) {
 			if ((int) ($item->id ?? 0) === $active_item_id) {
 				return 'В работе · ' . self::queue_progress_percent($item) . '% · ' . self::queue_progress_stage_label($item);
 			}
+			if ($retry_after !== '') {
+				$retry_ts = strtotime($retry_after);
+				if ($retry_ts && $retry_ts > time()) {
+					return 'Пауза доводки до ' . wp_date('H:i', $retry_ts);
+				}
+			}
 			return 'Новый';
-		}
-		if (in_array($state, ['ready_publish', 'retry_publish', 'publishing'], true)) {
-			return 'Готов к публикации';
 		}
 		if (self::is_recoverable_queue_item($item)) {
 			if ((int) ($item->id ?? 0) === $active_item_id) {
 				return 'В работе · ' . self::queue_progress_percent($item) . '% · ' . self::queue_progress_stage_label($item);
+			}
+			if ($retry_after !== '') {
+				$retry_ts = strtotime($retry_after);
+				if ($retry_ts && $retry_ts > time()) {
+					return 'Пауза доводки до ' . wp_date('H:i', $retry_ts);
+				}
 			}
 			return 'Новый';
 		}
@@ -1573,18 +2259,20 @@ final class EPV2_Admin {
 		}
 		$labels = [
 			'new' => 'Новый',
-			'processing_de' => 'В работе',
-			'ready_review' => 'Новый',
+			'active' => 'В работе',
 			'ready_publish' => 'Готов к публикации',
-			'retry_process' => 'Новый',
-			'retry_publish' => 'Ожидает публикации',
-			'reserve' => 'Резерв',
+			'publishing' => 'Публикуется',
 			'duplicate' => 'Дубликат',
 			'error' => 'Ошибка',
 			'rejected' => 'Отклонён',
 		];
-		$label = $labels[$state] ?? $state;
-		if (in_array($state, ['retry_process', 'retry_publish'], true) && $retry_after !== '') {
+		$label = $labels[$user_state] ?? $user_state;
+		if (($classification['class'] ?? '') === 'manual') {
+			$label = 'Требует проверки';
+		} elseif (($classification['class'] ?? '') === 'terminal' && $user_state === 'error') {
+			$label = 'Техническая ошибка';
+		}
+		if ($user_state === 'ready_publish' && $retry_after !== '') {
 			$ts = strtotime($retry_after);
 			if ($ts) {
 				$label .= ' до ' . wp_date('H:i', $ts);
@@ -1903,6 +2591,29 @@ final class EPV2_Admin {
 		return '<span title="' . esc_attr(implode(' | ', $warnings)) . '" style="display:inline-block;padding:2px 8px;border-radius:999px;background:' . esc_attr($bg) . ';color:' . esc_attr($color) . ';font-size:11px;font-weight:700">' . esc_html((string) $score) . '</span>';
 	}
 
+	private static function queue_release_badge(object $item): string {
+		$payload = self::queue_cached_payload($item);
+		$release = is_array($payload['_meta']['release_quality'] ?? null) ? $payload['_meta']['release_quality'] : [];
+		$google = is_array($payload['_meta']['google_quality'] ?? null) ? $payload['_meta']['google_quality'] : [];
+		if ($release === [] && $google === []) {
+			return '<span style="color:#8c8f94">—</span>';
+		}
+		$release_score = (int) ($release['score'] ?? 0);
+		$google_score = (int) ($google['score'] ?? 0);
+		$release_pass = ! empty($release['pass']);
+		$google_pass = ! empty($google['pass']);
+		$bg = ($release_pass && $google_pass) ? '#dcfce7' : (($release_score >= 80 && $google_score >= 80) ? '#fef3c7' : '#fee2e2');
+		$color = ($release_pass && $google_pass) ? '#166534' : (($release_score >= 80 && $google_score >= 80) ? '#92400e' : '#991b1b');
+		$title_parts = [];
+		if ($release !== []) {
+			$title_parts[] = 'Release: ' . $release_score;
+		}
+		if ($google !== []) {
+			$title_parts[] = 'Google: ' . $google_score;
+		}
+		return '<span title="' . esc_attr(implode(' | ', $title_parts)) . '" style="display:inline-block;padding:2px 8px;border-radius:999px;background:' . esc_attr($bg) . ';color:' . esc_attr($color) . ';font-size:11px;font-weight:700">' . esc_html($release_score . ' / ' . $google_score) . '</span>';
+	}
+
 	private static function sort_queue_items(array $items, string $orderby, string $order): array {
 		$order = $order === 'asc' ? 'asc' : 'desc';
 		usort($items, static function ($a, $b) use ($orderby, $order): int {
@@ -1982,9 +2693,28 @@ final class EPV2_Admin {
 		return array_values(array_unique($blockers));
 	}
 
+	private static function queue_light_issue_summary(array $blockers): string {
+		if ($blockers === []) {
+			return '<span style="color:#166534">OK</span>';
+		}
+		$visible = array_slice(array_values(array_filter(array_map('trim', $blockers))), 0, 2);
+		if ($visible === []) {
+			return '<span style="color:#166534">OK</span>';
+		}
+		$label = implode(' | ', $visible);
+		if (count($blockers) > count($visible)) {
+			$label .= ' | +' . (count($blockers) - count($visible));
+		}
+		return '<span title="' . esc_attr(implode(' | ', $blockers)) . '" style="color:#991b1b">' . esc_html($label) . '</span>';
+	}
+
 	private static function queue_cached_payload(object $item): array {
+		if (isset($item->_epv2_admin_payload_cache) && is_array($item->_epv2_admin_payload_cache)) {
+			return $item->_epv2_admin_payload_cache;
+		}
 		$payload = EPV2_Review::decode_payload((string) ($item->ai_payload ?? ''));
-		return is_array($payload) ? $payload : [];
+		$item->_epv2_admin_payload_cache = is_array($payload) ? $payload : [];
+		return $item->_epv2_admin_payload_cache;
 	}
 
 	private static function queue_sort_link(string $field, string $label, string $current, string $order, string $state_filter, string $category_filter): string {
@@ -2014,21 +2744,11 @@ final class EPV2_Admin {
 	}
 
 	private static function queue_state_options(): array {
-		if (self::orchestrator_v2_ui_enabled()) {
-			return [
-				'new' => 'Новый',
-				'processing_de' => 'В работе',
-				'ready_publish' => 'Готов к публикации',
-				'published' => 'Опубликовано',
-				'duplicate' => 'Дубликат',
-				'rejected' => 'Отклонено',
-				'error' => 'Ошибка',
-			];
-		}
 		return [
 			'new' => 'Новый',
-			'processing_de' => 'В работе',
+			'active' => 'В работе',
 			'ready_publish' => 'Готов к публикации',
+			'publishing' => 'Публикуется',
 			'published' => 'Опубликовано',
 			'duplicate' => 'Дубликат',
 			'rejected' => 'Отклонено',
@@ -2037,13 +2757,20 @@ final class EPV2_Admin {
 	}
 
 	private static function queue_action_hint(string $state, ?object $item = null): string {
+		$user_state = $item ? EPV2_Queue::user_facing_state_for_row($item) : $state;
+		$classification = $item ? EPV2_Queue::workflow_classification_for_row($item) : [
+			'class' => '',
+			'reason' => '',
+			'manual_kind' => '',
+			'user_state' => $user_state,
+		];
 		if (self::orchestrator_v2_ui_enabled() && $item && self::is_recoverable_queue_item($item)) {
 			if ((int) ($item->id ?? 0) === self::active_queue_item_id()) {
 				return 'Сейчас это единственный активный материал. Система должна довести его до готовности к публикации, прежде чем взять следующий.';
 			}
 			return 'Материал ждёт своей очереди и останется в списке новых, пока не освободится единственный рабочий слот.';
 		}
-		if ($item && in_array((string) ($item->state ?? ''), ['ready_publish', 'retry_publish', 'publishing'], true)) {
+		if ($item && in_array($user_state, ['ready_publish', 'publishing'], true)) {
 			return 'Материал полностью готов и ждёт ближайшего автоматического цикла публикации.';
 		}
 		if ($item && self::is_recoverable_queue_item($item)) {
@@ -2052,14 +2779,21 @@ final class EPV2_Admin {
 			}
 			return 'Материал ждёт своей очереди и останется в списке новых, пока не освободится единственный рабочий слот.';
 		}
+		if (($classification['class'] ?? '') === 'manual') {
+			return match ((string) ($classification['manual_kind'] ?? '')) {
+				'translation' => 'Материал требует ручной проверки перевода. Автоматическая языковая доводка остановлена до решения редактора.',
+				'media' => 'Материал требует ручной проверки медиа. Автоматическая медиадоводка остановлена до решения редактора.',
+				default => 'Материал требует ручной редакционной проверки и не будет автоматически продолжен без явного решения.',
+			};
+		}
+		if (($classification['class'] ?? '') === 'terminal' && $user_state === 'error') {
+			return 'Это технический terminal-state. Материал остановлен из-за ошибки обработки, а не отклонён редакционно.';
+		}
 		return match ($state) {
 			'new' => 'Материал ждёт своей очереди на автоматическую обработку.',
-			'processing_de' => 'Материал сейчас находится в работе.',
-			'ready_review' => 'Материал остаётся внутри автоматического контура до доведения к публикации.',
-			'retry_process' => 'Материал остаётся внутри автоматического контура до доведения к публикации.',
-			'retry_publish' => 'Материал временно ждёт повторной попытки публикации.',
+			'active' => 'Материал сейчас находится в работе.',
 			'ready_publish' => 'Материал уже готов к публикации.',
-			'reserve' => 'Материал сохранён как запасной сильный кандидат внутри своей рубрики.',
+			'publishing' => 'Материал сейчас публикуется на сайте.',
 			'published' => 'Материал уже опубликован. "Редактировать пост" открывает его в редакторе WordPress, а "Удалить новость" отправляет опубликованные посты в корзину и убирает запись из очереди.',
 			'duplicate' => 'Это дубль; публикация отключена.',
 			'rejected' => 'Материал отсеян фильтрами и не пойдёт в публикацию.',
@@ -2120,7 +2854,8 @@ final class EPV2_Admin {
 			return 'публикует на сайт';
 		}
 		if ($state === 'ready_publish') {
-			return 'ждёт слот публикации';
+			$deferred_label = self::queue_deferred_publish_label($item, $system, false);
+			return $deferred_label !== '' ? $deferred_label : 'ждёт слот публикации';
 		}
 		if (! empty($checklist['ready_publish'])) {
 			return 'готов к публикации';
@@ -2146,11 +2881,12 @@ final class EPV2_Admin {
 		if (! empty($checklist['initial_analysis_done'])) {
 			return 'анализирует материал';
 		}
+		$attempt_label = self::queue_finish_attempt_label($system);
 		if ($live_status !== '') {
-			return mb_strtolower($live_status);
+			return mb_strtolower($live_status . $attempt_label);
 		}
 		return match ($workflow_status) {
-			'claimed' => 'материал взят в работу',
+			'claimed' => 'материал взят в работу' . $attempt_label,
 			'released_as_noncanonical_owner' => 'переназначает рабочий слот',
 			default => 'обрабатывает материал',
 		};
@@ -2309,8 +3045,23 @@ final class EPV2_Admin {
 	}
 
 	private static function queue_analysis(object $item): array {
+		if (isset($item->_epv2_admin_analysis_cache) && is_array($item->_epv2_admin_analysis_cache)) {
+			return $item->_epv2_admin_analysis_cache;
+		}
 		$notes = json_decode((string) ($item->admin_notes ?? ''), true);
-		return is_array($notes['selection'] ?? null) ? $notes['selection'] : [];
+		$item->_epv2_admin_analysis_cache = is_array($notes['selection'] ?? null) ? $notes['selection'] : [];
+		return $item->_epv2_admin_analysis_cache;
+	}
+
+	private static function queue_page_fetch_limit(string $state_filter): int {
+		$state_filter = sanitize_key($state_filter);
+		if ($state_filter === 'published') {
+			return 40;
+		}
+		if ($state_filter !== '') {
+			return 100;
+		}
+		return self::QUEUE_PAGE_FETCH_LIMIT;
 	}
 
 	private static function usage_hint(string $provider, string $model, array $usage, string $element_id = ''): string {
@@ -2324,11 +3075,10 @@ final class EPV2_Admin {
 	private static function admin_script(): string {
 		$model_map = wp_json_encode(EPV2_Settings::ai_model_options(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 		$usage_map = wp_json_encode(EPV2_Stats::ai_usage_today(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+		$queue_snapshot_url = wp_json_encode(wp_nonce_url(admin_url('admin-ajax.php?action=epv2_queue_snapshot'), 'epv2_queue_snapshot'), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 		$script = <<<'JS'
 jQuery(function($){
-  const epv2QueueSnapshotUrl = window.ajaxurl
-    ? (window.ajaxurl + '?action=epv2_queue_snapshot')
-    : '';
+  const epv2QueueSnapshotUrl = __EPV2_QUEUE_SNAPSHOT_URL__;
   const epv2ModelMap = __EPV2_MODEL_MAP__;
   const epv2UsageMap = __EPV2_USAGE_MAP__;
   function syncUsage(providerSelector, modelSelector, hintSelector) {
@@ -2402,6 +3152,7 @@ jQuery(function($){
   syncUsage('#epv2-ai-provider', '#epv2-ai-model', '#epv2-ai-usage-primary');
   syncUsage('#epv2-ai-fallback-provider', '#epv2-ai-fallback-model', '#epv2-ai-usage-fallback');
   let queueRefreshing = false;
+  let lastQueueRefreshAt = 0;
   let refreshQueueBlocks = null;
   const renderCollectCountdown = function() {
     const node = document.getElementById('epv2-next-collect-countdown');
@@ -2420,7 +3171,7 @@ jQuery(function($){
     if (diff <= 0) {
       node.textContent = '00:00';
       if (typeof refreshQueueBlocks === 'function') {
-        refreshQueueBlocks();
+        refreshQueueBlocks(true);
       }
       return;
     }
@@ -2441,12 +3192,12 @@ jQuery(function($){
       node.textContent = '00:00';
       return;
     }
-    let diff = Math.max(0, target - Date.now());
-    if (diff <= 0) {
-      node.textContent = 'обновляю…';
-      if (typeof refreshQueueBlocks === 'function') {
-        refreshQueueBlocks();
-      }
+	    let diff = Math.max(0, target - Date.now());
+	    if (diff <= 0) {
+	      node.textContent = '00:00';
+	      if (typeof refreshQueueBlocks === 'function') {
+	        refreshQueueBlocks(true);
+	      }
       return;
     }
     const totalSeconds = Math.floor(diff / 1000);
@@ -2464,6 +3215,21 @@ jQuery(function($){
   window.setInterval(renderPublishCountdown, 1000);
   const queueBlocks = document.getElementById('epv2-queue-blocks');
   if (queueBlocks && epv2QueueSnapshotUrl) {
+    const applySnapshotSections = function(response) {
+      if (!response || !response.success || !response.data || !response.data.sections) {
+        return false;
+      }
+      let updated = false;
+      Object.keys(response.data.sections).forEach(function(key) {
+        const html = response.data.sections[key];
+        const current = document.getElementById('epv2-queue-section-' + key);
+        if (current && typeof html === 'string' && html !== '') {
+          current.outerHTML = html;
+          updated = true;
+        }
+      });
+      return updated;
+    };
     const applySnapshotTargets = function(response) {
       if (!response || !response.success || !response.data) {
         return;
@@ -2478,9 +3244,15 @@ jQuery(function($){
         publishNode.setAttribute('data-target', String(Number(response.data.next_publish || 0) * 1000));
       }
     };
-    refreshQueueBlocks = function() {
+    refreshQueueBlocks = function(force) {
       if (queueRefreshing) return;
+      if (document.hidden) return;
+      const now = Date.now();
+      if (!force && lastQueueRefreshAt > 0 && now - lastQueueRefreshAt < __EPV2_QUEUE_SNAPSHOT_REFRESH_MS__) {
+        return;
+      }
       queueRefreshing = true;
+      lastQueueRefreshAt = now;
       const params = new URLSearchParams(window.location.search);
       const url = new URL(epv2QueueSnapshotUrl, window.location.origin);
       ['orderby', 'order', 'state_filter', 'category_filter'].forEach(function(key){
@@ -2490,8 +3262,11 @@ jQuery(function($){
       });
       $.get(url.toString())
         .done(function(response){
-          if (response && response.success && response.data && response.data.html) {
-            queueBlocks.innerHTML = response.data.html;
+          if (response && response.success && response.data) {
+            const sectionsApplied = applySnapshotSections(response);
+            if (!sectionsApplied && response.data.html) {
+              queueBlocks.innerHTML = response.data.html;
+            }
             applySnapshotTargets(response);
             renderCollectCountdown();
             renderPublishCountdown();
@@ -2501,7 +3276,17 @@ jQuery(function($){
           queueRefreshing = false;
         });
     };
-    window.setInterval(refreshQueueBlocks, 5000);
+    window.setTimeout(function() {
+      if (typeof refreshQueueBlocks === 'function') {
+        refreshQueueBlocks(true);
+      }
+    }, 1200);
+    window.setInterval(refreshQueueBlocks, __EPV2_QUEUE_SNAPSHOT_REFRESH_MS__);
+    document.addEventListener('visibilitychange', function() {
+      if (!document.hidden && typeof refreshQueueBlocks === 'function') {
+        refreshQueueBlocks(true);
+      }
+    });
   }
 
   // -----------------------------------------------------------------------
@@ -2551,8 +3336,8 @@ jQuery(function($){
 });
 JS;
 		return str_replace(
-			['__EPV2_MODEL_MAP__', '__EPV2_USAGE_MAP__'],
-			[$model_map, $usage_map],
+			['__EPV2_QUEUE_SNAPSHOT_URL__', '__EPV2_MODEL_MAP__', '__EPV2_USAGE_MAP__', '__EPV2_QUEUE_SNAPSHOT_REFRESH_MS__'],
+			[$queue_snapshot_url, $model_map, $usage_map, (string) self::QUEUE_SNAPSHOT_REFRESH_MS],
 			$script
 		);
 	}
@@ -2579,7 +3364,7 @@ JS;
 		if ( ! check_ajax_referer( 'epv2_regen_block_' . $item_id, 'nonce', false ) ) {
 			wp_send_json_error( [ 'message' => 'Invalid nonce' ], 403 );
 		}
-		if ( ! current_user_can( 'edit_posts' ) ) {
+		if ( ! current_user_can( 'manage_europulse_autopilot' ) ) {
 			wp_send_json_error( [ 'message' => 'Insufficient permissions' ], 403 );
 		}
 

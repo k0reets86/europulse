@@ -9,6 +9,7 @@ cat <<'EOF'
 /var/www/europulse/public
 /root/projects/europulse/wp-plugins/europulse-autopilot-v21
 /root/projects/europulse/worker-v21
+/root/projects/europulse/docs/active-runtime-boundary-2026-04-10.md
 /etc/systemd/system/epv2-worker.service
 /etc/systemd/system/epv2-orchestrator.service
 /etc/systemd/system/europulse-wp-cron.timer
@@ -18,7 +19,6 @@ EOF
 echo
 echo "[SAFE DELETE OR ROTATE]"
 cat <<'EOF'
-/root/projects/europulse/logs/epv2_runtime_watch.log
 /var/www/europulse/disabled-plugins
 /var/www/europulse/sandbox-v21
 /root/projects/europulse/backups/20260317-001937-site-audit
@@ -34,7 +34,6 @@ echo
 echo "[REVIEW BEFORE DELETE]"
 cat <<'EOF'
 /var/www/europulse/public/wp-content/uploads
-/root/projects/europulse/input
 /root/projects/europulse/docs
 /root/projects/europulse/scripts
 EOF

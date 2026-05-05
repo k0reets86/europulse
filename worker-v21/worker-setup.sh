@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# EuroPulse AutoPilot v2.1 — Worker Setup Script
+# EuroPulse AutoPilot v21 — Worker Setup Script
 # Installs Python deps and creates systemd service
 # Run as: sudo bash worker-setup.sh
 # ============================================================
@@ -16,7 +16,7 @@ VENV_DIR="${WORKER_DIR}/.venv"
 WP_LOAD="${WP_LOAD:-/var/www/europulse/public/wp-load.php}"
 
 echo "====================================================="
-echo " EuroPulse AutoPilot v2.1 — Worker Setup"
+echo " EuroPulse AutoPilot v21 — Worker Setup"
 echo " Directory: ${WORKER_DIR}"
 echo "====================================================="
 
@@ -79,10 +79,12 @@ cat > "${ENV_FILE}" << ENVEOF
 EPV2_WORKER_TOKEN=${WORKER_TOKEN}
 PYTHONPATH=${WORKER_DIR}/src
 ENVEOF
+chmod 600 "${ENV_FILE}"
+chown root:root "${ENV_FILE}"
 
 cat > "${SERVICE_FILE}" << SVCEOF
 [Unit]
-Description=EuroPulse AutoPilot v2.1 Python Worker
+Description=EuroPulse AutoPilot v21 Python Worker
 After=network.target
 
 [Service]
@@ -101,6 +103,8 @@ TimeoutStopSec=30
 [Install]
 WantedBy=multi-user.target
 SVCEOF
+chmod 644 "${SERVICE_FILE}"
+chown root:root "${SERVICE_FILE}"
 
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}"

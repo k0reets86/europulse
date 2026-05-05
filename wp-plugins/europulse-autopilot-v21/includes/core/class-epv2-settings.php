@@ -154,6 +154,7 @@ final class EPV2_Settings {
 	public static function get_all(): array {
 		$saved = get_option(self::OPTION_KEY, []);
 		$merged = self::merge(self::defaults(), is_array($saved) ? $saved : []);
+		$merged = self::decrypt_secrets($merged);
 		if (empty($merged['prompts']['manual_rewrite']) && ! empty($merged['prompts']['news_default'])) {
 			$merged['prompts']['manual_rewrite'] = (string) $merged['prompts']['news_default'];
 		}
@@ -175,13 +176,13 @@ final class EPV2_Settings {
 	}
 
 	public static function set_all(array $data): array {
-		$clean = self::sanitize($data);
-		update_option(self::OPTION_KEY, self::merge(self::defaults(), $clean), false);
+		$clean = self::sanitize($data, self::get_all());
+		update_option(self::OPTION_KEY, self::encrypt_secrets(self::merge(self::defaults(), $clean)), false);
 		return self::get_all();
 	}
 
-	public static function sanitize(array $data): array {
-		$current = self::defaults();
+	public static function sanitize(array $data, ?array $current = null): array {
+		$current = self::merge(self::defaults(), is_array($current) ? $current : []);
 		$clean = $current;
 		$provider_options = self::ai_provider_options();
 		$model_options = self::ai_model_options();
@@ -224,7 +225,10 @@ final class EPV2_Settings {
 		$clean['worker_cli_command'] = sanitize_text_field($data['worker_cli_command'] ?? $current['worker_cli_command']);
 		$clean['worker_src_dir'] = sanitize_text_field($data['worker_src_dir'] ?? $current['worker_src_dir']);
 		$clean['worker_timeout_seconds'] = max(10, min(600, (int) ($data['worker_timeout_seconds'] ?? $current['worker_timeout_seconds'])));
-		$clean['worker_shared_secret'] = sanitize_text_field($data['worker_shared_secret'] ?? $current['worker_shared_secret']);
+		$submitted_secret = $data['worker_shared_secret'] ?? null;
+		$clean['worker_shared_secret'] = $submitted_secret === null || trim((string) $submitted_secret) === ''
+			? (string) ($current['worker_shared_secret'] ?? '')
+			: sanitize_text_field((string) $submitted_secret);
 		$clean['category_plans'] = is_array($data['category_plans'] ?? null) ? $data['category_plans'] : $current['category_plans'];
 		$clean['time_schedule_profile'] = is_array($data['time_schedule_profile'] ?? null) ? $data['time_schedule_profile'] : $current['time_schedule_profile'];
 		$clean['dedup_threshold'] = min(0.99, max(0.5, (float) ($data['dedup_threshold'] ?? $current['dedup_threshold'])));
@@ -247,11 +251,17 @@ final class EPV2_Settings {
 		$clean['auto_breaking_hours'] = max(0, min(48, (int) ($data['auto_breaking_hours'] ?? $current['auto_breaking_hours'])));
 
 		foreach (['openai', 'anthropic', 'gemini', 'deepseek'] as $provider) {
-			$clean['ai_keys'][$provider] = sanitize_text_field($data['ai_keys'][$provider] ?? $current['ai_keys'][$provider]);
+			$submitted = $data['ai_keys'][$provider] ?? null;
+			$clean['ai_keys'][$provider] = $submitted === null || trim((string) $submitted) === ''
+				? (string) ($current['ai_keys'][$provider] ?? '')
+				: sanitize_text_field((string) $submitted);
 		}
 
 		foreach (['pexels', 'unsplash'] as $provider) {
-			$clean['image_keys'][$provider] = sanitize_text_field($data['image_keys'][$provider] ?? $current['image_keys'][$provider]);
+			$submitted = $data['image_keys'][$provider] ?? null;
+			$clean['image_keys'][$provider] = $submitted === null || trim((string) $submitted) === ''
+				? (string) ($current['image_keys'][$provider] ?? '')
+				: sanitize_text_field((string) $submitted);
 		}
 
 		foreach (['de', 'uk', 'en'] as $lang) {
@@ -298,7 +308,7 @@ final class EPV2_Settings {
 		}
 		$current = wp_generate_password(64, false, false);
 		$all['worker_shared_secret'] = $current;
-		update_option(self::OPTION_KEY, $all, false);
+		self::set_all($all);
 		return $current;
 	}
 
@@ -324,5 +334,82 @@ final class EPV2_Settings {
 			$clean[$key] = max(0, min(30, (int) $limit));
 		}
 		return $clean;
+	}
+
+	private static function secret_paths(): array {
+		return [
+			['ai_keys', 'openai'],
+			['ai_keys', 'anthropic'],
+			['ai_keys', 'gemini'],
+			['ai_keys', 'deepseek'],
+			['image_keys', 'pexels'],
+			['image_keys', 'unsplash'],
+			['worker_shared_secret'],
+		];
+	}
+
+	private static function crypto_key(): string {
+		$material = '';
+		foreach (['AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY'] as $constant) {
+			if (defined($constant)) {
+				$material .= (string) constant($constant);
+			}
+		}
+		if ($material === '') {
+			$material = wp_salt('auth');
+		}
+		return hash('sha256', $material, true);
+	}
+
+	private static function encrypt_value(string $value): string {
+		if ($value === '' || str_starts_with($value, 'epv2enc:') || ! function_exists('openssl_encrypt')) {
+			return $value;
+		}
+		$iv = random_bytes(16);
+		$ciphertext = openssl_encrypt($value, 'aes-256-cbc', self::crypto_key(), OPENSSL_RAW_DATA, $iv);
+		if ($ciphertext === false) {
+			return $value;
+		}
+		return 'epv2enc:' . base64_encode($iv . $ciphertext);
+	}
+
+	private static function decrypt_value(string $value): string {
+		if (! str_starts_with($value, 'epv2enc:') || ! function_exists('openssl_decrypt')) {
+			return $value;
+		}
+		$raw = base64_decode(substr($value, 8), true);
+		if (! is_string($raw) || strlen($raw) <= 16) {
+			return '';
+		}
+		$iv = substr($raw, 0, 16);
+		$ciphertext = substr($raw, 16);
+		$plain = openssl_decrypt($ciphertext, 'aes-256-cbc', self::crypto_key(), OPENSSL_RAW_DATA, $iv);
+		return is_string($plain) ? $plain : '';
+	}
+
+	private static function encrypt_secrets(array $settings): array {
+		foreach (self::secret_paths() as $path) {
+			if (count($path) === 1) {
+				$key = $path[0];
+				$settings[$key] = self::encrypt_value((string) ($settings[$key] ?? ''));
+				continue;
+			}
+			[$group, $key] = $path;
+			$settings[$group][$key] = self::encrypt_value((string) ($settings[$group][$key] ?? ''));
+		}
+		return $settings;
+	}
+
+	private static function decrypt_secrets(array $settings): array {
+		foreach (self::secret_paths() as $path) {
+			if (count($path) === 1) {
+				$key = $path[0];
+				$settings[$key] = self::decrypt_value((string) ($settings[$key] ?? ''));
+				continue;
+			}
+			[$group, $key] = $path;
+			$settings[$group][$key] = self::decrypt_value((string) ($settings[$group][$key] ?? ''));
+		}
+		return $settings;
 	}
 }

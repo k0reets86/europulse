@@ -120,7 +120,7 @@ def analyze(title: str, content: str, hint_lang: str = "") -> SemanticResult:
     lang = _detect_language(text_full, hint_lang)
     wc = _word_count(content)
     sc = _sentence_count(content)
-    phrases = _extract_keyphrases(title, content, lang, top_n=7)
+    phrases = _extract_keyphrases(title, content, lang, top_n=10)
     quality = _quality_score(content, wc, sc)
     ctype = _classify_content_type(title, content, lang)
     needs_enrich = quality < 0.40 or wc < 150
@@ -237,20 +237,57 @@ def _quality_score(content: str, wc: int, sc: int) -> float:
 # ---------------------------------------------------------------------------
 
 _TYPE_KEYWORDS: dict[str, list[str]] = {
-    "sport":     ["fußball","bundesliga","fc","sport","liga","spieler","tor","sieg","niederlage","turnier","tennis","formel","olympia"],
-    "kultur":    ["theater","konzert","museum","film","kunst","kultur","festival","ausstellung","musik","literatur","kino"],
-    "service":   ["tipp","ratgeber","anleitung","wie man","schritt","information","hilfe","service","wichtig zu wissen"],
-    "community": ["bürger","verein","ehrenamt","gemeinde","initiative","sozial","projekt","veranstaltung","nachbarschaft"],
+    "sport": [
+        # DE
+        "fußball","bundesliga","fc","sport","liga","spieler","tor","sieg","niederlage",
+        "turnier","tennis","formel","olympia","handball","basketball","hockey","radrennen",
+        # EN
+        "football","soccer","championship","match","goal","league","athlete","tournament",
+        "olympic","nba","nhl","uefa","fifa",
+        # UK
+        "футбол","ліга","матч","гол","турнір","чемпіонат","спорт","олімпіада",
+    ],
+    "kultur": [
+        # DE
+        "theater","konzert","museum","film","kunst","kultur","festival","ausstellung",
+        "musik","literatur","kino","oper","ballet","galerie","künstler",
+        # EN
+        "theatre","concert","museum","film","art","culture","festival","exhibition",
+        "music","literature","cinema","opera","ballet","gallery","artist",
+        # UK
+        "театр","концерт","музей","фільм","мистецтво","культура","фестиваль","виставка",
+        "музика","кіно","опера","балет","галерея",
+    ],
+    "service": [
+        # DE
+        "tipp","ratgeber","anleitung","wie man","schritt","information","hilfe","service",
+        "wichtig zu wissen","verbraucher","steuer","rente","krankenversicherung",
+        # EN
+        "guide","tips","how to","tutorial","step","advice","consumer","insurance","tax",
+        # UK
+        "порада","путівник","як","крок","допомога","споживач","страхування",
+    ],
+    "community": [
+        # DE
+        "bürger","verein","ehrenamt","gemeinde","initiative","sozial","projekt",
+        "veranstaltung","nachbarschaft","freiwillig","charity",
+        # EN
+        "community","volunteer","charity","neighborhood","civic","local","nonprofit",
+        # UK
+        "громада","волонтер","благодійність","сусідство","місцевий","ініціатива",
+    ],
 }
 
 
 def _classify_content_type(title: str, content: str, lang: str) -> str:
-    combined = (title + " " + content[:500]).lower()
+    combined = (title + " " + content[:2000]).lower()
     best = "news"
     best_count = 0
     for ctype, kws in _TYPE_KEYWORDS.items():
         count = sum(1 for kw in kws if kw in combined)
-        if count > best_count:
+        # Require at least 2 keyword matches to override 'news', so that a single
+        # coincidental term doesn't mis-categorize a general news article.
+        if count >= 2 and count > best_count:
             best_count = count
             best = ctype
     return best

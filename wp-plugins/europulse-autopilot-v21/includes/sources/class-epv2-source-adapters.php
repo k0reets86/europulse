@@ -96,6 +96,11 @@ final class EPV2_Source_Adapters {
 			str_contains($host, 'ukrinform') => 'Ukrinform',
 			str_contains($host, 'bundesregierung.de') => 'Bundesregierung',
 			str_contains($host, 'bundestag.de') => 'Deutscher Bundestag',
+			str_contains($host, 'tagesschau.de') => 'Tagesschau',
+			str_contains($host, 'bild.de') => 'BILD',
+			str_contains($host, 'br.de') => 'BR',
+			str_contains($host, 'bayern.de') => 'Bayern.de',
+			str_contains($host, 'muenchen.de') => 'Stadt München',
 			default => $host,
 		};
 	}

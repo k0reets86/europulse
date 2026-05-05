@@ -39,13 +39,18 @@ final class EPV2_Categorizer {
 		foreach ($map as $slug => $keywords) {
 			$scores[$slug] = 0;
 			foreach ($keywords as $keyword) {
-				if (mb_strpos($text, $keyword) !== false) {
+				if (self::keyword_matches($text, (string) $keyword)) {
 					$scores[$slug]++;
 				}
 			}
 		}
 
+		$sport_context = self::looks_like_sport_context($text);
 		foreach (array_values(array_filter(array_map('trim', explode(',', sanitize_text_field($source_bias))))) as $bias) {
+			$canonical_bias = self::canonical_slug($bias);
+			if ($sport_context && in_array($canonical_bias, ['bayern', 'muenchen'], true)) {
+				continue;
+			}
 			if (! isset($scores[$bias]) || ! self::source_bias_should_apply($bias, $text)) {
 				continue;
 			}
@@ -54,10 +59,12 @@ final class EPV2_Categorizer {
 
 		self::apply_semantic_focus($scores, $title_text, $lead_text);
 
-		if (preg_match('/\b(fc bayern|bundesliga|dfb|uefa|champions league|europa league|conference league|schiri|schiedsrichter|trainer|transfer|tor|halbfinale|premier league|premiere league|lothar matthäus|matthäus|hoeneß|handball|basketball|nhl|nba|euroleague)\b/u', $text)) {
-			$scores['sport'] = ($scores['sport'] ?? 0) + 6;
+		if ($sport_context) {
+			$scores['sport'] = ($scores['sport'] ?? 0) + 14;
 			$scores['politik'] = max(0, (int) ($scores['politik'] ?? 0) - 2);
 			$scores['deutschland'] = max(0, (int) ($scores['deutschland'] ?? 0) - 1);
+			$scores['bayern'] = max(0, (int) ($scores['bayern'] ?? 0) - 8);
+			$scores['münchen'] = max(0, (int) ($scores['münchen'] ?? 0) - 5);
 		}
 		if (preg_match('/\b(paralymp|paralympics|paralympische spiele|parasport|team d bei den paralympics|deutsches team bei den paralympics)\b/u', $text)) {
 			$scores['sport'] = ($scores['sport'] ?? 0) + 10;
@@ -120,12 +127,12 @@ final class EPV2_Categorizer {
 			$scores['ukraine'] = max(0, (int) ($scores['ukraine'] ?? 0) - 10);
 			$scores['sport'] = max(0, (int) ($scores['sport'] ?? 0) - 2);
 		}
-		if (preg_match('/\b(münchen|munich|allianz arena|allianz-arena|mvg|spessart|mittelsinn|bürgermeister|bürgermeisterwahl|stichwahl)\b/u', $text)) {
+		if (! $sport_context && preg_match('/\b(münchen|munich|allianz arena|allianz-arena|mvg|spessart|mittelsinn|bürgermeister|bürgermeisterwahl|stichwahl)\b/u', $text)) {
 			$scores['bayern'] = ($scores['bayern'] ?? 0) + 8;
 			$scores['deutschland'] = ($scores['deutschland'] ?? 0) + 1;
 			$scores['world'] = max(0, (int) ($scores['world'] ?? 0) - 3);
 		}
-		if (preg_match('/\b(münchen|munich|allianz arena|allianz-arena)\b/u', $text) && preg_match('/\b(warnstreik|öpnv|nahverkehr|busse und bahnen|pendler|champions league)\b/u', $text)) {
+		if (! $sport_context && preg_match('/\b(münchen|munich|allianz arena|allianz-arena)\b/u', $text) && preg_match('/\b(warnstreik|öpnv|nahverkehr|busse und bahnen|pendler)\b/u', $text)) {
 			$scores['bayern'] = ($scores['bayern'] ?? 0) + 10;
 			$scores['deutschland'] = max(0, (int) ($scores['deutschland'] ?? 0) - 4);
 		}
@@ -254,12 +261,26 @@ final class EPV2_Categorizer {
 			$scores['deutschland'] = max(0, (int) ($scores['deutschland'] ?? 0) - 4);
 			$scores['bayern'] = max(0, (int) ($scores['bayern'] ?? 0) - 3);
 		}
-		if (preg_match('/\b(migrant|migranten|migration|flüchtling|fluechtling|refugee|asyl|asylum|mittelmeer|mediterranean|lampedusa|seenotrettung|bootsunglück|boat disaster|küstenwache|coast guard|bodrum)\b/u', $text)) {
+		if (
+			preg_match('/\b(mittelmeer|mediterranean|lampedusa|seenotrettung|bootsunglück|boat disaster|küstenwache|coast guard|bodrum|frontex|eu-aussengrenze|eu-außengrenze)\b/u', $text)
+			|| (
+				preg_match('/\b(migrant|migranten|migration|flüchtling|fluechtling|refugee|asyl|asylum)\b/u', $text)
+				&& preg_match('/\b(grenzschutz|grenze|border|küste|kueste|meer|route|überfahrt|ueberfahrt|boot|boat)\b/u', $text)
+			)
+		) {
 			$scores['world'] = ($scores['world'] ?? 0) + 11;
 			$scores['europa'] = ($scores['europa'] ?? 0) + 4;
 			$scores['politik'] = max(0, (int) ($scores['politik'] ?? 0) - 3);
 			$scores['deutschland'] = max(0, (int) ($scores['deutschland'] ?? 0) - 4);
 			$scores['bayern'] = max(0, (int) ($scores['bayern'] ?? 0) - 3);
+		}
+		if (
+			preg_match('/\b(migrant|migranten|migration|flüchtling|fluechtling|refugee|asyl|asylum|integration)\b/u', $text)
+			&& preg_match('/\b(deutsch|bundesregierung|bund|länder|laender|kommune|kommunen|städte|staedte|gemeinden|quartier|wohnraum|sozial|jobcenter|aufenthalt|arbeitsagentur)\b/u', $text)
+		) {
+			$scores['leben-in-deutschland'] = ($scores['leben-in-deutschland'] ?? 0) + 6;
+			$scores['deutschland'] = ($scores['deutschland'] ?? 0) + 4;
+			$scores['world'] = max(0, (int) ($scores['world'] ?? 0) - 8);
 		}
 		if (preg_match('/\b(waffenruhe|ceasefire|truce|luftangriff|airstrike|missile|rakete|drohne|drone|hormus|strait of hormuz|persischer golf|persian gulf)\b/u', $text)) {
 			$scores['world'] = ($scores['world'] ?? 0) + 8;
@@ -349,6 +370,11 @@ final class EPV2_Categorizer {
 		if (($scores['world'] ?? 0) > 0) {
 			$scores['community'] = max(0, (int) ($scores['community'] ?? 0) - 2);
 		}
+		if ($sport_context) {
+			$scores['sport'] = max((int) ($scores['sport'] ?? 0), (int) ($scores['bayern'] ?? 0) + 3, (int) ($scores['münchen'] ?? 0) + 3);
+			$scores['bayern'] = min((int) ($scores['bayern'] ?? 0), max(0, (int) ($scores['sport'] ?? 0) - 3));
+			$scores['münchen'] = min((int) ($scores['münchen'] ?? 0), max(0, (int) ($scores['sport'] ?? 0) - 3));
+		}
 
 		$priority = [
 			'ukraine' => 110,
@@ -376,12 +402,12 @@ final class EPV2_Categorizer {
 
 		foreach ($scores as $slug => $score) {
 			if ($score > 0) {
-				return $slug;
+				return self::canonical_slug($slug);
 			}
 		}
 
 		if ($source_bias !== '' && self::source_bias_should_apply($source_bias, $text)) {
-			return sanitize_title($source_bias);
+			return self::canonical_slug($source_bias);
 		}
 
 		return 'deutschland';
@@ -468,15 +494,49 @@ final class EPV2_Categorizer {
 		}
 	}
 
+	private static function keyword_matches(string $text, string $keyword): bool {
+		$keyword = mb_strtolower(trim($keyword));
+		if ($keyword === '') {
+			return false;
+		}
+
+		// Short tokens such as "usa" must not match German words like "Zusammenhalt".
+		if (preg_match('/^[\p{L}\p{N}]{2,4}$/u', $keyword) === 1 || in_array($keyword, ['welt', 'world', 'sport'], true)) {
+			return preg_match('/(?<![\p{L}\p{N}])' . preg_quote($keyword, '/') . '(?![\p{L}\p{N}])/u', $text) === 1;
+		}
+
+		return mb_strpos($text, $keyword) !== false;
+	}
+
 	private static function source_bias_should_apply(string $bias, string $text): bool {
-		$bias = sanitize_title($bias);
+		$bias = self::canonical_slug($bias);
 		if ($bias === '') {
+			return false;
+		}
+		if (self::looks_like_sport_context($text) && in_array($bias, ['bayern', 'muenchen'], true)) {
 			return false;
 		}
 		return match ($bias) {
 			'ukraine' => preg_match('/\b(ukraine|ukrain|kyiv|kiew|київ|україн|zelensky|selensky|moskau|kreml|krieg|angriff|raketen|russland|росі|львів|lviv)\b/u', $text) === 1,
-			'world' => preg_match('/\b(world|welt|usa|washington|china|taiwan|nahost|middle east|gaza|israel|iran|syria|syrien|afrika|africa|australia|australien)\b/u', $text) === 1,
+			'welt' => preg_match('/\b(world|welt|usa|washington|china|taiwan|nahost|middle east|gaza|israel|iran|syria|syrien|afrika|africa|australia|australien)\b/u', $text) === 1,
 			default => true,
+		};
+	}
+
+	private static function looks_like_sport_context(string $text): bool {
+		return preg_match('/\b(fc bayern|psg|paris saint-germain|bundesliga|dfb|uefa|champions league|europa league|conference league|schiri|schiedsrichter|trainer|transfer|halbfinale|viertelfinale|achtelfinale|anpfiff|livereportage|rückspiel|hinspiel|premier league|premiere league|lothar matthäus|matthäus|hoeneß|handball|basketball|nhl|nba|euroleague)\b/u', $text) === 1;
+	}
+
+	private static function canonical_slug(string $slug): string {
+		if (class_exists('EPV2_Taxonomy_Map') && method_exists('EPV2_Taxonomy_Map', 'normalize_slug')) {
+			return EPV2_Taxonomy_Map::normalize_slug($slug);
+		}
+
+		$slug = sanitize_title($slug);
+		return match ($slug) {
+			'world' => 'welt',
+			'münchen', 'munchen', 'munich' => 'muenchen',
+			default => $slug,
 		};
 	}
 }

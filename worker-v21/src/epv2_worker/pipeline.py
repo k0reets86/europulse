@@ -12,8 +12,11 @@ Stages:
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import re
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from .contracts import LanguagePackage, MediaCandidate, WorkerRequest, WorkerResponse
 from .semantic import analyze as semantic_analyze, SemanticResult
@@ -38,6 +41,8 @@ class PipelineContext:
     english: LanguagePackage = field(default_factory=lambda: LanguagePackage(lang="en"))
     warnings: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
+    ai_runtime: list[dict[str, str]] = field(default_factory=list)
+    effective_length_profile: str = ""  # may differ from request.length_profile after enrichment
 
     @property
     def openai_key(self) -> str:
@@ -50,6 +55,33 @@ class PipelineContext:
     @property
     def pexels_key(self) -> str:
         return str(self.request.editorial_flags.get("pexels_api_key", ""))
+
+    @property
+    def provider_order(self) -> list[tuple[str, str, str]]:
+        flags = self.request.editorial_flags
+        keys = {
+            "openai": str(flags.get("openai_api_key", "")),
+            "deepseek": str(flags.get("deepseek_api_key", "")),
+        }
+        models = {
+            "openai": str(flags.get("ai_model", "")) or "gpt-4o-mini",
+            "deepseek": str(flags.get("ai_model", "")) or "deepseek-chat",
+        }
+        fallback_models = {
+            "openai": str(flags.get("ai_fallback_model", "")) or "gpt-4o-mini",
+            "deepseek": str(flags.get("ai_fallback_model", "")) or "deepseek-chat",
+        }
+        order: list[tuple[str, str, str]] = []
+        primary = str(flags.get("ai_provider", "openai"))
+        fallback = str(flags.get("ai_fallback_provider", ""))
+        if primary in keys and keys[primary]:
+            order.append((primary, keys[primary], models[primary]))
+        if fallback in keys and keys[fallback] and fallback != primary:
+            order.append((fallback, keys[fallback], fallback_models[fallback]))
+        for provider, key in keys.items():
+            if key and provider not in {candidate[0] for candidate in order}:
+                order.append((provider, key, "gpt-4o-mini" if provider == "openai" else "deepseek-chat"))
+        return order
 
 
 async def run_pipeline(request: WorkerRequest) -> WorkerResponse:
@@ -80,39 +112,89 @@ async def run_pipeline(request: WorkerRequest) -> WorkerResponse:
 # Full bundle
 # ---------------------------------------------------------------------------
 
+_CONTENT_TYPE_CATEGORY: dict[str, str] = {
+    "sport":     "sport",
+    "kultur":    "kultur",
+    "service":   "service",
+    "community": "community",
+}
+
+_LENGTH_UPGRADE: dict[str, str] = {
+    "brief":    "standard",
+    "standard": "long",
+    "long":     "long",
+    "analysis": "analysis",
+}
+
+
 async def _run_full_bundle(ctx: PipelineContext) -> None:
     req = ctx.request
+    original_text = _clean_original_text(req.original_content or req.original_excerpt or "")
 
     # 1. Semantic analysis
     ctx.semantic = semantic_analyze(
         title=req.original_title,
-        content=req.original_content or req.original_excerpt,
+        content=original_text,
         hint_lang=req.source_language,
     )
-    ctx.categories = [req.category_proposed] if req.category_proposed else []
     ctx.tags = ctx.semantic.key_phrases[:5]
 
-    # 2. Enrich sources if needed (fetch supporting content)
+    # Group F: override category from semantic content_type when unambiguous
+    semantic_cat = _CONTENT_TYPE_CATEGORY.get(ctx.semantic.content_type, "")
+    if semantic_cat:
+        ctx.categories = [semantic_cat]
+    else:
+        ctx.categories = [req.category_proposed] if req.category_proposed else []
+
+    # 2. Enrich sources — mandatory for thin content (<500 words), otherwise only when semantic flags it
+    source_word_count = len(original_text.split())
+    if source_word_count < 35:
+        ctx.blockers.append("Primary source too thin for autopublish")
+    force_enrichment = source_word_count < 500
     supporting_urls: list[str] = []
-    if ctx.semantic.needs_enrichment:
+    if ctx.semantic.needs_enrichment or force_enrichment:
         supporting_urls = await _search_supporting_sources(
             ctx.semantic.key_phrases, req.original_url
         )
 
+    # Group E: adjust length profile based on source richness and enrichment outcome
+    effective_length_profile = req.length_profile or "standard"
+    ctx.effective_length_profile = effective_length_profile
+    if force_enrichment:
+        # Supporting URLs are not supporting facts. Until the worker actually
+        # extracts article text from those URLs, thin feeds must stay compact;
+        # otherwise the rewriter fills the requested length with assumptions.
+        if source_word_count < 220:
+            effective_length_profile = "brief"
+        elif source_word_count < 500 and effective_length_profile not in {"brief", "standard"}:
+            effective_length_profile = "standard"
+    ctx.effective_length_profile = effective_length_profile
+    ctx.source_dossier = {
+        "primary": {
+            "url": req.original_url,
+            "title": req.original_title,
+            "excerpt": req.original_excerpt,
+        },
+        "supporting": [{"url": url} for url in supporting_urls],
+    }
+
     # 3. Rewrite to German
     rewrite = await rewrite_to_german(
         original_title=req.original_title,
-        original_content=req.original_content or req.original_excerpt,
+        original_content=original_text,
         source_language=ctx.semantic.detected_language,
         content_type=ctx.semantic.content_type,
         key_phrases=ctx.semantic.key_phrases,
         openai_api_key=ctx.openai_key,
         deepseek_api_key=ctx.deepseek_key,
-        length_profile=req.length_profile,
+        provider_order=ctx.provider_order,
+        length_profile=effective_length_profile,
+        source_url=req.original_url,
     )
     if not rewrite.success:
         ctx.blockers.append(f"Rewrite failed: {rewrite.error}")
         return
+    _record_ai_runtime(ctx, "rewrite_de", rewrite.provider, rewrite.model)
 
     ctx.german_master = LanguagePackage(
         lang="de",
@@ -128,6 +210,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             target_lang="Ukrainian",
             openai_api_key=ctx.openai_key,
             deepseek_api_key=ctx.deepseek_key,
+            provider_order=ctx.provider_order,
         )
     )
     en_task = asyncio.create_task(
@@ -136,6 +219,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             target_lang="English",
             openai_api_key=ctx.openai_key,
             deepseek_api_key=ctx.deepseek_key,
+            provider_order=ctx.provider_order,
         )
     )
     uk_result, en_result = await asyncio.gather(uk_task, en_task)
@@ -154,9 +238,16 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     )
 
     if not uk_result.success:
-        ctx.warnings.append(f"UK translation failed: {uk_result.error}")
+        ctx.blockers.append(f"UK translation failed: {uk_result.error}")
+    else:
+        _record_ai_runtime(ctx, "translate_uk", uk_result.provider, uk_result.model)
     if not en_result.success:
-        ctx.warnings.append(f"EN translation failed: {en_result.error}")
+        ctx.blockers.append(f"EN translation failed: {en_result.error}")
+    else:
+        _record_ai_runtime(ctx, "translate_en", en_result.provider, en_result.model)
+    for lang, package in {"de": ctx.german_master, "uk": ctx.ukrainian, "en": ctx.english}.items():
+        if not _language_package_complete(package):
+            ctx.blockers.append(f"{lang.upper()} language package incomplete")
 
     # 5. Media
     media = await find_media(
@@ -176,11 +267,14 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         key_phrases=ctx.semantic.key_phrases,
         openai_api_key=ctx.openai_key,
         deepseek_api_key=ctx.deepseek_key,
+        provider_order=ctx.provider_order,
     )
     ctx.german_master.seo_title = seo.seo_title
     ctx.german_master.meta_description = seo.meta_description
     ctx.german_master.slug = seo.slug
     ctx.german_master.focus_keywords = seo.keywords
+    if seo.success:
+        _record_ai_runtime(ctx, "seo_de", seo.provider, seo.model)
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +293,7 @@ async def _regen_title(ctx: PipelineContext) -> None:
         key_phrases=phrases,
         openai_api_key=ctx.openai_key,
         deepseek_api_key=ctx.deepseek_key,
+        provider_order=ctx.provider_order,
         length_profile="brief",
     )
     if rewrite.success:
@@ -217,6 +312,7 @@ async def _regen_lead(ctx: PipelineContext) -> None:
         key_phrases=existing.get("key_phrases", []),
         openai_api_key=ctx.openai_key,
         deepseek_api_key=ctx.deepseek_key,
+        provider_order=ctx.provider_order,
         length_profile="brief",
     )
     if rewrite.success:
@@ -241,6 +337,7 @@ async def _regen_body(ctx: PipelineContext) -> None:
         key_phrases=ctx.semantic.key_phrases,
         openai_api_key=ctx.openai_key,
         deepseek_api_key=ctx.deepseek_key,
+        provider_order=ctx.provider_order,
         length_profile=req.length_profile,
     )
     if rewrite.success:
@@ -278,6 +375,7 @@ async def _regen_seo(ctx: PipelineContext) -> None:
         key_phrases=existing.get("key_phrases", []),
         openai_api_key=ctx.openai_key,
         deepseek_api_key=ctx.deepseek_key,
+        provider_order=ctx.provider_order,
     )
     ctx.german_master = LanguagePackage(
         lang="de",
@@ -309,10 +407,48 @@ async def _search_supporting_sources(key_phrases: list[str], primary_url: str) -
             return []
         import re
         urls = re.findall(r"<link>https://[^<]+</link>", resp.text)
-        result = [u.replace("<link>", "").replace("</link>", "") for u in urls[:4]]
-        return [u for u in result if u != primary_url][:3]
+        result = []
+        for raw in urls:
+            candidate = html.unescape(raw.replace("<link>", "").replace("</link>", "").strip())
+            if candidate == primary_url or not _usable_supporting_url(candidate):
+                continue
+            result.append(candidate)
+            if len(result) >= 3:
+                break
+        return result
     except Exception:
         return []
+
+
+def _clean_original_text(raw: str) -> str:
+    """Drop feed HTML/media artifacts so captions/alt text do not become facts."""
+    text = re.sub(r"<img\b[^>]*>", " ", raw or "", flags=re.I | re.S)
+    text = re.sub(r"<figure\b.*?</figure>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _language_package_complete(package: LanguagePackage) -> bool:
+    return all([
+        bool((package.title or "").strip()),
+        bool((package.excerpt or "").strip()),
+        bool((package.content or "").strip()),
+    ])
+
+
+def _usable_supporting_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    host = parsed.netloc.lower()
+    path = parsed.path.rstrip("/")
+    if not host or not parsed.scheme.startswith("http"):
+        return False
+    if host.endswith("news.google.com") and path in {"", "/search"}:
+        return False
+    return True
 
 
 def _build_response(ctx: PipelineContext, outcome: str) -> WorkerResponse:
@@ -331,7 +467,7 @@ def _build_response(ctx: PipelineContext, outcome: str) -> WorkerResponse:
         queue_id=ctx.request.queue_id,
         outcome=outcome,
         story_kind=ctx.request.story_kind,
-        length_profile=ctx.request.length_profile,
+        length_profile=ctx.effective_length_profile or ctx.request.length_profile,
         categories=ctx.categories,
         german_master=ctx.german_master,
         ukrainian=ctx.ukrainian,
@@ -342,6 +478,8 @@ def _build_response(ctx: PipelineContext, outcome: str) -> WorkerResponse:
         quality={"semantic_score": ctx.semantic.quality_score, "word_count": ctx.semantic.word_count},
         warnings=ctx.warnings,
         blockers=ctx.blockers,
+        source_dossier=ctx.source_dossier,
+        ai_runtime=ctx.ai_runtime,
     )
 
 
@@ -384,7 +522,18 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
     }
 
     media_candidates = [candidate.url for candidate in response.media_candidates if candidate.url]
+    runtime = list(response.ai_runtime or [])
+    primary_runtime = next((item for item in runtime if item.get("stage") == "rewrite_de"), runtime[0] if runtime else {})
+    primary_provider = str(primary_runtime.get("provider", ""))
+    fallback_provider = next(
+        (str(item.get("provider", "")) for item in runtime if item.get("provider") and item.get("provider") != primary_provider),
+        "",
+    )
     meta = {
+        "provider": primary_provider,
+        "model": str(primary_runtime.get("model", "")),
+        "ai_runtime": runtime,
+        "fallback_provider_used": fallback_provider,
         "source_dossier": response.source_dossier or {},
         "source_count": 1 + len((response.source_dossier or {}).get("supporting", []) or []),
         "event_context": response.event_context or {},
@@ -407,3 +556,11 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
         "source_block": response.source_dossier or {},
         "_meta": meta,
     }
+
+
+def _record_ai_runtime(ctx: PipelineContext, stage: str, provider: str, model: str) -> None:
+    provider = (provider or "").strip()
+    model = (model or "").strip()
+    if not provider and not model:
+        return
+    ctx.ai_runtime.append({"stage": stage, "provider": provider, "model": model})

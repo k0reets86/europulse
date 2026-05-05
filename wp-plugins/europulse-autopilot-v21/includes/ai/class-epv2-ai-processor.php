@@ -2680,14 +2680,28 @@ final class EPV2_AI_Processor {
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 		$limit = max(1, min(2000, $limit));
-		$rows = $wpdb->get_results($wpdb->prepare(
-			"SELECT id, state, category_final, ai_payload FROM {$table} WHERE ai_payload IS NOT NULL AND ai_payload <> '' ORDER BY id ASC LIMIT %d",
+		// Two-step: id list first (cheap), then load each row's ai_payload
+		// individually so we never hold 2000 LONGTEXT rows in PHP memory.
+		// Each ai_payload can be hundreds of KB; 2000 * 200 KB ~= 400 MB.
+		$ids = $wpdb->get_col($wpdb->prepare(
+			"SELECT id FROM {$table} WHERE ai_payload IS NOT NULL AND ai_payload <> '' ORDER BY id ASC LIMIT %d",
 			$limit
 		));
 		$checked = 0;
 		$changed = 0;
 		$changed_ids = [];
-		foreach ((array) $rows as $row) {
+		foreach ((array) $ids as $id) {
+			$id = (int) $id;
+			if ($id <= 0) {
+				continue;
+			}
+			$row = $wpdb->get_row($wpdb->prepare(
+				"SELECT id, state, category_final, ai_payload FROM {$table} WHERE id = %d",
+				$id
+			));
+			if (! $row) {
+				continue;
+			}
 			$payload = json_decode((string) ($row->ai_payload ?? ''), true);
 			if (! is_array($payload) || $payload === []) {
 				continue;
@@ -2699,14 +2713,16 @@ final class EPV2_AI_Processor {
 			$normalized_categories = implode(',', array_values(array_filter((array) ($normalized['categories'] ?? []))));
 			$category_changed = $normalized_categories !== '' && $normalized_categories !== (string) ($row->category_final ?? '');
 			if ($before === $after && ! $category_changed) {
+				unset($row, $payload, $normalized, $before, $after);
 				continue;
 			}
-			EPV2_Review::save_payload((int) $row->id, $normalized);
+			EPV2_Review::save_payload($id, $normalized);
 			if ((string) ($row->state ?? '') === 'published') {
-				EPV2_Publisher::synchronize_published_bundle_from_payload((int) $row->id, $normalized);
+				EPV2_Publisher::synchronize_published_bundle_from_payload($id, $normalized);
 			}
 			$changed++;
-			$changed_ids[] = (int) $row->id;
+			$changed_ids[] = $id;
+			unset($row, $payload, $normalized, $before, $after);
 		}
 		return [
 			'checked' => $checked,
@@ -3058,14 +3074,27 @@ final class EPV2_AI_Processor {
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 		$limit = max(1, min(2000, $limit));
-		$rows = $wpdb->get_results($wpdb->prepare(
-			"SELECT id, state, mode, ai_payload, admin_notes FROM {$table} WHERE ai_payload IS NOT NULL AND ai_payload <> '' ORDER BY updated_at DESC LIMIT %d",
+		// Two-step: ids first, then per-row LONGTEXT fetch — bounded memory.
+		$ids = $wpdb->get_col($wpdb->prepare(
+			"SELECT id FROM {$table} WHERE ai_payload IS NOT NULL AND ai_payload <> '' ORDER BY updated_at DESC LIMIT %d",
 			$limit
 		));
 		$violations = [];
-		foreach ((array) $rows as $row) {
+		foreach ((array) $ids as $id) {
+			$id = (int) $id;
+			if ($id <= 0) {
+				continue;
+			}
+			$row = $wpdb->get_row($wpdb->prepare(
+				"SELECT id, state, mode, ai_payload, admin_notes FROM {$table} WHERE id = %d",
+				$id
+			));
+			if (! $row) {
+				continue;
+			}
 			$payload = json_decode((string) ($row->ai_payload ?? ''), true);
 			if (! is_array($payload) || $payload === []) {
+				unset($row);
 				continue;
 			}
 			$issues = [];
@@ -3115,6 +3144,7 @@ final class EPV2_AI_Processor {
 				$issues[] = 'publish_finish_incomplete_translation_contract';
 			}
 			if ($issues === []) {
+				unset($row, $payload, $normalized, $notes);
 				continue;
 			}
 			$violations[] = [
@@ -3122,9 +3152,10 @@ final class EPV2_AI_Processor {
 				'state' => $state,
 				'issues' => $issues,
 			];
+			unset($row, $payload, $normalized, $notes);
 		}
 		return [
-			'checked' => count((array) $rows),
+			'checked' => count((array) $ids),
 			'violations' => $violations,
 		];
 	}
@@ -3401,9 +3432,11 @@ final class EPV2_AI_Processor {
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 		$limit = max(1, min(500, $limit));
+		// pipeline_stage is a STORED generated column on ai_payload._meta.pipeline_stage
+		// added by EPV2_Installer::ensure_queue_generated_columns(); avoids LIKE on LONGTEXT.
 		$rows = $wpdb->get_results($wpdb->prepare(
-			"SELECT id, state FROM {$table} WHERE ai_payload LIKE %s ORDER BY updated_at DESC LIMIT %d",
-			'%"pipeline_stage":"publish_finish"%',
+			"SELECT id, state FROM {$table} WHERE pipeline_stage = %s ORDER BY updated_at DESC LIMIT %d",
+			'publish_finish',
 			$limit
 		));
 		$resolved = [];
@@ -3447,8 +3480,8 @@ final class EPV2_AI_Processor {
 		$table = $wpdb->prefix . 'epv2_queue';
 		$limit = max(1, min(250, $limit));
 		$rows = $wpdb->get_results($wpdb->prepare(
-			"SELECT id, state FROM {$table} WHERE state IN ('retry_process','rejected') AND ai_payload LIKE %s ORDER BY updated_at DESC LIMIT %d",
-			'%"pipeline_stage":"publish_finish"%',
+			"SELECT id, state FROM {$table} WHERE state IN ('retry_process','rejected') AND pipeline_stage = %s ORDER BY updated_at DESC LIMIT %d",
+			'publish_finish',
 			$limit
 		));
 		$resolved = [];

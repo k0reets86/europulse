@@ -1629,6 +1629,7 @@ final class EPV2_Queue {
 			$extra['admin_notes'] = wp_json_encode($notes, JSON_UNESCAPED_UNICODE);
 		}
 		$data = array_merge(['state' => $state], $extra);
+		self::guard_payload_field_sizes($id, $data);
 		$wpdb->update($wpdb->prefix . 'epv2_queue', $data, ['id' => $id]);
 		self::sync_active_automation_item($id, $state);
 	}
@@ -1998,8 +1999,49 @@ final class EPV2_Queue {
 		if (empty($fields)) {
 			return;
 		}
+		self::guard_payload_field_sizes($id, $fields);
 		global $wpdb;
 		$wpdb->update($wpdb->prefix . 'epv2_queue', $fields, ['id' => $id]);
+	}
+
+	/**
+	 * Reject UPDATEs that would push ai_payload / publish_payload past the
+	 * MariaDB max_allowed_packet (default 16 MB). We refuse anything over
+	 * 10 MB to keep a safety margin: the SQL packet carries the full row,
+	 * not just the column bytes. A logged warning gives the row id so the
+	 * operator can inspect / quarantine it; a thrown LogicException fails
+	 * the offending caller fast instead of silently corrupting state.
+	 */
+	private const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024;
+
+	private static function guard_payload_field_sizes(int $id, array $fields): void {
+		foreach (['ai_payload', 'publish_payload'] as $field) {
+			if (! array_key_exists($field, $fields)) {
+				continue;
+			}
+			$value = $fields[$field];
+			if (! is_string($value) || $value === '') {
+				continue;
+			}
+			$len = strlen($value);
+			if ($len > self::MAX_PAYLOAD_BYTES) {
+				if (class_exists('EPV2_Logger')) {
+					EPV2_Logger::warning('queue', 'payload size guard tripped', [
+						'item_id' => $id,
+						'field'   => $field,
+						'bytes'   => $len,
+						'limit'   => self::MAX_PAYLOAD_BYTES,
+					]);
+				}
+				throw new \LogicException(sprintf(
+					'EPV2_Queue::update_fields refused %s for item %d: %d bytes exceeds %d byte safety limit (max_allowed_packet guard).',
+					$field,
+					$id,
+					$len,
+					self::MAX_PAYLOAD_BYTES
+				));
+			}
+		}
 	}
 
 	public static function delete_items(array $ids): void {

@@ -225,5 +225,52 @@ final class EPV2_Installer {
 		foreach ($tables as $sql) {
 			dbDelta($sql);
 		}
+
+		self::ensure_queue_generated_columns();
+	}
+
+	/**
+	 * Add MariaDB/MySQL generated columns to ep_epv2_queue that mirror
+	 * frequently filtered fields inside ai_payload._meta. dbDelta does
+	 * not support GENERATED ... AS, so we add them with idempotent
+	 * ALTER TABLEs guarded by information_schema lookups.
+	 *
+	 * Currently exposes:
+	 *   - pipeline_stage: VARCHAR(64) STORED, indexed. Replaces costly
+	 *     LIKE '%"pipeline_stage":"..."%' scans on the LONGTEXT payload
+	 *     in repair / maintenance functions.
+	 */
+	private static function ensure_queue_generated_columns(): void {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$db    = defined('DB_NAME') ? DB_NAME : (string) $wpdb->dbname;
+
+		$column_exists = (int) $wpdb->get_var($wpdb->prepare(
+			"SELECT COUNT(*) FROM information_schema.columns
+				WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+			$db,
+			$table,
+			'pipeline_stage'
+		));
+		if ($column_exists === 0) {
+			// STORED so the value can be indexed and read without
+			// re-extracting from the JSON LONGTEXT on every query.
+			$wpdb->query(
+				"ALTER TABLE {$table} ADD COLUMN pipeline_stage VARCHAR(64) AS ("
+				. "JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.pipeline_stage'))"
+				. ") STORED"
+			);
+		}
+
+		$index_exists = (int) $wpdb->get_var($wpdb->prepare(
+			"SELECT COUNT(*) FROM information_schema.statistics
+				WHERE table_schema = %s AND table_name = %s AND index_name = %s",
+			$db,
+			$table,
+			'idx_pipeline_stage'
+		));
+		if ($index_exists === 0) {
+			$wpdb->query("ALTER TABLE {$table} ADD INDEX idx_pipeline_stage (pipeline_stage)");
+		}
 	}
 }

@@ -306,10 +306,16 @@ final class EPV2_Google_News {
                     CURLOPT_HTTPHEADER => $headers,
                 ] );
                 $body = curl_exec( $ch );
-                $code = (int) curl_getinfo( $ch, CURLINFO_RESPONSE_CODE );
-                curl_close( $ch );
-                if ( is_string( $body ) && $code === 200 ) {
-                    return $body;
+                if ( $body === false ) {
+                    $err = curl_error( $ch );
+                    curl_close( $ch );
+                    EPV2_Logger::warning( 'google_news', 'cURL GET failed', [ 'url' => $url, 'error' => $err ] );
+                } else {
+                    $code = (int) curl_getinfo( $ch, CURLINFO_RESPONSE_CODE );
+                    curl_close( $ch );
+                    if ( is_string( $body ) && $code === 200 ) {
+                        return $body;
+                    }
                 }
             }
         }
@@ -343,10 +349,16 @@ final class EPV2_Google_News {
                     CURLOPT_HTTPHEADER => $headers,
                 ] );
                 $body = curl_exec( $ch );
-                $code = (int) curl_getinfo( $ch, CURLINFO_RESPONSE_CODE );
-                curl_close( $ch );
-                if ( is_string( $body ) && $code === 200 ) {
-                    return $body;
+                if ( $body === false ) {
+                    $err = curl_error( $ch );
+                    curl_close( $ch );
+                    EPV2_Logger::warning( 'google_news', 'cURL POST failed', [ 'url' => $url, 'error' => $err ] );
+                } else {
+                    $code = (int) curl_getinfo( $ch, CURLINFO_RESPONSE_CODE );
+                    curl_close( $ch );
+                    if ( is_string( $body ) && $code === 200 ) {
+                        return $body;
+                    }
                 }
             }
         }

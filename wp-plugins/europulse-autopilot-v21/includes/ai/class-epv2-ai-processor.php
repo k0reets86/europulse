@@ -159,6 +159,51 @@ final class EPV2_AI_Processor {
 				$run_payload['pipeline_stage_before'] = $pipeline_stage;
 				$run_payload['workflow_step_before'] = $workflow_step;
 				self::log_process_item_step('after_pipeline_stage_detected', (int) $item->id, ['run_id' => $run, 'pipeline_stage' => $pipeline_stage, 'workflow_step' => $workflow_step]);
+				// Hard cap on workflow_step_attempts when stuck in rebuild_bundle.
+				// Two earlier guards (recent_rebuild_bundle_runs_stalled,
+				// maybe_cooldown_stagnated_rebuild) can fail to fire because
+				// either the signature drifts each tick (AI generates fresh
+				// text) or the cooldown event itself looks like a non-loop run
+				// in subsequent history checks. This is a backstop: any time
+				// build_de_master has been retried >= 6 times for a payload
+				// still on rebuild_bundle, terminalize to ready_review so the
+				// pulse can move past the stuck row instead of burning AI on
+				// the next 100 rebuilds. Operator can salvage from review.
+				$existing_attempts = (int) (json_decode((string) ($item->admin_notes ?? ''), true)['_system']['workflow_step_attempts'] ?? 0);
+				if (
+					$pipeline_stage === 'rebuild_bundle'
+					&& (string) $workflow_step === 'build_de_master'
+					&& $existing_attempts >= 6
+				) {
+					$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
+					$payload_for_terminal = is_array($payload_for_stage) ? $payload_for_stage : [];
+					$payload_for_terminal['_meta'] = is_array($payload_for_terminal['_meta'] ?? null) ? $payload_for_terminal['_meta'] : [];
+					$payload_for_terminal['_meta']['pipeline_stage'] = '';
+					$notes_for_terminal = is_array(json_decode((string) $fresh_item->admin_notes, true)) ? json_decode((string) $fresh_item->admin_notes, true) : [];
+					$notes_for_terminal['_system'] = is_array($notes_for_terminal['_system'] ?? null) ? $notes_for_terminal['_system'] : [];
+					$notes_for_terminal['_system']['workflow_step'] = '';
+					$notes_for_terminal['_system']['workflow_step_status'] = '';
+					$notes_for_terminal['_system']['workflow_owner_token'] = '';
+					$notes_for_terminal['_system']['workflow_terminal_reason'] = 'rebuild_bundle_attempt_cap';
+					$notes_for_terminal['_system']['manual_confirmation_required'] = 'content';
+					EPV2_Queue::mark_state((int) $item->id, 'ready_review', [
+						'ai_payload' => wp_json_encode($payload_for_terminal, JSON_UNESCAPED_UNICODE),
+						'admin_notes' => wp_json_encode($notes_for_terminal, JSON_UNESCAPED_UNICODE),
+						'error_message' => sprintf(
+							'rebuild_bundle attempt cap reached (workflow_step_attempts=%d): manual review required.',
+							$existing_attempts
+						),
+					]);
+					self::log_process_item_step('rebuild_bundle_attempt_cap_terminated', (int) $item->id, [
+						'run_id' => $run,
+						'attempts' => $existing_attempts,
+						'duration_ms' => self::duration_ms_since($item_started_at),
+					]);
+					$count++;
+					$run_payload['processed_item_id'] = (int) $item->id;
+					$run_payload['result'] = 'rebuild_bundle_attempt_cap_terminated';
+					break;
+				}
 				if ($pipeline_stage === 'rebuild_bundle' && self::recent_rebuild_bundle_runs_stalled((int) $item->id)) {
 					$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
 					EPV2_Resilience_Manager::schedule_retry($fresh_item, 'retry_process', 'process', 'publish threshold stalled rebuild bundle');
@@ -5861,31 +5906,36 @@ final class EPV2_AI_Processor {
 		if ($item_id <= 0) {
 			return false;
 		}
-		$item = EPV2_Queue::get_item_summary($item_id);
-		$updated_at = $item ? strtotime((string) ($item->updated_at ?? '')) : 0;
-		$rows = $wpdb->get_results(
+		// Look at the most recent process runs scoped to this item across
+		// the last 30-minute window. The previous filter compared run
+		// started_at against the queue row's updated_at, which is bumped
+		// every time we touch the row — including by the previous tick's
+		// own rebuild — so the filter excluded the very loop runs we
+		// were trying to count and the guard never fired (item kept
+		// looping indefinitely while burning AI budget).
+		//
+		// Scope by `started_at >= NOW() - 30 minutes` instead: long enough
+		// to span half a dozen back-to-back ticks, short enough that an
+		// older legitimate retry from yesterday does not poison today.
+		$cutoff = gmdate('Y-m-d H:i:s', time() - (30 * MINUTE_IN_SECONDS));
+		$rows = $wpdb->get_results($wpdb->prepare(
 			"SELECT payload, started_at
 			FROM {$wpdb->prefix}epv2_runs
 			WHERE job_name = 'process'
 			  AND status IN ('finished', 'finished_with_errors')
+			  AND started_at >= %s
 			ORDER BY id DESC
-			LIMIT 30"
-		);
+			LIMIT 30",
+			$cutoff
+		));
 		$matching = 0;
 		foreach ((array) $rows as $row) {
-			if ($updated_at > 0) {
-				$started_at = strtotime((string) ($row->started_at ?? '')) ?: 0;
-				if ($started_at > 0 && $started_at < $updated_at) {
-					continue;
-				}
-			}
 			$payload = json_decode((string) ($row->payload ?? ''), true);
 			$payload = is_array($payload) ? $payload : [];
 			$run_item_id = (int) ($payload['processed_item_id'] ?? $payload['last_item_id'] ?? 0);
 			if ($run_item_id !== $item_id) {
 				continue;
 			}
-			$matching++;
 			$result = sanitize_key((string) ($payload['result'] ?? ''));
 			$before = sanitize_key((string) ($payload['pipeline_stage_before'] ?? ''));
 			$after = sanitize_key((string) ($payload['pipeline_stage_after'] ?? ''));
@@ -5900,8 +5950,11 @@ final class EPV2_AI_Processor {
 					)
 				);
 			if (! $is_rebuild_loop) {
+				// A successful non-loop run interrupts the streak; don't
+				// terminalize an item that recently progressed.
 				return false;
 			}
+			$matching++;
 			if ($matching >= $threshold) {
 				return true;
 			}

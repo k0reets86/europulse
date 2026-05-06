@@ -224,10 +224,17 @@ if (! defined('ABSPATH')) {
 			throw new RuntimeException($response->get_error_message());
 		}
 		$code = (int) wp_remote_retrieve_response_code($response);
-		$body = wp_remote_retrieve_body($response);
-		$data = json_decode($body, true);
+		$body = (string) wp_remote_retrieve_body($response);
+		try {
+			$data = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+		} catch (\JsonException $e) {
+			throw new RuntimeException(
+				'AI transport JSON decode failed (' . $code . '): ' . $e->getMessage()
+				. ' | body: ' . wp_strip_all_tags(substr($body, 0, 280))
+			);
+		}
 		if ($code < 200 || $code >= 300 || ! is_array($data)) {
-			throw new RuntimeException('AI transport error: ' . $code . ' ' . wp_strip_all_tags(substr((string) $body, 0, 280)));
+			throw new RuntimeException('AI transport error: ' . $code . ' ' . wp_strip_all_tags(substr($body, 0, 280)));
 		}
 		$result = $extractor($data);
 		if (empty($result['text'])) {

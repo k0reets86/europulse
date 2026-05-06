@@ -226,8 +226,21 @@ final class EPV2_Deduplicator {
 			'fields' => 'ids',
 			'ignore_sticky_posts' => true,
 		]);
-		foreach ($recent_posts as $post_id) {
-			$post_id = (int) $post_id;
+		$recent_post_ids = array_values(array_filter(array_map('intval', (array) $recent_posts)));
+		if ($recent_post_ids !== []) {
+			// Prime the post / meta / term caches once instead of paying
+			// three cache misses per iteration (get_post_meta + get_the_title
+			// + wp_get_post_categories = 3 separate lookups per post).
+			update_post_caches(get_posts([
+				'post_type' => 'post',
+				'post__in' => $recent_post_ids,
+				'posts_per_page' => count($recent_post_ids),
+				'orderby' => 'post__in',
+				'no_found_rows' => true,
+				'ignore_sticky_posts' => true,
+			]), 'post', true, true);
+		}
+		foreach ($recent_post_ids as $post_id) {
 			$post_topic_key = self::canonical_topic_key((string) get_post_meta($post_id, '_epv2_topic_label', true));
 			$post_title = (string) get_the_title($post_id);
 			$post_categories = wp_get_post_categories($post_id, ['fields' => 'slugs']);
@@ -264,8 +277,12 @@ final class EPV2_Deduplicator {
 				'fields'              => 'ids',
 				'ignore_sticky_posts' => true,
 			]);
-			foreach ((array) $fp_post_ids as $fp_pid) {
-				$fp_pid  = (int) $fp_pid;
+			$fp_post_ids = array_values(array_filter(array_map('intval', (array) $fp_post_ids)));
+			if ($fp_post_ids !== []) {
+				// Single SELECT instead of N get_post_meta calls.
+				update_meta_cache('post', $fp_post_ids);
+			}
+			foreach ($fp_post_ids as $fp_pid) {
 				$raw     = get_post_meta($fp_pid, '_epv2_story_fingerprint', true);
 				$post_fp = is_string($raw) ? json_decode($raw, true) : (is_array($raw) ? $raw : null);
 				if (! is_array($post_fp)) {

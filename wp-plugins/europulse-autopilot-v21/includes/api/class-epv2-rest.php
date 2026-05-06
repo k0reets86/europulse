@@ -118,7 +118,26 @@ final class EPV2_REST {
 				$provided = trim(substr($auth, 7));
 			}
 		}
-		return $provided !== '' && hash_equals($expected, $provided);
+		// Token check must use hash_equals to avoid timing attacks; both
+		// strings must be the same length, otherwise hash_equals returns
+		// false with no leak. Empty $provided short-circuits.
+		if ($provided === '' || strlen($provided) !== strlen($expected)) {
+			return false;
+		}
+		$matched = hash_equals($expected, $provided);
+		if ($matched && class_exists('EPV2_Logger')) {
+			// Audit trail: log every successful token auth so a leaked
+			// secret or unexpected caller is observable post-hoc. The
+			// token itself is never logged.
+			$user_id = get_current_user_id();
+			EPV2_Logger::info('rest', 'bridge token auth ok', [
+				'route'    => (string) $request->get_route(),
+				'method'   => (string) $request->get_method(),
+				'user_id'  => $user_id,
+				'remote_ip' => isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '',
+			]);
+		}
+		return $matched;
 	}
 
 	public static function bridge_health(WP_REST_Request $request): WP_REST_Response {

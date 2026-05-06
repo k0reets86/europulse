@@ -1,5 +1,16 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-06 09:05 UTC — staged→queued fix, categorizer hardening
+
+- [x] Collector inner `break` removed → `continue` (commit `161a466`). Effective `max_collect_per_category` now respected. 231 staged → 217 queued (was 11).
+- [x] Categorizer 'world' keyword expansion + smarter europa/welt fallback (commit `f327a8f`). Cruise-ship hantavirus, Romania PM, Iran-US, China-fireworks all route to welt now.
+- [x] 12 ready_publish with publish-grade text quality (1–3 KB DE/UK/EN, accurate translations, source attribution, source-domain media).
+- [ ] Re-categorize sweep on legacy payloads: some old ready_publish/ready_review rows carry pre-fix mis-categorizations (1157 Phagentherapie → politik, 1160 Leipzig crime → politik, 1152 cruise ship → politik). Needs `EPV2_AI_Processor::normalize_persisted_queue_contracts()` or a small targeted re-categorize pass.
+- [ ] Watch for Handelsblatt source bias overcategorizing into wirtschaft on next pulses (set bias=wirtschaft in DB earlier — may be too sticky).
+- [ ] BMW row got Pexels stock when BILD source-domain image was available — investigate why source-host media extraction missed.
+- [ ] Operator review of the 12 ready_publish rows: read each in WP admin, decide which to publish via `scripts/epv2_pulse.sh publish` and which to send back to manual edit.
+- [ ] HTML reader fails on NDR live-ticker / paywall pages (returned 404 / meta-only). Worth adding a `pick_paragraphs` fallback that targets `<article>` / Schema.org JSON-LD when the default xpath finds <300 chars.
+
 ## Current Runtime Status 2026-05-06 07:25 UTC — source cleanup + new top-tier feeds
 
 - [x] Hoisted worker-blocker terminalization to all stages, lowered borderline uplift floor to 30 for heavyweight categories (commit `4602acc`).

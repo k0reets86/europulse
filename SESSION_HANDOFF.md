@@ -56,6 +56,26 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 09:05 UTC — staged→queued fix, categorizer hardening, 12 publish-ready
+
+- `EPV2_Collector::commit_staged_candidates()` was hard-capping every collect pulse to one row per category via an inner `break` after the first successful ingest, regardless of `max_collect_per_category`. Replaced with `continue` (commit `161a466`). Effect on the next pulse: 231 staged_candidate × 217 queued (was 246 → 11). The collect_limit guard at the top of the loop now does its real job.
+- Categorizer hardened (commit `f327a8f`):
+  - Extended the 'world' keyword list with country names (Spanien/Niederlande/Frankreich/Italien/Türkei/Romania/Korea/Indonesien/Belarus/Kuba/etc.), pandemic & disease hooks (hantavirus, ebola, cholera, pandemie, outbreak), travel/global hooks (Kreuzfahrtschiff/cruise ship, internationale Gewässer), and supranational signals (G7/G20/OPEC/WHO/UNESCO/Weltbank).
+  - Last-resort fallback no longer blindly returns `'deutschland'`. If source bias is `'europa'` or `'welt'` it now uses that, so BBC / Reuters / DW international stories don't land in a domestic-Germany rubric.
+  - Verified: cruise-ship hantavirus, Romania PM confidence-vote, Iran-US, China-fireworks all now route to `welt`. Bayern-Hymnenpflicht → `bayern` (was `deutschland`). German inflation still → `deutschland`.
+- Worker-blocker terminalization hoisted to all stages (commit `4602acc`). Three stuck rows triaged (`1138`/`1140`/`1141`).
+- Per-category uplift floor lowered from 34 → 30 for politik/welt/ukraine/wirtschaft/deutschland (same commit). Score 30-33 strong political signal → C/review instead of D/reject.
+- 12 ready_publish across pulses, all with publish-grade DE/UK/EN bodies (1.0–3.2 KB), correct source attribution, real source-domain media. Sample quality:
+  - `1155` BBC Ukrainian: "Понад 20 загиблих..." accurate factual translation, 946/963/990 DE/UK/EN.
+  - `1157` FAZ: Phagentherapie at Frankfurt clinic, 3198 DE chars, native UK with proper medical terminology.
+  - `1160` Tagesschau: Leipzig Amokfahrer, 2558 DE chars, accurate UK rendering.
+  - `1163` BILD: BMW Quartalsgewinn -23%, 2294 DE chars.
+- Remaining quality issues:
+  - Old payloads still carry mis-categorizations (1157 Phagentherapie → politik, 1160 Leipzig crime → politik). New categorizer fixes only apply to new pulse runs; legacy payloads need a re-categorize sweep or operator manual fix.
+  - 1163 BMW used Pexels stock photo. Source-host media (BILD's own image) would be preferred; the media gate fell back to stock when source-image extraction missed.
+  - Some `wirtschaft` source bias (Handelsblatt) overcategorizes non-business stories. Watch for next pulse and tighten if it persists.
+- Live state: queue 252 rows (204 new from latest pulse + 12 ready_publish + 25 ready_review + 10 rejected + earlier strays). Pause flags ON. AI primary openai/gpt-5-mini, fallback deepseek.
+
 ## Latest Handoff 2026-05-06 07:25 UTC — source cleanup + 15 top-tier feeds added
 
 - Worker-blocker terminalization hoisted (commit `4602acc`): publish_finish / translate_uk / translate_en / translate_finish now terminalize to ready_review when worker returns blockers or `outcome=ready_review`. Previously only rebuild_bundle did this; rows like `1138`/`1140`/`1141` were cycling on 30-min cooldowns instead of moving to manual review. Triaged the three stuck rows manually to ready_review.

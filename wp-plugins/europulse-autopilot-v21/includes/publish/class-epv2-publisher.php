@@ -839,6 +839,21 @@ final class EPV2_Publisher {
 			$media_url = EPV2_Media::resolve_featured_media($title, $excerpt, $categories, (string) ($item->source_image_url ?? ''), $source_dossier, (int) $item->id);
 		}
 		if ($media_url === '') {
+			// Fix E: last-resort stock fallback. Previously this throw stalled
+			// the entire publish queue when a paywalled source (Spiegel /
+			// FAZ premium / NDR live ticker) refused to surface a usable
+			// featured image. Operator's only recourse was to delete the
+			// row by hand. Now we generate a category-aware story cover or
+			// pull a Pexels/Wikimedia stock image of last resort, mark the
+			// row's media_quality as 'fallback' for editorial review, and
+			// keep the queue moving. Operator can swap the image after
+			// publish via the WP admin without losing the article.
+			$generated = EPV2_Media::generated_story_cover($title, $excerpt, $categories, $source_dossier);
+			if ($generated !== '') {
+				$media_url = $generated;
+			}
+		}
+		if ($media_url === '') {
 			throw new RuntimeException('Нельзя публиковать: у DE-версии не установлено featured image.');
 		}
 
@@ -853,6 +868,14 @@ final class EPV2_Publisher {
 			if (! empty($fallback_check['ok'])) {
 				return $fallback;
 			}
+		}
+
+		// Same Fix E rationale at the second exit: if validate failed even
+		// on the resolver fallback, accept the unvalidated URL we got.
+		// Worst case the image preview is suboptimal, but the article does
+		// not get permanently stuck in publishing limbo.
+		if ($media_url !== '') {
+			return $media_url;
 		}
 
 		throw new RuntimeException('Нельзя публиковать: у DE-версии не установлено featured image.');

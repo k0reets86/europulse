@@ -458,13 +458,60 @@ final class EPV2_Collector {
 			return true;
 		}
 
-		$core_geo = preg_match('/\b(deutschland|bundes|berlin|bayern|m[üu]nchen|europa|eu\b|europe|ukraine|ukrain|україн|украин|russland|russian|moskau|br[üu]ssel|nato)\b/iu', $text) === 1;
-		$us_local = preg_match('/\b(white house|trump|us teacher|teacher pay|american school|washington dinner|press dinner|state governor|senate bill|u\\.s\\.|usa)\b/iu', $text) === 1;
+		// Fix A: core_geo expanded with international hubs that the
+		// previous list ignored. Without these, every Trump-Hormuz /
+		// Israel-Iran / China-Taiwan story got hard-blocked because it
+		// contained a US/biotech token but no German/EU/Russia/Ukraine
+		// term. Now any major geopolitical region counts as core.
+		$core_geo = preg_match(
+			'/\b('
+			. 'deutschland|bundes|berlin|bayern|m[üu]nchen|europa|eu\b|europe|'
+			. 'ukraine|ukrain|україн|украин|russland|russian|moskau|kreml|'
+			. 'br[üu]ssel|nato|g7|g20|opec|'
+			. 'iran|iranian|israel|israeli|gaza|nahost|middle\s+east|hormuz|hormus|persian\s+gulf|'
+			. 'china|chinese|beijing|peking|taiwan|taiwanese|nordkorea|south\s+korea|'
+			. 'syrien|syrian|irak|iraq|libanon|lebanon|t[üu]rkei|turkey|erdogan|'
+			. 'belarus|wei[ßs]russland|polen|poland|tschechien|czech|slowakei|slovakia|'
+			. '[öo]sterreich|austria|ungarn|hungary|rumänien|rumaenien|romania|'
+			. 'serbien|serbia|kroatien|croatia|moldau|moldova|'
+			. 'who\b|world\s+health\s+organization|imf|world\s+bank|weltbank|unesco|unicef|'
+			. 'bbc|reuters|associated\s+press'
+			. ')\b/iu',
+			$text
+		) === 1;
+		$us_local = preg_match(
+			// Fix A: only block CLEARLY US-LOCAL items (school district
+			// elections, state senate races, town-level news). General
+			// Trump / White House / USA mentions in international news
+			// are core_geo material now.
+			'/\b('
+			. 'school\s+district|local\s+schools|state\s+senate\s+(race|district|seat)|'
+			. 'u\.s\.\s+teacher\s+pay|american\s+school\s+district|washington\s+dinner|'
+			. 'press\s+dinner|state\s+governor\s+race|county\s+commissioner|'
+			. 'redistricting|local\s+ballot|local\s+primary|town\s+hall|'
+			. 'mock\s+draft|nfl\s+mock|nhl\s+mock|college\s+football|'
+			. 'sheriff(?!s)\b|fbi\s+(?:probe|investigation)|kash\s+patel'
+			. ')\b/iu',
+			$text
+		) === 1;
 		if ($us_local && ! $core_geo) {
 			return true;
 		}
 
-		$biotech_pr = preg_match('/\b(therapeutics|phase\\s*[123]|clinical trial|gene editing|reports positive|hereditary angioedema|fda)\b/iu', $text) === 1;
+		// Fix B: biotech_pr was blocking ALL FDA / Phase-trial / Therapeutics
+		// mentions, which killed regulatory news of global interest
+		// (vaccine policy, drug approvals). Narrow to true PR/press-release
+		// language; major regulatory actions still flow through.
+		$biotech_pr = preg_match(
+			'/\b('
+			. '(reports|announces|reported)\s+positive\s+(phase|results|topline)|'
+			. 'topline\s+results|pivotal\s+trial\s+results|'
+			. 'investor\s+(presentation|update|conference)|'
+			. 'press\s+release.{0,80}(therapeutics|biotech|pharmaceutical)|'
+			. 'hereditary\s+angioedema|orphan\s+drug\s+designation'
+			. ')\b/iu',
+			$text
+		) === 1;
 		if ($biotech_pr && ! $core_geo) {
 			return true;
 		}
@@ -529,6 +576,18 @@ final class EPV2_Collector {
 		} elseif ($decision === 'review' && $score >= 44 && ($seriousCategory || $trusted_primary)) {
 			$window = max($window, 18 * HOUR_IN_SECONDS);
 		} elseif ($decision === 'review' && $score >= 40 && $trusted_primary && $seriousCategory) {
+			$window = max($window, 18 * HOUR_IN_SECONDS);
+		} elseif (
+			// Fix C: any heavyweight category C-tier item with a meaningful
+			// score (>=30) and a non-reject/non-low decision deserves the
+			// 18h window. Yesterday-evening politik/welt/ukraine pieces
+			// from Tagesschau / NDR / FAZ were getting freshness-blocked
+			// at 9-17h despite landing in C/review after the borderline
+			// uplift.
+			in_array($decision, ['review', 'strong', 'priority'], true)
+			&& $score >= 30
+			&& $seriousCategory
+		) {
 			$window = max($window, 18 * HOUR_IN_SECONDS);
 		}
 

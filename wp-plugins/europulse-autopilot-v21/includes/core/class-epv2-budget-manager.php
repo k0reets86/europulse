@@ -1171,6 +1171,28 @@ final class EPV2_Budget_Manager {
 			|| $priority >= 6
 			|| self::looks_official($url);
 
+		// Fix D: named-politician / named-leader / named-state-org signal.
+		// Stories about Merz / Scholz / Trump / Putin / Zelensky scoring
+		// 30-33 in heavyweight categories are mainstream news and should
+		// reach C/review, not D/reject. The scoring routine already
+		// handles general urgency / public_impact, but name-only headlines
+		// often miss those weights.
+		if (! $hasMeaningfulSignal) {
+			$politician_pattern = '/\b('
+				. 'merz|scholz|spahn|habeck|baerbock|lindner|s[öo]der|dobrindt|wagenknecht|weidel|chrupalla|'
+				. 'trump|biden|harris|vance|musk|rubio|hegseth|'
+				. 'putin|zelensky|selensky|selenskyj|sirskij|syrskyj|sirskyi|syrskyi|kremlin|kreml|'
+				. 'macron|le\s+pen|m[ée]lenchon|attal|barnier|'
+				. 'meloni|salvini|berlusconi|'
+				. 'erdogan|netanyahu|netanjahu|abbas|haniyeh|nasrallah|raisi|'
+				. 'xi\s+jinping|kim\s+jong[\s-]?un|modi|lula|orb[áa]n|fico|tusk|nawrocki|'
+				. 'starmer|sunak|farage|von\s+der\s+leyen|metsola|costa|kallas'
+				. ')\b/iu';
+			if (preg_match($politician_pattern, $text) === 1) {
+				$hasMeaningfulSignal = true;
+			}
+		}
+
 		if (! $hasMeaningfulSignal) {
 			return $score;
 		}

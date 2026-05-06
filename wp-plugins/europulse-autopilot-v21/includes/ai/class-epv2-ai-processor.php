@@ -1058,7 +1058,30 @@ final class EPV2_AI_Processor {
 								$terminal_gate_global = EPV2_Publish_Gate::evaluate($item, $payload, [
 									'context' => 'worker_terminal_outcome',
 								]);
-								$terminal_state_global = empty($terminal_gate_global['selection_publishable']) ? 'rejected' : 'ready_review';
+								// Fix E: don't mass-reject items whose only sin is a paywalled
+								// thin-source feed. The original ingest score already cleared the
+								// publish_c threshold, and the upfront story_card explicitly
+								// labels the piece as publishable. Worker re-scoring during
+								// rebuild often drifts to selection.decision='low' purely because
+								// the rewrite saw only the thin RSS excerpt — that's a tooling
+								// artefact, not an editorial verdict. Trust the ingest signal +
+								// card and route to ready_review for human triage instead of
+								// killing the row.
+								$ingest_score = (int) ($item->story_score ?? 0);
+								$story_card_payload = is_array($payload['_meta']['story_card'] ?? null)
+									? $payload['_meta']['story_card']
+									: [];
+								$card_estimate = strtolower((string) ($story_card_payload['publishable_estimate'] ?? ''));
+								$only_thin_blocker =
+									count($worker_blockers_global) === 1
+									&& stripos($worker_blockers_global[0] ?? '', 'too thin') !== false;
+								$strong_ingest = $ingest_score >= 40;
+								$strong_card = in_array($card_estimate, ['high', 'medium'], true);
+								$selection_publishable = ! empty($terminal_gate_global['selection_publishable']);
+								if (! $selection_publishable && $only_thin_blocker && ($strong_ingest || $strong_card)) {
+									$selection_publishable = true;
+								}
+								$terminal_state_global = $selection_publishable ? 'ready_review' : 'rejected';
 								$terminal_notes_global = [
 									'selection' => $analysis,
 									'gate' => $gate,

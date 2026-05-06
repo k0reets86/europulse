@@ -1093,6 +1093,26 @@ final class EPV2_Queue {
 				self::recent_process_attempt_count((int) $item->id, $stage, 24 * HOUR_IN_SECONDS)
 			);
 			$selection_blocked = empty($gate['selection_publishable']);
+			// Don't quarantine items whose ingest score / upfront story
+			// card already cleared the publish bar. The worker's rebuild
+			// drift can briefly relabel `_meta.selection.decision` as low
+			// when it sees a thin Google-News stub, but ingest scored the
+			// item at C-tier+ and the card said publishable_estimate=high.
+			// Treat those signals as authoritative — quarantine is for
+			// genuinely-rejected content, not for a transient mid-pipeline
+			// re-score.
+			if ($selection_blocked) {
+				$ingest_score = (int) ($item->story_score ?? 0);
+				$card_estimate = '';
+				if (is_array($payload['_meta']['story_card'] ?? null)) {
+					$card_estimate = strtolower((string) ($payload['_meta']['story_card']['publishable_estimate'] ?? ''));
+				}
+				$strong_ingest = $ingest_score >= 40;
+				$strong_card = in_array($card_estimate, ['high', 'medium'], true);
+				if ($strong_ingest || $strong_card) {
+					$selection_blocked = false;
+				}
+			}
 			$limit_for_stage = self::workflow_stage_attempt_limit($stage);
 			$retry_exhausted = $stage !== '' && $attempts >= $limit_for_stage;
 			$retry_at = self::workflow_not_before_timestamp($item);

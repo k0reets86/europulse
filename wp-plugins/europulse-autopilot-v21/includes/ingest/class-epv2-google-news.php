@@ -95,6 +95,52 @@ final class EPV2_Google_News {
         return array_slice( $items, 0, $limit );
     }
 
+    /**
+     * Ensure a Google News RSS URL restricts results to recent items.
+     *
+     * Audit of `ep_epv2_selection_audit` (2026-04-28..2026-05-03) showed
+     * many configured Google News searches were returning items thousands
+     * of hours old (e.g. "Politics EN" averaged 5400h, ~226 days). The
+     * `when:Nd` query operator forces Google News to filter results to
+     * the last N days, cutting these archive matches without changing
+     * the search terms. Idempotent: skips URLs that already carry a
+     * `when:` operator.
+     *
+     * @param string $url   Source URL as configured in ep_epv2_sources.url.
+     * @param int    $days  Window in days (default 14).
+     */
+    public static function ensure_recent_filter( string $url, int $days = 14 ): string {
+        if ( $url === '' ) {
+            return $url;
+        }
+        $parts = wp_parse_url( $url );
+        if ( ! is_array( $parts ) ) {
+            return $url;
+        }
+        $host = strtolower( (string) ( $parts['host'] ?? '' ) );
+        if ( $host !== 'news.google.com' ) {
+            return $url;
+        }
+        $query = (string) ( $parts['query'] ?? '' );
+        if ( $query === '' ) {
+            return $url;
+        }
+        parse_str( $query, $params );
+        if ( ! isset( $params['q'] ) ) {
+            return $url;
+        }
+        $q = (string) $params['q'];
+        if ( stripos( $q, 'when:' ) !== false ) {
+            return $url;
+        }
+        $days = max( 1, min( 90, $days ) );
+        $params['q'] = $q . ' when:' . $days . 'd';
+        $rebuilt_query = http_build_query( $params, '', '&', PHP_QUERY_RFC3986 );
+        $scheme = (string) ( $parts['scheme'] ?? 'https' );
+        $path   = (string) ( $parts['path'] ?? '' );
+        return $scheme . '://' . $host . $path . '?' . $rebuilt_query;
+    }
+
     public static function resolve_url( string $url ): string {
         $url = esc_url_raw( trim( $url ) );
         if ( ! self::is_google_news_wrapper_url( $url ) ) {

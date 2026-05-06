@@ -142,7 +142,15 @@ final class EPV2_Collector {
 			return EPV2_Feed_Reader::fetch((string) $source->url, false);
 		}
 		if ($type === 'google_news') {
-			return EPV2_Feed_Reader::fetch((string) $source->url, true);
+			// Inject when:14d into Google News searches that lack a time
+			// filter. Audit of ep_epv2_selection_audit found many GN
+			// queries returning items thousands of hours old; this caps
+			// the search horizon at 14 days without changing the query.
+			$gn_url = (string) $source->url;
+			if (class_exists('EPV2_Google_News') && method_exists('EPV2_Google_News', 'ensure_recent_filter')) {
+				$gn_url = EPV2_Google_News::ensure_recent_filter($gn_url, 14);
+			}
+			return EPV2_Feed_Reader::fetch($gn_url, true);
 		}
 		if ($type === 'scrape') {
 			$rules = json_decode((string) ($source->parse_rules ?? ''), true);

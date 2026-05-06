@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from .pipeline import run_pipeline, build_normalized_payload
 from .contracts import WorkerRequest
+from .story_card import build_story_card
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="EPV2 Worker", version="2.1")
@@ -50,6 +51,55 @@ class ProcessRequest(BaseModel):
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "version": "2.1"}
+
+
+class AnalyzeStoryRequest(BaseModel):
+    queue_id: int = 0
+    title: str = ""
+    excerpt: str = ""
+    content: str = ""
+    url: str = ""
+    source_name: str = ""
+    language_hint: str = ""
+    category_bias: str = ""
+    openai_api_key: str = ""
+    deepseek_api_key: str = ""
+    openai_model: str = "gpt-5-mini"
+    worker_token: str = ""
+
+
+@app.post("/analyze_story")
+async def analyze_story(
+    req: AnalyzeStoryRequest, x_epv2_worker_token: str = Header(default="")
+) -> JSONResponse:
+    """Single upfront semantic pass that builds a structured story card.
+
+    PHP processor calls this once per fresh queue row before the rewriter
+    runs. The card is stored in `ai_payload._meta.story_card` and consumed
+    by every later stage (categorizer override, media resolver, rewriter
+    structure hints, SEO, tagger).
+    """
+    expected_token = os.getenv("EPV2_WORKER_TOKEN", "").strip()
+    provided_token = (x_epv2_worker_token or req.worker_token or "").strip()
+    if expected_token and provided_token != expected_token:
+        raise HTTPException(status_code=403, detail="Invalid worker token")
+    try:
+        card = await build_story_card(
+            title=req.title,
+            excerpt=req.excerpt,
+            body=req.content,
+            url=req.url,
+            source_name=req.source_name,
+            language_hint=req.language_hint,
+            category_bias=req.category_bias,
+            openai_api_key=req.openai_api_key,
+            deepseek_api_key=req.deepseek_api_key,
+            openai_model=req.openai_model or "gpt-5-mini",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Story card error for queue_id=%s", req.queue_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return JSONResponse(content={"queue_id": req.queue_id, "card": card.to_dict()})
 
 
 @app.post("/process")

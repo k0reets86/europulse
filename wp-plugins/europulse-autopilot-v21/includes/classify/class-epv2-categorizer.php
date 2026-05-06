@@ -445,6 +445,30 @@ final class EPV2_Categorizer {
 		return 'deutschland';
 	}
 
+	/**
+	 * Override the heuristic category with the AI-built story card when its
+	 * confidence is high enough. Story card is built once upfront by
+	 * `EPV2_Story_Card_Builder::build()` and lives in `_meta.story_card`.
+	 * Falls back to the heuristic categorizer when the card is missing or
+	 * low-confidence.
+	 */
+	public static function refine_with_story_card(string $current, array $story_card = [], float $min_confidence = 0.6): string {
+		if ($story_card === []) {
+			return $current;
+		}
+		if (! class_exists('EPV2_Story_Card_Builder')) {
+			return $current;
+		}
+		if (! EPV2_Story_Card_Builder::category_is_trusted($story_card, $min_confidence)) {
+			return $current;
+		}
+		$primary = (string) ($story_card['category']['primary'] ?? '');
+		if ($primary === '') {
+			return $current;
+		}
+		return self::canonical_slug($primary);
+	}
+
 	public static function refine_with_event_context(string $current, array $dossier = [], string $title = '', string $content = ''): string {
 		$current = sanitize_title($current);
 		$event = is_array($dossier['event_context'] ?? null) ? $dossier['event_context'] : [];

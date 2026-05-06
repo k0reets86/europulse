@@ -93,6 +93,60 @@ final class EPV2_AI_Processor {
 					break;
 					}
 					self::log_process_item_step('after_decode_existing_payload', (int) $item->id, ['run_id' => $run, 'has_existing_payload' => $existing_payload !== [] ? 1 : 0]);
+					// Story-card upfront pass. Build once per item and cache
+					// in `_meta.story_card`. Every later stage (worker rewrite,
+					// translate, publish_finish, media resolver, tagger, SEO)
+					// reads the same card. Worker-side rewriter receives it
+					// inside existing_payload, so its rewrite prompt is
+					// grounded in the same semantic snapshot the categorizer
+					// used.
+					if (
+						class_exists('EPV2_Story_Card_Builder')
+						&& empty($existing_payload['_meta']['story_card'])
+					) {
+						$story_card = EPV2_Story_Card_Builder::build($source_item, (array) ($existing_payload['_meta']['source_dossier'] ?? []));
+						if (! empty($story_card['success'])) {
+							$existing_payload = EPV2_Story_Card_Builder::attach_to_payload($existing_payload, $story_card);
+							// Persist immediately so subsequent ticks reuse it.
+							EPV2_Queue::update_fields((int) $item->id, [
+								'ai_payload' => wp_json_encode($existing_payload, JSON_UNESCAPED_UNICODE),
+							]);
+							self::log_process_item_step('story_card_built_upfront', (int) $item->id, [
+								'run_id' => $run,
+								'category' => (string) ($story_card['category']['primary'] ?? ''),
+								'confidence' => (float) ($story_card['category']['confidence'] ?? 0.0),
+								'estimate' => (string) ($story_card['publishable_estimate'] ?? ''),
+								'duration_ms' => self::duration_ms_since($item_started_at),
+							]);
+							// Apply story-card category override to category_final
+							// before any worker call so downstream consumers see
+							// the right category from the very first stage.
+							if (
+								class_exists('EPV2_Categorizer')
+								&& EPV2_Story_Card_Builder::category_is_trusted($story_card, 0.6)
+							) {
+								$current_cat = (string) ($source_item->category_final ?? $source_item->category_proposed ?? '');
+								$override = EPV2_Categorizer::refine_with_story_card($current_cat, $story_card, 0.6);
+								if ($override !== '' && $override !== $current_cat) {
+									EPV2_Queue::update_fields((int) $item->id, [
+										'category_final' => $override,
+									]);
+									$source_item = EPV2_Queue::get_item((int) $item->id) ?: $source_item;
+									self::log_process_item_step('category_overridden_by_story_card_upfront', (int) $item->id, [
+										'before' => $current_cat,
+										'after' => $override,
+										'confidence' => (float) ($story_card['category']['confidence'] ?? 0.0),
+									]);
+								}
+							}
+						} else {
+							self::log_process_item_step('story_card_build_failed', (int) $item->id, [
+								'run_id' => $run,
+								'error' => (string) ($story_card['error'] ?? 'unknown'),
+								'duration_ms' => self::duration_ms_since($item_started_at),
+							]);
+						}
+					}
 					$stored_pipeline_stage = self::payload_pipeline_stage($existing_payload);
 					$payload_for_stage = $existing_payload !== [] ? self::normalize_existing_payload($existing_payload, false) : [];
 					self::log_process_item_step('after_normalize_existing_payload', (int) $item->id, ['run_id' => $run, 'has_payload_for_stage' => $payload_for_stage !== [] ? 1 : 0]);
@@ -1955,6 +2009,17 @@ final class EPV2_AI_Processor {
 			if ($payload === []) {
 				throw new RuntimeException('External worker returned empty payload');
 			}
+			// Preserve the upfront story_card across worker round-trips. The
+			// worker rebuilds `_meta` from scratch and would otherwise drop
+			// the card, forcing every later stage to either rebuild it (extra
+			// AI cost) or fall back to the keyword categorizer.
+			$existing_card = is_array($existing_payload['_meta']['story_card'] ?? null)
+				? $existing_payload['_meta']['story_card']
+				: [];
+			if ($existing_card !== []) {
+				$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+				$payload['_meta']['story_card'] = $existing_card;
+			}
 			// External worker already returns a normalized payload for the requested
 			// stage. Re-running heavy finalization here reintroduces the same long
 			// blocking path we are trying to remove from the parent process.
@@ -2054,6 +2119,26 @@ final class EPV2_AI_Processor {
 			]);
 		}
 		$stored_dossier = self::compact_source_dossier($dossier, false);
+
+		// Build the upfront story card. This is the single AI pass that
+		// produces a structured semantic snapshot (category, geography,
+		// entities, key facts, tags, media hints, SEO hints, publishability)
+		// that every later stage consumes. We attempt it once per generated
+		// review payload; on worker failure we fall back to the heuristic
+		// categorizer below.
+		$story_card = [];
+		if (class_exists('EPV2_Story_Card_Builder')) {
+			$story_card_started_at = microtime(true);
+			$story_card = EPV2_Story_Card_Builder::build($item, $dossier);
+			self::log_generate_review_payload_step('story_card_built', $item, [
+				'duration_ms' => self::duration_ms_since($story_card_started_at),
+				'success' => ! empty($story_card['success']) ? 1 : 0,
+				'category' => (string) ($story_card['category']['primary'] ?? ''),
+				'confidence' => (float) ($story_card['category']['confidence'] ?? 0.0),
+				'estimate' => (string) ($story_card['publishable_estimate'] ?? ''),
+			]);
+		}
+
 		$categorize_started_at = microtime(true);
 		$detected_primary = EPV2_Categorizer::detect(
 			(string) ($dossier['primary']['title'] ?? $item->original_title ?? ''),
@@ -2068,6 +2153,22 @@ final class EPV2_AI_Processor {
 		);
 		if ($refined_primary !== '') {
 			$categories = EPV2_Review::normalize_categories($refined_primary);
+		}
+		// Story-card override: if AI says category with confidence ≥ 0.6,
+		// trust it over the keyword heuristic. This fixes the 'cruise ship
+		// hantavirus' → politik / 'Phagentherapie' → politik class of
+		// mis-routings the keyword categorizer cannot correct.
+		if ($story_card !== [] && class_exists('EPV2_Story_Card_Builder')) {
+			$current_primary = (string) ($categories[0] ?? '');
+			$card_primary = EPV2_Categorizer::refine_with_story_card($current_primary, $story_card, 0.6);
+			if ($card_primary !== '' && $card_primary !== $current_primary) {
+				$categories = EPV2_Review::normalize_categories($card_primary);
+				self::log_generate_review_payload_step('category_overridden_by_story_card', $item, [
+					'before' => $current_primary,
+					'after' => $card_primary,
+					'confidence' => (float) ($story_card['category']['confidence'] ?? 0.0),
+				]);
+			}
 		}
 		$fallback_started_at = microtime(true);
 		$fallback = EPV2_Review::build_payload_without_ai_from_dossier($item, $categories, $style, $dossier, true);
@@ -2104,6 +2205,12 @@ final class EPV2_AI_Processor {
 		]);
 		$fallback['_meta']['source_dossier'] = $stored_dossier;
 		$fallback['_meta']['source_count'] = 1 + count((array) ($dossier['supporting'] ?? []));
+		// Persist the story card so downstream stages (worker rewrite, media
+		// resolver, tagger, SEO) can read the same semantic snapshot we just
+		// built. Stored once; downstream re-runs reuse the cached card.
+		if ($story_card !== []) {
+			$fallback['_meta']['story_card'] = $story_card;
+		}
 		if (self::context_analysis_requires_terminal_reject($context_analysis)) {
 			$fallback['_meta']['gate_mode'] = 'context_reject';
 			$fallback['_meta']['gate_reason'] = 'context analysis rejected item before AI rewrite';

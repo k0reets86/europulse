@@ -56,6 +56,23 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 07:25 UTC — source cleanup + 15 top-tier feeds added
+
+- Worker-blocker terminalization hoisted (commit `4602acc`): publish_finish / translate_uk / translate_en / translate_finish now terminalize to ready_review when worker returns blockers or `outcome=ready_review`. Previously only rebuild_bundle did this; rows like `1138`/`1140`/`1141` were cycling on 30-min cooldowns instead of moving to manual review. Triaged the three stuck rows manually to ready_review.
+- `EPV2_Budget_Manager::uplift_borderline_newsworthy_score` now fires from score 30 (was 34) for politik / welt / ukraine / wirtschaft / deutschland; lighter categories keep the 34 floor. Strong political signal at 30-33 now lands as C/review instead of D/reject.
+- **Source cleanup**. Sources table backup `backups/sources-pre-cleanup-20260506-071622.sql`. Disabled 37 consistently-broken feeds (0 queued vs 50+ rejected across the full audit window 2026-04-28..2026-05-06): all narrow Google News searches that were either redundant with Tagesschau/BR24 or returned archive matches; institutional German feeds that produce only protocol/press-release content (BAMF, BMAS, IW Köln, Bundesbank, Deutscher Bundestag); slow Munich service feeds (S-Bahn, MVG, Deutsche Bahn, Rathaus Umschau); zero-signal community/diaspora feeds; DW Europe/World/Germany EN whose RSS items mostly hit dedup or low_score; RIS München (council recommendations only). Active source count went 54 → 18 active before adding new feeds.
+- **Added 15 top-tier feeds**, all RSS, all verified live (HTTP 200 + ≥10 items returned):
+  - German (9): ZEIT Online, FAZ Aktuell, SPIEGEL Schlagzeilen, Tagesspiegel, Handelsblatt Top, WELT Topnews, Tagesschau direkt (replaces narrower existing feed), NDR Home, ZDF Nachrichten.
+  - Ukrainian (4): Ukrainska Pravda, LIGA.net, BBC Ukrainian, 24tv.ua.
+  - English about Europe / Ukraine (2): Kyiv Post, BBC Europe.
+  - Skipped because they returned 403/404 from outside the bot whitelist: Hromadske, Suspilne, Kyiv Independent, EPravda, NDR `/nachrichten/` endpoint, BBC German.
+- Total active sources now: 22 DE + 5 EN + 6 UK = **33** (was 54 with mostly-broken; now lean and healthier).
+- Validation pulse with the new lineup confirmed major lift:
+  - Top-staging new feeds: NDR Home (3 queued / 14 staged), Handelsblatt (2/13), BBC Europe (2/7), Ukrainska Pravda (1/15 staged with avg score 46.3), WELT (1/12), ZDF (1/12), FAZ (1/11), 24tv.ua (0/15 staged avg 41.3), LIGA.net (0/15), Kyiv Post (0/14 avg 49.9), Tagesspiegel (0/13).
+  - Outcome share for the pulse: 246 staged_candidate, 11 queued, 25 stale-reject (was 324), 18 low_score (was 256), 5 noise (was 136). **Selection-reject share dropped from ~95% to 12.5%**.
+  - 11 queued real-news items including `1145` "Ein Jahr Schwarz-Rot: Was haben neue Gesetze den Menschen gebracht?" (score 75 A-tier), `1146` "Aktuelles zum Krieg in der Ukraine" (62), `1147` UA "Окупанти вранці з дрона атакували цивільне авто на Сумщині" (55).
+- Live state: queue 35 rows (10 fresh `new` from this pulse + 5 ready_publish + 17 ready_review + 3 from triage). Both pause flags ON.
+
 ## Latest Handoff 2026-05-06 07:05 UTC — selection-reject false-positive fixes
 
 - Diagnostic dive into `ep_epv2_selection_audit` exposed two systemic false-positive classes that were rejecting the bulk of legitimate news:

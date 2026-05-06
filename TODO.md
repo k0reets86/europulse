@@ -1,5 +1,13 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-06 07:25 UTC — source cleanup + new top-tier feeds
+
+- [x] Hoisted worker-blocker terminalization to all stages, lowered borderline uplift floor to 30 for heavyweight categories (commit `4602acc`).
+- [x] Source cleanup: disabled 37 consistently-broken feeds (0 queued vs 50+ rejected over 2 weeks), kept 18 verified working ones, added 15 top-tier feeds (ZEIT/FAZ/SPIEGEL/Tagesspiegel/Handelsblatt/WELT/Tagesschau direkt/NDR Home/ZDF + Ukrainska Pravda/LIGA.net/BBC Ukrainian/24tv.ua + Kyiv Post/BBC Europe). Sources backup `backups/sources-pre-cleanup-20260506-071622.sql`. Validation pulse: reject share 95% → 12.5%; 246 staged_candidate vs 11 queued; new feeds account for the bulk of the staging lift.
+- [ ] Investigate why staged_candidate=246 only converts to queued=11 in one pulse. Per-category caps in `EPV2_Budget_Manager::should_keep_in_queue` or `EPV2_Category_Planner::decide_for_candidate` are likely throttling. Audit those gates and consider raising effective queue admission cap during tuning.
+- [ ] Try Hromadske / Suspilne / Kyiv Independent again with a different User-Agent or referrer — they responded 403 / 404 to a bare bot UA. Possible whitelist of `wp-cli` or browser UA needed.
+- [ ] Process the 11 fresh queued rows from the validation pulse and see how DE/UK/EN translations look with the source-content propagation fix landed earlier.
+
 ## Current Runtime Status 2026-05-06 07:05 UTC — selection-reject false-positive fixes
 
 - [x] Two systemic false-positive classes in selection scoring fixed (commit `12626dd`):

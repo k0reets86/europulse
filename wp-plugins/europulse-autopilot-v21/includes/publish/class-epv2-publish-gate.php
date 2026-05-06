@@ -62,10 +62,11 @@ final class EPV2_Publish_Gate {
 				$blockers[] = 'stage_contract';
 			}
 
-			$quality_publishable = self::quality_set_publishable($meta, 'quality')
-				&& self::quality_set_publishable($meta, 'seo_quality')
-				&& self::quality_set_publishable($meta, 'release_quality')
-				&& self::quality_set_publishable($meta, 'google_quality');
+			$brief_ticker = self::payload_is_brief_live_ticker($payload);
+			$quality_publishable = self::quality_set_publishable($meta, 'quality', $brief_ticker)
+				&& self::quality_set_publishable($meta, 'seo_quality', $brief_ticker)
+				&& self::quality_set_publishable($meta, 'release_quality', $brief_ticker)
+				&& self::quality_set_publishable($meta, 'google_quality', $brief_ticker);
 			if (! $quality_publishable) {
 				$blockers[] = 'quality_contract';
 			}
@@ -152,9 +153,34 @@ final class EPV2_Publish_Gate {
 		return EPV2_Queue::item_has_publish_limit_override($item) || EPV2_Queue::item_has_priority_publish_override($item);
 	}
 
-	private static function quality_set_publishable(array $meta, string $key): bool {
+	private static function quality_set_publishable(array $meta, string $key, bool $brief_ticker = false): bool {
 		$quality = is_array($meta[$key] ?? null) ? $meta[$key] : [];
-		return ! empty($quality['pass']) && (int) ($quality['score'] ?? 0) >= 90;
+		if (empty($quality['pass'])) {
+			return false;
+		}
+		$score = (int) ($quality['score'] ?? 0);
+		// Brief live-tickers from authoritative sources (Tagesschau, dpa, etc.)
+		// pick up "may be too short" warnings on release_quality / google_quality
+		// that drop scores into the 80s. The story_card already declared the
+		// item intentionally brief and high-publishable; trust that signal and
+		// allow ≥80 for those two scorers. Editorial + SEO scores still need 90+.
+		if ($brief_ticker && in_array($key, ['release_quality', 'google_quality'], true)) {
+			return $score >= 80;
+		}
+		return $score >= 90;
+	}
+
+	private static function payload_is_brief_live_ticker(array $payload): bool {
+		$card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
+		if ($card === []) {
+			return false;
+		}
+		$length_profile = sanitize_key((string) ($card['rewrite']['length_profile'] ?? ''));
+		if ($length_profile !== 'brief') {
+			return false;
+		}
+		$publishable = strtolower((string) ($card['publishable_estimate'] ?? ''));
+		return in_array($publishable, ['high', 'medium'], true);
 	}
 
 	private static function payload_media_publishable(array $payload): bool {

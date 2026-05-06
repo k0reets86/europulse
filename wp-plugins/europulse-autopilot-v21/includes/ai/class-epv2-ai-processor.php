@@ -2743,7 +2743,8 @@ final class EPV2_AI_Processor {
 		$google_quality = is_array($meta['google_quality'] ?? null) ? $meta['google_quality'] : [];
 		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
 		$content_plain = trim(wp_strip_all_tags((string) ($de['content'] ?? '')));
-		$short_factual_ready = self::payload_allows_short_factual_bulletin($payload, $content_plain);
+		$short_factual_ready = self::payload_allows_short_factual_bulletin($payload, $content_plain)
+			|| self::payload_allows_brief_live_ticker($payload, $content_plain);
 		if (! self::quality_meets_publish_gate($quality, 'editorial')) {
 			return false;
 		}
@@ -5927,6 +5928,9 @@ final class EPV2_AI_Processor {
 		if (self::payload_allows_short_factual_bulletin($payload, $content_plain)) {
 			return true;
 		}
+		if (self::payload_allows_brief_live_ticker($payload, $content_plain)) {
+			return true;
+		}
 		if ($source_count >= 2 && mb_strlen($content_plain) >= max($de_soft, $de_min + 120)) {
 			return true;
 		}
@@ -6842,7 +6846,43 @@ final class EPV2_AI_Processor {
 		if ($source_count <= 0) {
 			return false;
 		}
-		return mb_strlen($content_plain) >= $de_min || self::payload_allows_short_factual_bulletin($payload, $content_plain);
+		return mb_strlen($content_plain) >= $de_min
+			|| self::payload_allows_short_factual_bulletin($payload, $content_plain)
+			|| self::payload_allows_brief_live_ticker($payload, $content_plain);
+	}
+
+	// Honors story_card editorial signal that the item is intentionally brief
+	// (length_profile=brief on a live-ticker / news-bulletin), so the budget
+	// profile's 700–980 char minimum (calibrated for full features) doesn't
+	// reject legitimately short authoritative-source tickers like Tagesschau /
+	// dpa eilmeldungen. Quality + selection gates still apply downstream.
+	private static function payload_allows_brief_live_ticker(array $payload, string $content_plain): bool {
+		if (mb_strlen($content_plain) < 250) {
+			return false;
+		}
+		$card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
+		if ($card === []) {
+			return false;
+		}
+		$length_profile = sanitize_key((string) ($card['rewrite']['length_profile'] ?? ''));
+		if ($length_profile !== 'brief') {
+			return false;
+		}
+		$publishable = strtolower((string) ($card['publishable_estimate'] ?? ''));
+		if (! in_array($publishable, ['high', 'medium'], true)) {
+			return false;
+		}
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		if (! empty($meta['blockers'])) {
+			return false;
+		}
+		foreach (['quality', 'release_quality', 'google_quality'] as $key) {
+			$quality = is_array($meta[$key] ?? null) ? $meta[$key] : [];
+			if (empty($quality['pass'])) {
+				return false;
+			}
+		}
+		return (int) ($meta['source_count'] ?? 0) >= 1;
 	}
 
 	private static function payload_allows_short_factual_bulletin(array $payload, string $content_plain): bool {

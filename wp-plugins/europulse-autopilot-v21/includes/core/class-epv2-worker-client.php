@@ -96,6 +96,26 @@ final class EPV2_Worker_Client {
 	public static function build_payload( object $item, string $stage = 'full_bundle', array $existing = [] ): array {
 		$settings = EPV2_Settings::get_all();
 		$normalized_stage = self::normalize_stage( $stage );
+
+		// In-house dossier enrichment: when the detected KIND requires
+		// multi-source synthesis (news_article+), aggregate sibling coverage
+		// from the queue/published table into source_dossier.related[]
+		// before sending the payload to the worker. The rewriter prompt
+		// (Stage 4) consumes these entries to write a fresh synthesis
+		// instead of paraphrasing one thin source. Idempotent: skipped if
+		// _meta.enrichment.ran is already set.
+		if (
+			$existing !== []
+			&& class_exists( 'EPV2_Dossier_Enricher' )
+			&& empty( $existing['_meta']['enrichment']['ran'] )
+		) {
+			$kind = EPV2_Content_Kinds::detect_kind( $existing );
+			$spec = EPV2_Content_Kinds::spec_for( $kind );
+			if ( ! empty( $spec['enrichment_required'] ) ) {
+				$existing = EPV2_Dossier_Enricher::enrich( (int) ( $item->id ?? 0 ), $existing );
+			}
+		}
+
 		$editorial_flags = [
 			'openai_api_key'   => (string) ( $settings['ai_keys']['openai'] ?? '' ),
 			'deepseek_api_key' => (string) ( $settings['ai_keys']['deepseek'] ?? '' ),

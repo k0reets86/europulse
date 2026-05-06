@@ -2047,7 +2047,7 @@ final class EPV2_Queue {
 		$error_message = (string) ($extra['error_message'] ?? '');
 		// Keep terminal for genuinely-hard reasons.
 		if (preg_match(
-			'/(duplicate|^stale_time_sensitive|stale_time_sensitive|hard_editorial|context_reject|sport_fixture|payload size guard|max_allowed_packet|community_promo|routine_official)/iu',
+			'/(duplicate|^stale_time_sensitive|stale_time_sensitive|hard_editorial|context_reject|sport_fixture|payload size guard|max_allowed_packet|community_promo|routine_official|meta_index_page|hub_page|paywall_only)/iu',
 			$error_message
 		) === 1) {
 			return $intended_state;

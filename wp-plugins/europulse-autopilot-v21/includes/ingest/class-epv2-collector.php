@@ -382,6 +382,22 @@ final class EPV2_Collector {
 			]);
 			return false;
 		}
+		// Hub / index / topic-thread page filter — runs BEFORE we spend AI
+		// tokens on items like kyivpost.com/thread/X "Top Stories and Live
+		// Updates" landing pages. These have no factual content to rewrite,
+		// just promo-text about the publisher's coverage.
+		$meta_index_reason = EPV2_Content_Filters::detect_meta_index_page(
+			(string) ($item['original_url'] ?? ''),
+			(string) ($item['original_title'] ?? ''),
+			(string) ($item['original_excerpt'] ?? ''),
+			(string) ($item['original_content'] ?? '')
+		);
+		if ($meta_index_reason !== '') {
+			self::audit_candidate($item, $source, $analysis, 'ingest', 'meta_index_page', [
+				'reason' => $meta_index_reason,
+			]);
+			return false;
+		}
 		$planner = EPV2_Category_Planner::decide_for_candidate($category, (int) ($analysis['score'] ?? 0), $analysis);
 		if (($planner['action'] ?? '') === 'reject') {
 			self::audit_candidate($item, $source, $analysis, 'ingest', 'planner_reject', [

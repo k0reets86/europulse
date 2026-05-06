@@ -250,6 +250,12 @@ final class EPV2_Publisher {
 		$working_status = in_array($final_status, ['publish', 'pending'], true) ? 'draft' : $final_status;
 
 		$sourceDossier = is_array($payload['_meta']['source_dossier'] ?? null) ? $payload['_meta']['source_dossier'] : [];
+		// Pass the upfront story card alongside the dossier so the media
+		// resolver can use card.media_search_terms (concrete LLM-curated
+		// visual hooks) ahead of the title-keyword regex heuristic.
+		if (is_array($payload['_meta']['story_card'] ?? null) && ! isset($sourceDossier['story_card'])) {
+			$sourceDossier['story_card'] = $payload['_meta']['story_card'];
+		}
 		$sourceUrl = EPV2_Source_Enricher::best_source_url($sourceDossier, (string) $item->original_url);
 		$shared_media_url = self::resolve_shared_publish_media_url($item, $payload, $categories, $sourceDossier);
 		$shared_media_url = self::preflight_shared_publish_media_url($shared_media_url, $payload, $item, $categories, $sourceDossier);
@@ -780,6 +786,9 @@ final class EPV2_Publisher {
 	private static function resolve_publish_media_url(array $lang_payload, array $payload, array $categories, string $title, string $excerpt, int $queue_id = 0): string {
 		$media_url = (string) ($lang_payload['media_url'] ?? $payload['featured_media_url'] ?? $payload['media_url'] ?? '');
 		$source_dossier = (array) ($payload['_meta']['source_dossier'] ?? []);
+		if (is_array($payload['_meta']['story_card'] ?? null) && ! isset($source_dossier['story_card'])) {
+			$source_dossier['story_card'] = $payload['_meta']['story_card'];
+		}
 		if (
 			$media_url !== ''
 			&& ! EPV2_Media::is_fallback_stock_url($media_url)

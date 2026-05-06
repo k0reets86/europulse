@@ -5,6 +5,56 @@ if (! defined('ABSPATH')) {
 }
 
 	final class EPV2_Media {
+	/**
+	 * Build a search query from the upfront story card's media_search_terms.
+	 * Returns "" when the card is missing, empty, or marks the story as
+	 * 'generated' (no real-world image expected).
+	 *
+	 * Callers that pass a dossier built from `_meta.source_dossier` should
+	 * include the card under `story_card` (see EPV2_Media::dossier_with_card()).
+	 */
+	private static function story_card_media_query(array $source_dossier): string {
+		$card = $source_dossier['story_card'] ?? null;
+		if (! is_array($card) || $card === []) {
+			return '';
+		}
+		$mode = strtolower((string) ($card['media_required'] ?? 'source_first'));
+		if ($mode === 'generated') {
+			return '';
+		}
+		$terms = $card['media_search_terms'] ?? [];
+		if (! is_array($terms)) {
+			return '';
+		}
+		$cleaned = [];
+		foreach ($terms as $term) {
+			$t = trim((string) $term);
+			if ($t === '') {
+				continue;
+			}
+			$cleaned[] = $t;
+			if (count($cleaned) >= 3) {
+				break;
+			}
+		}
+		if ($cleaned === []) {
+			return '';
+		}
+		return implode(' ', $cleaned);
+	}
+
+	/**
+	 * Helper for callers: enrich a dossier with the story card so that
+	 * downstream media-resolver queries can use card.media_search_terms.
+	 * Returns the dossier unchanged when no card.
+	 */
+	public static function dossier_with_card(array $source_dossier, array $story_card = []): array {
+		if ($story_card !== [] && ! isset($source_dossier['story_card'])) {
+			$source_dossier['story_card'] = $story_card;
+		}
+		return $source_dossier;
+	}
+
 	public static function resolve_featured_media(string $title, string $excerpt = '', array $categories = [], string $existing_url = '', array $source_dossier = [], int $queue_id = 0): string {
 		$categories = self::normalize_media_categories($categories);
 		$story_context = self::story_context_from_dossier($title, $excerpt, $categories, $source_dossier);
@@ -971,6 +1021,15 @@ if (! defined('ABSPATH')) {
 
 	private static function pexels_query(string $title, string $excerpt, array $categories, array $source_dossier = []): string {
 		$text = mb_strtolower(trim(wp_strip_all_tags($title . ' ' . $excerpt)));
+		// Story card override: when the upfront semantic pass identified
+		// concrete visual hooks (e.g. "MV Hondius cruise ship",
+		// "police academy graduation"), search Pexels directly with those
+		// terms instead of running through the keyword heuristic. Card
+		// terms are LLM-curated and far more precise than title regex.
+		$card_query = self::story_card_media_query($source_dossier);
+		if ($card_query !== '') {
+			return $card_query;
+		}
 		if (self::is_heritage_story($text)) {
 			$precise = self::title_keyword_query($title, 7);
 			if ($precise !== '') {
@@ -1315,6 +1374,13 @@ if (! defined('ABSPATH')) {
 
 	private static function wikimedia_query(string $title, string $excerpt, array $categories, array $source_dossier = []): string {
 		$text = mb_strtolower(trim(wp_strip_all_tags($title . ' ' . $excerpt)));
+		// Wikimedia is best for named-entity images (people, places,
+		// monuments, organisations). The story card has already extracted
+		// the concrete entities we want — use those directly when present.
+		$card_query = self::story_card_media_query($source_dossier);
+		if ($card_query !== '') {
+			return $card_query;
+		}
 		$entity_query = self::entity_media_query($text);
 		if ($entity_query !== '') {
 			return $entity_query;

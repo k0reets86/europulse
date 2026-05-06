@@ -1,5 +1,15 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-06 07:05 UTC — selection-reject false-positive fixes
+
+- [x] Two systemic false-positive classes in selection scoring fixed (commit `12626dd`):
+  - `looks_like_noise()`: split into long-phrase substring + short-token word-boundary + URL-path-segment matchers; lowercases input once; checks PHP_URL_PATH not full URL. Removes "abo↔about" and `?maca=...rss...` false positives.
+  - `editorial_interest_weight()`: added English term variants for politik / welt / ukraine / wirtschaft / deutschland (chancellor, parliament, sanctions, ceasefire, etc.) plus Ukrainian variants where useful.
+- [x] Validation pulse (`1136`-`1142`) confirms `noise` rejects collapsed 136 → 5 in audit window; `low_score` rejects -46 %; 1 ready_publish (DW Ukraine ceasefire) with full DE/UK/EN bodies.
+- [ ] New stuck-state class to investigate: rows `1138/1140/1141` are in `state=new` with error "Publish-finish не дал прогресса после нескольких попыток" — different terminal class from `rebuild_bundle` loop. Likely the publish-finish stage refuses to advance even though DE/UK/EN are populated. Needs the same kind of attempt-cap / loop guard that we added for build_de_master.
+- [ ] DER SPIEGEL via Google News still shows `low_score` for items like "Friedrich Merz: Wo der Kanzler bislang punkten konnte" (score 28). The German title contains `'kanzler'` and should hit editorial_interest_weight, but the source article probably lacks public_impact terms. Lower the per-category `c` threshold from 34 to 30 for politik/welt or extend uplift_borderline_newsworthy_score to fire from 30+ for serious categories with strong signal.
+- [ ] Source-quality verification: 7 active Google News searches still produce mostly stale items even after `when:14d` (e.g. Google News Wirtschaft DE returned 20 stale events). Inspect whether their `q=` query terms are too narrow, or whether Google News is returning archive matches when fresh news is sparse.
+
 ## Current Runtime Status 2026-05-06 06:45 UTC — dossier content fix, 4 publish-ready articles
 
 - [x] Fixed systemic source-thinness bug in commit `2c02bfa`: `compact_source_dossier` now retains a `content` field (12 KB primary / 8 KB shell / 6 KB supporting), and `EPV2_Worker_Client::build_payload` prefers `_meta.source_dossier.primary.content` over the RSS snippet `$item->original_content`.

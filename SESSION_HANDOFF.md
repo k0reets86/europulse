@@ -56,6 +56,26 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 07:05 UTC — selection-reject false-positive fixes
+
+- Diagnostic dive into `ep_epv2_selection_audit` exposed two systemic false-positive classes that were rejecting the bulk of legitimate news:
+  - `looks_like_noise()` matched the German short token `'abo'` (Abonnement) as a bare substring, hitting English "ab**OUT**" in any English article body — every DW EN headline with the word "about" got noise-rejected with score=0. The same matcher checked short tokens like `'rss'`, `'feed'`, `'jobs'` against the FULL URL string, which matched the analytics token `?maca=en-rss-en-eu-...` carried by every DW article. Net effect: ~26 DW EN articles per pulse silently dropped before scoring, including "Russia offers Ukraine May 8-9 ceasefire" and "Romania's government collapses after PM loses confidence vote".
+  - `editorial_interest_weight()` per-category term lists were German-only for politik / welt / ukraine / wirtschaft / deutschland. English-source coverage of Germany ("Difficult first year for Chancellor Friedrich Merz") and English geopolitical pieces ("US destroyer enters Persian Gulf") matched zero terms; the missing +3..+10 was the difference between score 33 (D-tier reject) and score 40+ (C-tier review).
+- Commit `12626dd` rewrites both:
+  - `looks_like_noise()` lowercases input once; long phrases substring-match body text; short tokens use word-boundary regex (`'abo'`, `'faq'`, `'kongress'`); short URL tokens are checked against `PHP_URL_PATH` only (not the query string); a whole-host blocklist covers `service.bund.de`. Tested across ceasefire / government-collapse / "Bayern Munich match preview" / Wochenarbeitszeit Vollzeit / Pressearchiv inputs.
+  - `editorial_interest_weight()` extends politik / welt / ukraine / wirtschaft / deutschland with English equivalents (chancellor, parliament, government, vote, sanctions, ceasefire, named heads of state) and selected Ukrainian equivalents.
+- Pre-fix vs post-fix re-scoring of previously rejected items:
+  - "Russia offers Ukraine May 8-9 ceasefire": noise / score 0 → tier B / score 54 / strong
+  - "Germany: Difficult first year for Chancellor Friedrich Merz": low_score / 33 → tier C / 49 / review
+  - "US-Zerstörer in Persischen Golf eingedrungen + Iran-Angriffe auf die Emirate": low_score / 33 → tier B / 54 / strong
+  - "Bayern Munich match preview": noise → tier C / 41 / low (passes the "about" false positive)
+- Fresh validation pulse (rows `1136`-`1142`) confirmed end-to-end:
+  - **`noise` rejects collapsed 136 → 5 (-96 %)** in the new audit window.
+  - **`low_score` rejects dropped 256 → 137 (-46 %)**.
+  - 1 ready_publish (`1142` Ukraine ceasefire, score 63, gpt-5-mini, 2364/2037/1864 DE/UK/EN with real DW media).
+  - 3 ready_review (some via attempt-cap), 3 still in mid-pipeline `new` state with error "Publish-finish не дал прогресса" — these are the next class of stuck rows beyond the rebuild_bundle loop, worth investigation.
+- `1142` "Dutzende Tote bei russischen Angriffen kurz vor ukrainischem einseitigem Waffenstillstand" is the kind of story that the previous filters would have killed silently as `noise`; it is now publish-ready end-to-end. Validates the user's hypothesis that "many were not passing for the wrong reasons".
+
 ## Latest Handoff 2026-05-06 06:45 UTC — dossier content propagation, 4 publish-ready articles
 
 - Identified and fixed the systemic source-thinness bug. Two layers were silently shrinking the article body fed to the worker:

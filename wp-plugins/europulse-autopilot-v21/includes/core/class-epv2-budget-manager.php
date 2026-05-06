@@ -875,22 +875,47 @@ final class EPV2_Budget_Manager {
 			'politik' => [
 				'bundestag', 'bundesrat', 'kanzler', 'regierung', 'minister', 'wahl', 'koalition',
 				'gesetz', 'reform', 'haushalt', 'migration', 'parlament', 'abstimmung',
+				// English equivalents — many German politics stories arrive
+				// from English-language sources (DW EN, Google News Politics EN)
+				// where the German term never appears.
+				'chancellor', 'parliament', 'government', 'coalition', 'election', 'minister',
+				'opposition', 'vote', 'cabinet', 'spahn', 'merz', 'scholz',
+				// Ukrainian equivalents for politik signal in UA-language coverage
+				'канцлер', 'парламент', 'уряд', 'коаліц', 'вибор', 'міністр',
 			],
 			'welt' => [
 				'uno', 'un ', 'nato', 'eu ', 'usa', 'china', 'iran', 'nahost', 'gaza',
 				'konflikt', 'sanktionen', 'wahl', 'regierung', 'diplomatie',
+				// English — geopolitical stories often surface in DW World EN /
+				// Google News Politics EN with no German vocabulary.
+				'united nations', 'european union', 'washington', 'beijing', 'moscow',
+				'kremlin', 'tehran', 'sanctions', 'ceasefire', 'diplomacy', 'summit',
+				'middle east', 'gulf', 'taiwan', 'korea', 'syria', 'lebanon', 'turkey',
+				'trump', 'biden', 'xi ', 'putin', 'zelensky', 'macron', 'erdogan',
+				'санкц', 'дипломат', 'самміт', 'переговор',
 			],
 			'ukraine' => [
 				'ukraine', 'ukrain', 'kyiv', 'kiew', 'russland', 'russisch', 'drohne',
 				'front', 'besetzt', 'sanktionen', 'angriff', 'krieg',
+				// English equivalents
+				'russia', 'russian', 'drone', 'frontline', 'occupied', 'attack', 'war',
+				'zelensky', 'putin', 'kremlin', 'invasion', 'shelling', 'missile',
+				'україн', 'росі', 'дрон', 'фронт', 'окупов', 'атак', 'війн', 'обстріл', 'ракет',
 			],
 			'wirtschaft' => [
 				'unternehmen', 'tarif', 'inflation', 'preise', 'energie', 'arbeitsmarkt',
 				'investition', 'industrie', 'handel', 'konzern', 'verbraucher',
+				// English equivalents
+				'company', 'tariff', 'price', 'energy', 'job market', 'investment',
+				'industry', 'trade', 'corporation', 'consumer', 'recession', 'gdp',
+				'інфляц', 'ціни', 'енерг', 'ринок', 'інвестиц', 'промислов', 'торгівл',
 			],
 			'deutschland' => [
 				'gericht', 'polizei', 'gesundheit', 'schule', 'migration', 'wahl',
 				'gesetz', 'reform', 'verkehr', 'sicherheit', 'verbraucher',
+				// English equivalents
+				'court', 'police', 'health', 'school', 'law', 'transport', 'safety',
+				'merz', 'scholz', 'spahn', 'cdu', 'spd', 'afd', 'green party',
 			],
 			'bayern', 'muenchen' => [
 				'bayern', 'münchen', 'muenchen', 'landtag', 'stadt', 'polizei', 'verkehr',
@@ -1188,29 +1213,72 @@ final class EPV2_Budget_Manager {
 	}
 
 	private static function looks_like_noise(string $title, string $excerpt, string $content, string $url): bool {
-		$text = trim($title . ' ' . $excerpt . ' ' . mb_substr($content, 0, 400));
-		if ($text === '' || mb_strlen($text) < 24) {
+		$raw = trim($title . ' ' . $excerpt . ' ' . mb_substr($content, 0, 400));
+		if ($raw === '' || mb_strlen($raw) < 24) {
 			return true;
 		}
-		$noise_terms = [
-			'rss', 'feed', 'newsletter', 'abo', 'impressum', 'privacy', 'cookie', 'datenschutz',
-			'kontakt', 'login', 'registrierung', 'subscribe', 'opml', 'presse-archiv', 'veranstaltungskalender',
+		// Lowercase for substring/regex matching so "Wochenarbeitszeit" or
+		// "Pressearchiv" do not slip through capitalised — the noise lists
+		// are kept in lowercase by convention.
+		$text = mb_strtolower($raw);
+		// Two distinct lists. Short generic tokens like 'rss' / 'feed' / 'abo'
+		// were previously matched as bare substrings, which made them fire on
+		// perfectly legitimate articles — e.g. "abo" matched inside "abOUT",
+		// rejecting any English-language story containing the word "about".
+		// And short tokens against the full URL string matched analytics
+		// parameters: DW articles carry `?maca=en-rss-en-eu-...` and were
+		// rejected wholesale even when the body was a real geopolitical story
+		// ("Russia offers Ukraine May 8-9 ceasefire", "Romania's government
+		// collapses ..."). Now:
+		//   - long phrases (>= 6 chars) are still substring-matched against
+		//     the body text, since they reliably indicate non-news content;
+		//   - short tokens are word-boundary matched via regex;
+		//   - short tokens are checked against the URL PATH only (not the
+		//     query string).
+		$long_body_phrases = [
+			'newsletter', 'impressum', 'privacy', 'cookie', 'datenschutz',
+			'kontakt', 'login', 'registrierung', 'subscribe', 'opml',
 			'wir unterstützen', 'spenden', 'donate', 'read more', 'zurück zu startseite', 'startseite',
 			'vorlesen', 'zur live map', 'tv und stream', 'watch sports online', 'lade bild',
-			'baustellen-übersicht', 'fahrplanänderungen im mvv', 'faq', 'fragen und antworten',
-			'digitaler staat', 'kongress', 'fachtagung', 'symposium', 'top-thema - der sacharow-preis 2023',
+			'baustellen-übersicht', 'fahrplanänderungen im mvv', 'fragen und antworten',
+			'digitaler staat', 'fachtagung', 'symposium', 'top-thema - der sacharow-preis 2023',
 			'ursprung der sonne', 'astronomen entdecken', 'zum tod von', 'trauert um',
 			'mehr erfahren mehr erfahren', 'mehr erfahren über gründe für störungen',
-			'selbstverortung', 'zugehörigkeit', 'pressearchiv', 'pressearchiv',
-			'stellenangebot', 'jobs', 'jobbörse', 'teilzeit', 'vollzeit', 'befristet',
+			'selbstverortung', 'zugehörigkeit', 'pressearchiv', 'presse-archiv',
+			'stellenangebot', 'jobbörse', 'teilzeit', 'vollzeit', 'befristet',
 			'arbeitsort', 'wochenarbeitszeit', 'vergütungsgruppe', 'entgeltgruppe',
 			'diplom- oder masterabschluss', 'psychologischen psychotherapeuten',
-			'fachassistent', 'service.bund.de',
+			'fachassistent', 'service.bund.de', 'veranstaltungskalender',
 		];
-		foreach ($noise_terms as $term) {
-			if (str_contains($text, $term) || str_contains($url, $term)) {
+		foreach ($long_body_phrases as $phrase) {
+			if (str_contains($text, $phrase)) {
 				return true;
 			}
+		}
+		// Whole-word match for short German tokens that historically caused
+		// false positives as raw substrings.
+		if (preg_match('/\b(abo|faq|kongress)\b/u', $text) === 1) {
+			return true;
+		}
+		// Path segment / host check for clearly-non-article URLs. Comparing
+		// against PHP_URL_PATH (not the full URL) avoids matching analytics
+		// tokens like ?maca=en-rss-... that appear in query strings.
+		$host = mb_strtolower((string) wp_parse_url($url, PHP_URL_HOST));
+		$path = mb_strtolower((string) wp_parse_url($url, PHP_URL_PATH));
+		$url_segment_terms = [
+			'/feed', '/rss', '/newsletter', '/login', '/abonnement', '/impressum',
+			'/privacy', '/datenschutz', '/kontakt', '/contact', '/jobs', '/karriere',
+			'/pressearchiv', '/presse-archiv', '/veranstaltungskalender',
+			'/baustellen', '/fahrplan', '/faq',
+		];
+		foreach ($url_segment_terms as $segment) {
+			if ($path !== '' && str_contains($path, $segment)) {
+				return true;
+			}
+		}
+		// Whole-host noise: hosts that publish only syndication / archive content.
+		if (in_array($host, ['service.bund.de'], true)) {
+			return true;
 		}
 		return false;
 	}

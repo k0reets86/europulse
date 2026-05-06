@@ -139,12 +139,43 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     )
     ctx.tags = ctx.semantic.key_phrases[:5]
 
-    # Group F: override category from semantic content_type when unambiguous
+    # Pull the upfront story card out of existing_payload once. We use it
+    # below to seed categories (overrides the heuristic content_type ->
+    # category mapping when the card is high-confidence) and tags (which
+    # the worker would otherwise build from TF-IDF key phrases that look
+    # noisy on translation).
+    _existing_payload_init = getattr(req, "existing_payload", None) or {}
+    _story_card_init: dict | None = None
+    if isinstance(_existing_payload_init, dict):
+        _meta_init = _existing_payload_init.get("_meta") or {}
+        if isinstance(_meta_init, dict):
+            sc = _meta_init.get("story_card")
+            if isinstance(sc, dict) and sc:
+                _story_card_init = sc
+
+    # Group F: override category from semantic content_type when unambiguous;
+    # story card category wins over both when its confidence is high enough.
     semantic_cat = _CONTENT_TYPE_CATEGORY.get(ctx.semantic.content_type, "")
     if semantic_cat:
         ctx.categories = [semantic_cat]
     else:
         ctx.categories = [req.category_proposed] if req.category_proposed else []
+    if _story_card_init:
+        card_cat = (_story_card_init.get("category") or {})
+        primary = str(card_cat.get("primary") or "").strip()
+        try:
+            confidence = float(card_cat.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if primary and confidence >= 0.6:
+            ctx.categories = [primary]
+        # Replace TF-IDF tag stub with the curated tags from the card —
+        # they are clean German nouns, capitalized, vetted by the LLM.
+        card_tags = _story_card_init.get("tags") or []
+        if isinstance(card_tags, list):
+            cleaned = [str(t).strip() for t in card_tags if isinstance(t, (str,)) and str(t).strip()]
+            if cleaned:
+                ctx.tags = cleaned[:8]
 
     # 2. Enrich sources — mandatory for thin content (<500 words), otherwise only when semantic flags it
     source_word_count = len(original_text.split())
@@ -178,7 +209,21 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         "supporting": [{"url": url} for url in supporting_urls],
     }
 
-    # 3. Rewrite to German
+    # 3. Rewrite to German.
+    # The PHP processor builds an upfront semantic story card (one AI call
+    # per item) and persists it in `existing_payload._meta.story_card`.
+    # When present, hand it to the rewriter so it can anchor on the same
+    # entities and key facts that drove categorization, instead of running
+    # an independent "best guess" from the raw source text.
+    existing_payload = getattr(req, "existing_payload", None) or {}
+    story_card_for_rewrite: dict | None = None
+    if isinstance(existing_payload, dict):
+        meta = existing_payload.get("_meta") or {}
+        if isinstance(meta, dict):
+            sc = meta.get("story_card")
+            if isinstance(sc, dict) and sc:
+                story_card_for_rewrite = sc
+
     rewrite = await rewrite_to_german(
         original_title=req.original_title,
         original_content=original_text,
@@ -190,6 +235,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         provider_order=ctx.provider_order,
         length_profile=effective_length_profile,
         source_url=req.original_url,
+        story_card=story_card_for_rewrite,
     )
     if not rewrite.success:
         ctx.blockers.append(f"Rewrite failed: {rewrite.error}")

@@ -110,6 +110,91 @@ FAKTENREGELN:
 Ausgabe ausschließlich als gültiges JSON mit den Feldern: title, lead, body."""
 
 
+def _format_story_card_block(card: dict | None) -> str:
+    """Format the upfront story card as a German prompt section.
+
+    The card is the result of EPV2_Story_Card_Builder (one upfront AI call
+    per item) and gives the rewriter a verifiable list of entities and key
+    facts to anchor on. It does NOT replace the source text — the
+    rewriter still works from `original_content` — but it lets the model
+    cross-check facts and avoid hallucinating. Returns "" when no card.
+    """
+    if not isinstance(card, dict) or not card:
+        return ""
+    parts: list[str] = []
+    cat = (card.get("category") or {})
+    primary_cat = str(cat.get("primary") or "").strip()
+    if primary_cat:
+        rationale = str(cat.get("rationale") or "").strip()
+        parts.append(f"Kategorie: {primary_cat}" + (f" — {rationale}" if rationale else ""))
+    geo = card.get("geography") or {}
+    if isinstance(geo, dict):
+        country = str(geo.get("primary_country") or "").strip()
+        region = str(geo.get("primary_region") or "").strip()
+        if country or region:
+            geo_line = "Geographie: "
+            geo_line += country
+            if region:
+                geo_line += f" / {region}" if country else region
+            parts.append(geo_line.strip())
+    people = card.get("entities_people") or card.get("entities", {}).get("people") or []
+    if isinstance(people, list) and people:
+        formatted = []
+        for p in people[:6]:
+            if not isinstance(p, dict):
+                continue
+            name = str(p.get("name") or "").strip()
+            role = str(p.get("role") or "").strip()
+            if name and role:
+                formatted.append(f"{name} ({role})")
+            elif name:
+                formatted.append(name)
+        if formatted:
+            parts.append("Personen: " + ", ".join(formatted))
+    orgs = card.get("entities_organizations") or card.get("entities", {}).get("organizations") or []
+    if isinstance(orgs, list) and orgs:
+        formatted = []
+        for o in orgs[:5]:
+            if not isinstance(o, dict):
+                continue
+            name = str(o.get("name") or "").strip()
+            if name:
+                formatted.append(name)
+        if formatted:
+            parts.append("Organisationen: " + ", ".join(formatted))
+    places = card.get("entities_places") or card.get("entities", {}).get("places") or []
+    if isinstance(places, list) and places:
+        formatted = [str(p).strip() for p in places[:5] if str(p).strip()]
+        if formatted:
+            parts.append("Orte: " + ", ".join(formatted))
+    facts = card.get("key_facts") or []
+    if isinstance(facts, list) and facts:
+        bullet_lines = "\n".join(f"  • {str(f).strip()}" for f in facts[:6] if str(f).strip())
+        if bullet_lines:
+            parts.append("Schlüssel-Fakten (nur diese verwenden, keine Ergänzungen):\n" + bullet_lines)
+    rewrite_hints = card.get("rewrite") or {}
+    if isinstance(rewrite_hints, dict):
+        hint_bits = []
+        tone = str(rewrite_hints.get("tone") or "").strip()
+        if tone:
+            hint_bits.append(f"Ton={tone}")
+        structure = str(rewrite_hints.get("structure") or "").strip()
+        if structure:
+            hint_bits.append(f"Struktur={structure}")
+        length_profile_hint = str(rewrite_hints.get("length_profile") or "").strip()
+        if length_profile_hint:
+            hint_bits.append(f"Länge={length_profile_hint}")
+        if hint_bits:
+            parts.append("Rewrite-Hinweise: " + ", ".join(hint_bits))
+    if not parts:
+        return ""
+    return (
+        "STORY CARD (verbindliche Faktenbasis — keine Erfindungen darüber hinaus):\n"
+        + "\n".join(parts)
+        + "\n"
+    )
+
+
 async def rewrite_to_german(
     original_title: str,
     original_content: str,
@@ -121,6 +206,7 @@ async def rewrite_to_german(
     provider_order: list[tuple[str, str, str]] | None = None,
     length_profile: str = "standard",
     source_url: str = "",
+    story_card: dict | None = None,
 ) -> RewriteResult:
     """Rewrite to German master. Falls back to DeepSeek if OpenAI fails."""
     length_hint = {
@@ -154,6 +240,15 @@ async def rewrite_to_german(
             "Wenn das Original nur Miersch/Söder nennt, schreibe nur Miersch/Söder."
         )
 
+    story_card_block = _format_story_card_block(story_card)
+    if story_card_block:
+        # When a card is present, mention category in the length hint so the
+        # model picks structure intelligently (analysis vs reportage vs
+        # live-summary). We do not OVERRIDE length_profile here — that is
+        # already chosen upstream — but we surface the card-suggested
+        # structure as a soft hint inside the prompt body.
+        pass
+
     user_prompt = f"""Quellensprache: {source_language}
 Content-Typ: {content_type}
 Schlüsselbegriffe: {", ".join(key_phrases)}
@@ -161,6 +256,7 @@ Ziel-Länge: {length_hint}
 {source_line}
 {thin_source_guard}
 
+{story_card_block}
 ORIGINAL TITEL:
 {original_title}
 

@@ -56,6 +56,16 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 10:40 UTC — Top-tier SEO + LLM-friendly schema
+
+- Site is now optimized for Google News, Google Discover, and AI search agents (Perplexity, ChatGPT, Claude, Gemini Web).
+- New `EPV2_Schema_Enricher` (commit `cef440b`) hooks into Rank Math's `rank_math/json_ld` filter and adds: `articleBody`, `wordCount`, `keywords` (story_card.tags + post tags), `mentions [Person|Organization|Place]` from card.entities, `about [Thing]` from card.topics, `contentLocation`, `isAccessibleForFree=true`, `speakable`, `thumbnailUrl`. Verified live on post 6680: `wordCount=451`, full `articleBody`, `isAccessibleForFree`, `speakable` now in JSON-LD; future story-card-aware posts will additionally carry `mentions`, `about`, `contentLocation`.
+- News sitemap improved: per-post Polylang language slug, `<news:keywords>` from card.tags, `<image:image>/<image:loc>` per URL. Image namespace declared on the urlset.
+- Rewriter system prompt rewritten for E-E-A-T: inverted pyramid lead, short paragraphs (40–90 words), 2–3 H2 subheadings on longer pieces, explicit anti-AI-tells (no em-dash spam, no "im digitalen Zeitalter", no rhetorical-question leads), HTML body output (<p>/<h2>), title 50–80 chars with primary keyword early. Validated on row 1168 (Bayer/Curevac/Gamestop multi-fact piece): 113-char title, 264-char lead with Wie-n-tv attribution, 2541-char body with `<p>` tags only, **zero em-dashes**, real money values preserved.
+- Worker SEO stage now consumes story_card.seo (primary_keyword mandatory, secondary_keywords, tag_pool, title_pattern_hint).
+- robots.txt rewritten: explicit Allow for Googlebot-News/Image, Bingbot, Applebot, Yandex, DuckDuckGo plus all major AI agents (GPTBot, ChatGPT-User, OAI-SearchBot, ClaudeBot, anthropic-ai, Claude-Web, PerplexityBot, Perplexity-User, YouBot, Diffbot, Google-Extended, meta-externalagent, cohere-ai). Explicit Disallow for Bytespider, MJ12bot, DotBot, BLEXBot. Crawl-delay 30 for Ahrefs/Semrush. Sitemap + News-sitemap entries.
+- All hooks live: 22 commits on `review/plugin-audit` since main.
+
 ## Latest Handoff 2026-05-06 10:15 UTC — Story Card consumed by all major stages
 
 - Story Card now drives every major pipeline stage end-to-end (commits `46a1e5c`, `dec3c8a`, `ac08ea8`):

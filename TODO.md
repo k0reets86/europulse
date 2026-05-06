@@ -1,5 +1,15 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-06 06:00 UTC Pulse Tuning + Hardening Pass 2 + Source Audit Acted
+
+- [x] Plugin hardening pass 2 deployed (commit `6bc4d8e`): primed post/meta/term caches in `EPV2_Deduplicator::is_story_duplicate()`; `JSON_THROW_ON_ERROR` in `EPV2_AI_Client::parse_response()`; bridge token success logging in `EPV2_REST::can_bridge()`.
+- [x] Phase 4 source audit acted on (commit `b29dcb2`):
+  - `EPV2_Google_News::ensure_recent_filter()` adds ` when:14d` to Google News RSS searches that lack a `when:` operator; called from `EPV2_Collector::collect_source` for `type='google_news'`.
+  - Sources `id=9` (European Parliament — URL pointed to a directory page, mean item age 3.5 years) and `id=61` (SMB Museum News EN — archive feed, mean item age 35 days) deactivated with notes; backup `backups/sources-pre-disable-20260506-055638.sql`. Active sources 56 → 54.
+- [ ] Confirm `when:14d` actually reduces stale-reject rate in the next collect pulse; compare audit outcome distribution before/after via `scripts/epv2_pulse.sh audit-summary`. If still >40% stale per source, investigate whether Google News date parsing is wrong (audit field `original_date` populated from RSS `pubDate`).
+- [ ] European Parliament source URL (`https://www.europarl.europa.eu/at-your-service/de/stay-informed/rss-feeds`) is a directory page, not a feed — replace with one of the listed individual EP RSS feeds before re-enabling.
+- [ ] Rejected-rate audit deferred items still open: per-category scoring is in place but per-rubric scoreboard verification needs real fresh pulse data.
+
 ## Current Runtime Status 2026-05-05 23:45 UTC Pulse Tuning + Plugin Hardening Pass 1
 
 - [x] Phase 0 routing fix verified live for row `1114`. `EPV2_Queue::workflow_v2_preview_selection(true)` returned `claim_oldest_new` with `item_id=1114`. One `EPV2_AI_Processor::process_scheduled(true, true)` tick advanced `updated_at` from `22:45:14` → `23:18:18` without falling into a `rebuild_bundle` quarantine loop. Selector correctly claims staged `new` rows; the deployed routing patch holds.

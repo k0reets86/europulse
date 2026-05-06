@@ -56,6 +56,21 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 06:00 UTC
+
+- Pulse tuning continues. Both pause flags ON. Queue empty. Live healthy across all checks: `/wp-login.php=302`, front=200, services active, worker `/health=ok`, locks free.
+- Plugin hardening pass 2 deployed (commit `6bc4d8e`):
+  - `EPV2_Deduplicator::is_story_duplicate()` primes post / meta / term caches with `update_post_caches()` before the 24-post recent-posts loop, and `update_meta_cache('post', $ids)` before the AI fingerprint loop. Kills the N × (`get_post_meta` + `get_the_title` + `wp_get_post_categories`) miss pattern in the dedup hot path.
+  - `EPV2_AI_Client::parse_response()` wraps `json_decode` with `JSON_THROW_ON_ERROR`; catches `JsonException` and rethrows as `RuntimeException` with the body excerpt + decode error message instead of generic "AI transport error".
+  - `EPV2_REST::can_bridge()` short-circuits when provided/expected token lengths differ, and now logs every successful token-auth call to `EPV2_Logger::info('rest', 'bridge token auth ok', …)` with route, method, user_id, remote_ip — the token itself is never logged. Audit trail for bridge invocations.
+- Phase 4 deployed (commit `b29dcb2`):
+  - `EPV2_Google_News::ensure_recent_filter($url, $days=14)` injects ` when:14d` into Google News RSS search queries that lack a `when:` operator. Wired into `EPV2_Collector` for `type='google_news'` sources so every fetch carries a 14-day recency cap. Smoke-tested against four URL shapes.
+  - Sources `id=9` (European Parliament — URL pointed at the rss-feeds *directory* page; mean item age 3.5 YEARS) and `id=61` (SMB Museum News EN — archival museum feed; mean item age 35 days) deactivated with explanatory note in `ep_epv2_sources.notes`. Backup: `backups/sources-pre-disable-20260506-055638.sql`. Active source count 56 → 54.
+- Audit data driving Phase 4 stays in `ep_epv2_selection_audit`. Per-source mean stale-reject age (computed from 2085 rows spanning 2026-04-28..2026-05-03) is in the commit message of `b29dcb2`. The 14-day Google News cap and archive-feed disablement are reversible: re-enable rows with `is_active=1`; remove the filter via comment-out in `EPV2_Collector::collect_source` lines around the new `ensure_recent_filter` call.
+- Repo state: 6 commits on `review/plugin-audit` since last main: `6e0b242` (Phase 1 sync), `cb1be09` (hardening pass 1), `7babf87` (pulse tooling), `6bc4d8e` (hardening pass 2), `b29dcb2` (Phase 4 GN filter + archive deactivate), plus the next pending handoff/TODO bump.
+- Phase 2 (controlled pulse + media backlog) is the right next step. Operator launches it with `scripts/epv2_pulse.sh collect` followed by `process` and `publish`. Watch `audit-summary` after `collect` to compare new outcome distribution against the pre-when:14d baseline.
+- Phase 6 SLO targets: `consecutive_autonomous_publish_grade>=10`, `error<5%`, `rejected<40%`, OpenAI cooldown free, swap stable. Keep both pause flags ON until at least two clean controlled pulses confirm the new freshness behavior.
+
 ## Latest Handoff 2026-05-05 23:50 UTC
 
 - Pulse tuning continues. Both pause flags ON. Queue empty. Live healthy: `/wp-login.php=302`, front=200, all services active, worker `/health=ok`, no held locks, no `epv2_collect/process/publish` cron events (server-orchestrator mode); only `epv2_weekly_analysis` scheduled for 2026-05-10 06:00 UTC.

@@ -56,6 +56,28 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 09:50 UTC — Story Card upfront semantic pass
+
+- Implemented the user's "карта новости" architecture as a first-class upfront stage. One AI pass per fresh row produces a structured `_meta.story_card` (commit `46a1e5c`):
+  - **Worker side** (`worker-v21/src/epv2_worker/story_card.py` + `/analyze_story` endpoint in `server.py`): single JSON-mode call (gpt-5-mini primary, deepseek-chat fallback) returns `{category, geography, entities (people/orgs/places), key_facts, topics, tags, search_queries, media_search_terms, media_required, seo, rewrite hints, publishable_estimate}`. Strict slug whitelist for category. ~7s typical, ≤1200 token response.
+  - **PHP wrapper** (`includes/ai/class-epv2-story-card-builder.php`): `build()`, `from_payload()`, `attach_to_payload()`, `category_is_trusted($card, 0.6)`. Calls the worker via `wp_remote_post`, parses with `JSON_THROW_ON_ERROR`, fails gracefully when the worker is offline.
+  - **Process integration** in `EPV2_AI_Processor::process_scheduled()`: right after `existing_payload` is decoded, if `_meta.story_card` is missing, build one, persist to ai_payload, and override `category_final` immediately when confidence ≥ 0.6.
+  - **Round-trip preservation** in `run_worker_stage()`: worker's `build_normalized_payload` rebuilds `_meta` from scratch; copy `existing_payload._meta.story_card` onto the response so the card is never dropped after a worker call.
+  - **Categorizer override** via `EPV2_Categorizer::refine_with_story_card()`. Replaces the keyword heuristic when the card is high-confidence.
+- End-to-end verification across heterogenous inputs:
+  - Cruise ship hantavirus (BBC EN) → welt 0.95 (was politik)
+  - "Ein Jahr Schwarz-Rot" (NDR DE) → politik 0.95
+  - Phagentherapie (FAZ DE) → leben-in-deutschland 0.70 (was politik)
+  - Russland удар по Дніпру (UA) → ukraine 0.95
+  - Helgoland Aufschüttung → deutschland 0.70
+- Production tick on row 1178 (UA war story) logged `story_card_built_upfront ukraine/0.95/high` and `category_overridden_by_story_card_upfront deutschland→ukraine`. Card persisted across the subsequent worker rebuild step.
+- Wiring for the rest of the consumers is left in place but not yet hooked up — explicit next steps:
+  - Worker rewriter (`rewriter.py`) should read `existing_payload._meta.story_card.rewrite` (tone, structure, length) and `key_facts` to guide the German master prompt and prevent fact drift.
+  - Worker media (`media.py`) should use `card.media_search_terms` instead of title for image search; respect `card.media_required` modes.
+  - PHP `EPV2_Media::resolve_featured_media()` should similarly consult the card before falling back to Pexels.
+  - Tag normalizer should seed from `card.tags`.
+  - SEO stage should seed from `card.seo`.
+
 ## Latest Handoff 2026-05-06 09:05 UTC — staged→queued fix, categorizer hardening, 12 publish-ready
 
 - `EPV2_Collector::commit_staged_candidates()` was hard-capping every collect pulse to one row per category via an inner `break` after the first successful ingest, regardless of `max_collect_per_category`. Replaced with `continue` (commit `161a466`). Effect on the next pulse: 231 staged_candidate × 217 queued (was 246 → 11). The collect_limit guard at the top of the loop now does its real job.

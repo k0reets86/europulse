@@ -1,5 +1,20 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-06 09:50 UTC — Story Card upfront pass live
+
+- [x] Story Card architecture built and shipped (commit `46a1e5c`):
+  - Python `story_card.py` + `/analyze_story` endpoint
+  - PHP `EPV2_Story_Card_Builder` + bootstrap registration
+  - `process_scheduled` upfront hook with category override
+  - `run_worker_stage` preservation across worker round-trips
+  - `EPV2_Categorizer::refine_with_story_card` override path
+- [x] Verified on 5 heterogenous inputs (DE/UK/EN cruise/war/medical/local) and live row 1178.
+- [ ] Wire `card.rewrite` hints + `card.key_facts` + `card.entities` into worker rewriter prompt so the German master is grounded in the story-card facts and follows the suggested tone/structure/length. Edit `worker-v21/src/epv2_worker/rewriter.py` `_SYSTEM_PROMPT` and pass story card from `existing_payload._meta.story_card`.
+- [ ] Wire `card.media_search_terms` + `card.media_required` into both the worker `media.py` and PHP `EPV2_Media::resolve_featured_media()`. Replace title-based search with the concrete visual hooks the card produced.
+- [ ] Seed taxonomy tagger from `card.tags` (priority over keyword expansion in `EPV2_Categorizer::tags_from_text`).
+- [ ] Seed SEO stage from `card.seo.primary_keyword` and `card.seo.secondary_keywords` instead of re-deriving keywords from rewritten German text.
+- [ ] Backfill: small WP-CLI script to walk `state IN ('ready_publish','ready_review')` rows and build a story card for them, then re-categorize. Closes the legacy mis-categorization bucket without re-running expensive AI rewrites.
+
 ## Current Runtime Status 2026-05-06 09:05 UTC — staged→queued fix, categorizer hardening
 
 - [x] Collector inner `break` removed → `continue` (commit `161a466`). Effective `max_collect_per_category` now respected. 231 staged → 217 queued (was 11).

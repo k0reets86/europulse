@@ -21,7 +21,30 @@ final class EPV2_Categorizer {
 			'ukraine' => ['ukraine', 'ukrain', 'kyiv', 'київ', 'україн', 'zelensky', 'selensky', 'russland', 'russia', 'kreml', 'moskau', 'львів', 'львов', 'lviv'],
 			'politik' => ['bundestag', 'wahl', 'polit', 'parliament', 'regierung', 'коаліц', 'trump', 'nato', 'hormus', 'sanktion', 'coalition', 'koalition', 'cdu', 'spd', 'gruene', 'greens', 'demokratie', 'steinmeier', 'bundespräsident', 'bundesregierung', 'gesetzentwurf', 'digitalausschuss', 'transparenzgesetz', 'politische werbung', 'politische-werbung', 'eu-verordnung'],
 			'wirtschaft' => ['wirtschaft', 'inflation', 'econom', 'gdp', 'market', 'компан', 'інфляц', 'kapitalmarkt', 'spritpreis', 'kraftstoffpreis', 'dax', 'aktie', 'aktien', 'investor', 'investoren', 'ölpreis', 'oil price', 'energy price', 'energiepreis', 'paypal', 'gaspreis', 'gaspreise', 'tarif', 'tarife', 'börse', 'finanz', 'sondervermögen', 'infrastrukturfonds', 'wechsel des anbieter', 'anbieterwechsel', 'tesla', 'elektroauto', 'elektroautos', 'e-auto', 'e-autos', 'elektromobil', 'rechenzentrum', 'data center', 'datacenter', 'tiktok', 'bitcoin', 'krypto', 'crypto'],
-			'world' => ['welt', 'world', 'global', 'amerika', 'usa', 'united states', 'washington', 'china', 'beijing', 'taiwan', 'india', 'pakistan', 'asia', 'nahost', 'middle east', 'gaza', 'libanon', 'lebanon', 'iran', 'israel', 'syrien', 'syria', 'afrika', 'africa', 'latin america', 'lateinamerika', 'brisbane', 'australia', 'australien', 'palace', 'royal', 'monarchy', 'king', 'queen', 'prince', 'princess', 'illinois', 'britain', 'british', 'london', 'hormuz', 'straße von hormuz', 'strasse von hormuz', 'japan', 'tokio', 'tokyo'],
+			'world' => ['welt', 'world', 'global', 'amerika', 'usa', 'united states', 'washington', 'china', 'beijing', 'taiwan', 'india', 'pakistan', 'asia', 'nahost', 'middle east', 'gaza', 'libanon', 'lebanon', 'iran', 'israel', 'syrien', 'syria', 'afrika', 'africa', 'latin america', 'lateinamerika', 'brisbane', 'australia', 'australien', 'palace', 'royal', 'monarchy', 'king', 'queen', 'prince', 'princess', 'illinois', 'britain', 'british', 'london', 'hormuz', 'straße von hormuz', 'strasse von hormuz', 'japan', 'tokio', 'tokyo',
+				// More countries / regions that historically defaulted to
+				// 'deutschland' instead of welt because no keyword matched.
+				'spanien', 'spain', 'kanarische inseln', 'canary islands', 'kanaren',
+				'niederlande', 'netherlands', 'dutch', 'niederländisch', 'niederlaendisch',
+				'frankreich', 'france', 'french', 'paris', 'französisch', 'franzoesisch',
+				'italien', 'italy', 'italian', 'rom ',
+				'griechenland', 'greece', 'griechisch', 'athen',
+				'portugal', 'portuguese', 'portugiesisch', 'lissabon',
+				'türkei', 'tuerkei', 'turkey', 'turkish', 'türkisch', 'tuerkisch', 'erdogan', 'ankara',
+				'venezuela', 'kolumbien', 'colombia', 'mexiko', 'mexico', 'brasilien', 'brazil',
+				'südkorea', 'suedkorea', 'south korea', 'nordkorea', 'north korea', 'pyongyang',
+				'philippinen', 'philippines', 'indonesien', 'indonesia', 'thailand', 'vietnam',
+				'argentinien', 'argentina', 'kuba', 'cuba',
+				'malawi', 'kenia', 'kenya', 'nigeria', 'südafrika', 'suedafrika', 'south africa',
+				'romania', 'rumänien', 'rumaenien', 'bukarest', 'sofia', 'bulgarien', 'bulgaria',
+				'belarus', 'weißrussland', 'weissrussland', 'lukaschenko', 'lukashenko',
+				// Health / travel international hooks: a hantavirus outbreak
+				// on a Dutch cruise ship to the Canaries is squarely 'welt'.
+				'hantavirus', 'ebola', 'cholera', 'pandemie', 'pandemic', 'outbreak',
+				'kreuzfahrtschiff', 'cruise ship', 'kreuzfahrt',
+				'international waters', 'internationale gewässer', 'high seas',
+				'g7', 'g20', 'opec', 'who ', 'imf', 'world bank', 'weltbank', 'unesco', 'unicef',
+			],
 			'community' => [
 				'community', 'verein', 'initiative', 'event', 'зустріч', 'поді', 'diaspora', 'ukrainische gemeinde',
 				'ukrainian community', 'netzwerktreffen', 'ehrenamt', 'freiwillig', 'benefiz', 'solidarity',
@@ -410,6 +433,15 @@ final class EPV2_Categorizer {
 			return self::canonical_slug($source_bias);
 		}
 
+		// Last-resort default. We previously returned 'deutschland' here
+		// regardless of context, which mis-routed BBC / Reuters / international
+		// stories about Spain, Romania, Iran, etc. into a domestic-Germany
+		// rubric. If the URL host is a non-German international outlet and
+		// nothing matches, fall back to 'welt' instead so foreign-affairs
+		// stories land in the correct rubric.
+		if ($source_bias !== '' && in_array(self::canonical_slug($source_bias), ['europa', 'welt'], true)) {
+			return self::canonical_slug($source_bias);
+		}
 		return 'deutschland';
 	}
 

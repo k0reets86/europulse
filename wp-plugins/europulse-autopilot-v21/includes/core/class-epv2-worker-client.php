@@ -107,13 +107,33 @@ final class EPV2_Worker_Client {
 			'ai_fallback_model'    => (string) ( $settings['ai_fallback_model'] ?? '' ),
 		];
 
+		// The queue row's `original_content` field stores only what the
+		// RSS / Google News feed handed us — usually the headline plus a
+		// 1–2 paragraph excerpt. EPV2_Source_Enricher::enrich_item later
+		// fetches the full article body and stores it in
+		// _meta.source_dossier.primary.content. Prefer that whenever it is
+		// substantially richer than the raw RSS field, so the worker
+		// rewrites against the actual article instead of the headline
+		// snippet (and the DE master no longer falls below publish-grade
+		// length on every other source).
+		$enriched_content = '';
+		if ( is_array( $existing['_meta']['source_dossier']['primary'] ?? null ) ) {
+			$candidate = (string) ( $existing['_meta']['source_dossier']['primary']['content'] ?? '' );
+			if ( mb_strlen( $candidate ) > mb_strlen( (string) ( $item->original_content ?? '' ) ) + 200 ) {
+				$enriched_content = $candidate;
+			}
+		}
+		$worker_original_content = $enriched_content !== ''
+			? $enriched_content
+			: (string) ( $item->original_content ?? '' );
+
 		return [
 			'queue_id'         => (int) ( $item->id ?? 0 ),
 			'stage'            => $normalized_stage,
 			'original_url'     => (string) ( $item->original_url     ?? '' ),
 			'original_title'   => (string) ( $item->original_title   ?? '' ),
 			'original_excerpt' => (string) ( $item->original_excerpt ?? '' ),
-			'original_content' => (string) ( $item->original_content ?? '' ),
+			'original_content' => $worker_original_content,
 			'original_date'    => (string) ( $item->original_date    ?? '' ),
 			'source_image_url' => (string) ( $item->source_image_url ?? '' ),
 			'category_proposed'=> (string) ( $item->category_proposed ?? '' ),

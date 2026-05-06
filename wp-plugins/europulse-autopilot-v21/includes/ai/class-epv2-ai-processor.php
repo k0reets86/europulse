@@ -7625,6 +7625,16 @@ final class EPV2_AI_Processor {
 		if ($dossier === []) {
 			return [];
 		}
+		// Earlier versions of this function dropped `content` entirely and
+		// stored only an `excerpt` truncated to 320–700 chars — that meant
+		// the worker only ever saw a few hundred characters of the source
+		// even when the enricher had fetched a 5–10 KB full article. The
+		// "DE master too short" warnings + rebuild_bundle loop traced
+		// directly to that truncation. Now we keep both: a short `excerpt`
+		// for previews / contracts that already expect it, and a much
+		// larger `content` field with the cleaned full body. With the
+		// 10 MB ai_payload safety guard in place we have headroom; even a
+		// worst-case 4 sources × 12 KB body + meta is well under 1 MB.
 		$compact = [];
 		$primary = is_array($dossier['primary'] ?? null) ? $dossier['primary'] : [];
 		if ($primary !== []) {
@@ -7632,6 +7642,7 @@ final class EPV2_AI_Processor {
 				'title' => self::trim_input_text((string) ($primary['title'] ?? ''), 240),
 				'url' => (string) ($primary['url'] ?? ''),
 				'excerpt' => self::trim_input_text((string) ($primary['excerpt'] ?? $primary['content'] ?? ''), $reduced_context ? 320 : 700),
+				'content' => self::trim_input_text((string) ($primary['content'] ?? $primary['excerpt'] ?? ''), $reduced_context ? 6000 : 12000),
 				'image' => EPV2_Media::normalize_featured_candidate_url((string) ($primary['image'] ?? '')),
 				'date' => sanitize_text_field((string) ($primary['date'] ?? '')),
 			];
@@ -7642,6 +7653,7 @@ final class EPV2_AI_Processor {
 				'title' => self::trim_input_text((string) ($shell_primary['title'] ?? ''), 220),
 				'url' => (string) ($shell_primary['url'] ?? ''),
 				'excerpt' => self::trim_input_text((string) ($shell_primary['excerpt'] ?? $shell_primary['content'] ?? ''), $reduced_context ? 240 : 520),
+				'content' => self::trim_input_text((string) ($shell_primary['content'] ?? $shell_primary['excerpt'] ?? ''), $reduced_context ? 4000 : 8000),
 				'image' => EPV2_Media::normalize_featured_candidate_url((string) ($shell_primary['image'] ?? '')),
 				'date' => sanitize_text_field((string) ($shell_primary['date'] ?? '')),
 			];
@@ -7655,6 +7667,7 @@ final class EPV2_AI_Processor {
 				'title' => self::trim_input_text((string) ($source['title'] ?? ''), 220),
 				'url' => (string) ($source['url'] ?? ''),
 				'excerpt' => self::trim_input_text((string) ($source['excerpt'] ?? $source['content'] ?? ''), $reduced_context ? 220 : 420),
+				'content' => self::trim_input_text((string) ($source['content'] ?? $source['excerpt'] ?? ''), $reduced_context ? 3000 : 6000),
 				'image' => EPV2_Media::normalize_featured_candidate_url((string) ($source['image'] ?? '')),
 				'date' => sanitize_text_field((string) ($source['date'] ?? '')),
 			];

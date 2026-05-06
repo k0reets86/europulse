@@ -16,6 +16,98 @@
 - [ ] Legacy backfill: walk existing rows in ready_publish/ready_review, re-build story card without re-running rewrite. Operator-visible only; doesn't affect future autonomy.
 - [ ] Worker rewriter could also read `card.publishable_estimate=='reject'` and short-circuit before the AI rewrite call — pure cost-saving for items the upfront pass already flagged as unpublishable.
 
+## Current Runtime Status 2026-05-06 17:35 UTC — Autonomous + legal compliance handoff
+
+### Pipeline / autonomous run
+
+- [x] Five fixes (A–E) for autonomous-run reject classes deployed (commit `ba66f90`). Stuck-thin-source mass-rejection pattern gone.
+- [x] 87 mass-rejected rows recovered to `ready_review` via one-shot WP-CLI eval.
+- [x] Story Card upfront pass + integration into categorizer / tags / rewriter / media / SEO.
+- [x] Top-tier SEO live (schema enricher, news sitemap with keywords+images, robots.txt for AI agents, /llms.txt + /humans.txt + /security.txt).
+- [ ] **Disable paywalled feeds** (Spiegel / Tagesspiegel / Welt / FAZ premium / Handelsblatt-paywall portion) — operator approval pending. Quick win: ~`UPDATE ep_epv2_sources SET is_active = 0 WHERE name IN ('SPIEGEL Schlagzeilen', 'Tagesspiegel', 'WELT Topnews', 'FAZ Aktuell', 'Handelsblatt Top');`. Restore by setting `is_active=1`.
+- [ ] Operator triage of 145 `ready_review` rows: keep / reject / manual edit. Lots of paywalled-source items waiting.
+- [ ] Watch for the rebuild_bundle_attempt_cap (commit `d3ab064`) firing on item 1286 / 1300+ — should terminate after 6 attempts; if not, raise priority.
+
+### Legal compliance — interactive workflow with operator (Variant A free path)
+
+- [ ] **Step 1 awaiting answer**: V.i.S.d.P. (name + postal address + email). Cannot fill Impressum without this.
+- [ ] Step 2 — Ukrainian LLC details: full latinised name, EGRPOU code, director full name, full address, phone, registration date.
+- [ ] Step 3 — confirm site emails: `editorial@europulse.eu`, `privacy@europulse.eu`, `security@europulse.eu` (any to skip / change?).
+- [ ] Step 4 — toggle `epv2_settings['show_ai_disclaimer']` = true (texts already populated; one-line eval).
+- [ ] Step 5 — `admin_email` replacement: `wp option update admin_email <real>` + `wp user update 1 --user_email=<real>`.
+- [ ] Step 6 — fill placeholders in `/impressum/` DE=41, EN=289, UK=288.
+- [ ] Step 7 — fill placeholders in `/datenschutz/` DE=3 (and EN/UK if exist).
+- [ ] Step 8 — expand `/ueber-uns/` DE=36 with editorial team E-E-A-T (named human + bio + photo).
+- [ ] Step 9 — fill `/korrekturen/` DE=40 with actual correction workflow.
+- [ ] Step 10 — fill `/kontakt/` DE=37 with real channels.
+- [ ] Step 11 — create `/editorial-guidelines/` page on three languages.
+- [ ] Step 12 — Complianz Wizard (Settings → Complianz → Wizard) — Strict opt-in, cookie blocker on.
+- [ ] Step 13 — install Two Factor plugin (free), enable for admin user 1.
+- [ ] Step 14 — sign Hetzner AVV (Robot console).
+- [ ] Step 15 — accept OpenAI / Anthropic / DeepSeek DPAs.
+
+### Tier 1 — waits for SSL/domain (when europulse.eu DNS goes live)
+
+- [ ] Let's Encrypt cert via certbot for europulse.eu (DE, UK paths).
+- [ ] HTTP/2 + HTTP/3 in nginx (`listen 443 ssl http2`).
+- [ ] HSTS header (`Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`).
+- [ ] CSP header (cautious, test with Rank Math + Polylang).
+- [ ] Cloudflare Free in front of origin (DDoS, basic WAF, HTTP/3).
+- [ ] Submit sitemaps to Google Search Console + Bing Webmaster + Yandex Webmaster.
+- [ ] IndexNow integration (instant ping to Bing/Yandex/Naver on publish).
+
+### Tier 2 — can deploy now (free)
+
+- [ ] Brotli compression in nginx.
+- [ ] WebP/AVIF auto-conversion (free plugin: WP-Optimize / Imagify free).
+- [ ] Author bios with photo + bio (E-E-A-T).
+- [ ] Internal-linking / Related-Posts widget (Contextual Related Posts free).
+- [ ] 404 page SEO-friendly (search + home link).
+- [ ] Hide WP version (`add_filter('the_generator', '__return_empty_string')`).
+- [ ] Disable XML-RPC unless used (`add_filter('xmlrpc_enabled', '__return_false')`).
+- [ ] WP Mail SMTP Free for transactional emails.
+- [ ] System cron instead of WP-Cron (`define('DISABLE_WP_CRON', true)` + `*/5 * * * * curl …/wp-cron.php`).
+
+### Tier 3 — content E-E-A-T
+
+- [ ] Editorial guidelines page on 3 languages.
+- [ ] Corrections policy with workflow + email + SLA.
+- [ ] Source dossier transparency block at article footer (publish dossier URLs).
+- [ ] FAQPage Schema generated from `card.key_facts`.
+- [ ] AI-disclosure label (toggle `epv2_settings['show_ai_disclaimer']`).
+
+### Tier 4 — performance
+
+- [ ] Measure CWV via PageSpeed Insights + Search Console after launch.
+- [ ] Critical CSS inline.
+- [ ] Defer non-critical JS.
+- [ ] Self-host Google Fonts.
+- [ ] Image preload for LCP candidate.
+
+### Tier 5 — agent search
+
+- [ ] JSON feed `/feed/json/`.
+- [ ] `citation` Schema array — dossier URLs as `CreativeWork`.
+- [ ] `retrievedDate`, `license`, `copyrightNotice` in Schema.
+- [ ] `isPartOf` chain Article → CollectionPage → WebSite.
+
+### Tier 6 — UX
+
+- [ ] AMP (optional).
+- [ ] PWA / Service Worker.
+- [ ] Web Push (OneSignal Free or native).
+- [ ] Newsletter (Mailchimp / Mailerlite Free).
+- [ ] RSS-to-Telegram autoposting.
+
+### Server / security hardening
+
+- [ ] `apt install fail2ban` + enable for SSH and nginx 4xx flooding.
+- [ ] SSH 2FA via `libpam-google-authenticator`.
+- [ ] Disable root password login (key-only).
+- [ ] Off-site backup: Hetzner Storage Box (~3 EUR/mo for 100 GB) or rclone+B2 with gpg encryption.
+- [ ] Cron the existing `scripts/epv2_pulse.sh status-json` every 5 min into a status file for external monitoring.
+- [ ] Uptime monitor (Uptime Kuma on a separate $5 VPS).
+
 ## Current Runtime Status 2026-05-06 09:50 UTC — Story Card upfront pass live
 
 - [x] Story Card architecture built and shipped (commit `46a1e5c`):

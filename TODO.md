@@ -1,5 +1,21 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-06 10:15 UTC — Story Card now drives categorizer + tags + rewriter + media
+
+- [x] Story Card built and persisted (commit `46a1e5c`).
+- [x] Worker pipeline reads card from `existing_payload._meta.story_card` and:
+  - overrides `ctx.categories` when card confidence ≥ 0.6 (commit `dec3c8a`)
+  - replaces TF-IDF tag stub with `card.tags` (commit `dec3c8a`)
+  - passes card to `rewrite_to_german()`; rewriter injects "STORY CARD (verbindliche Faktenbasis)" block with entities + key_facts + rewrite hints (commit `dec3c8a`)
+- [x] Media resolver consumes card (commit `ac08ea8`):
+  - `EPV2_Media::pexels_query` and `wikimedia_query` use `card.media_search_terms` ahead of title regex
+  - Publisher copies `_meta.story_card` into dossier at all three resolver call sites
+  - Honors `card.media_required` modes (skips when `generated`)
+- [x] Validation row 1178 (Ukrainska Pravda war story) end-to-end: card.cat=ukraine/0.95, transliterated DE title, source-host media (24tv.ua), tags inherited verbatim from card.
+- [ ] SEO stage (`worker-v21/src/epv2_worker/seo.py`) does not yet consume `card.seo`. Marginal quality lift; low priority since rewriter + tags already encode the semantic intent.
+- [ ] Legacy backfill: walk existing rows in ready_publish/ready_review, re-build story card without re-running rewrite. Operator-visible only; doesn't affect future autonomy.
+- [ ] Worker rewriter could also read `card.publishable_estimate=='reject'` and short-circuit before the AI rewrite call — pure cost-saving for items the upfront pass already flagged as unpublishable.
+
 ## Current Runtime Status 2026-05-06 09:50 UTC — Story Card upfront pass live
 
 - [x] Story Card architecture built and shipped (commit `46a1e5c`):

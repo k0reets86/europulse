@@ -56,6 +56,27 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 10:15 UTC — Story Card consumed by all major stages
+
+- Story Card now drives every major pipeline stage end-to-end (commits `46a1e5c`, `dec3c8a`, `ac08ea8`):
+  - **Categorizer**: PHP-side `EPV2_Categorizer::refine_with_story_card()` and worker-side `_story_card_init` in `pipeline.py` both override the keyword heuristic when `card.category.confidence >= 0.6`.
+  - **Tags**: worker `pipeline.py` replaces TF-IDF `key_phrases[:5]` stub with curated `card.tags` (clean German nouns vetted by the LLM upfront).
+  - **Rewriter**: worker `rewriter.py` injects a "STORY CARD (verbindliche Faktenbasis)" prompt block listing entities (people / orgs / places), key facts, geography, rewrite hints (tone / structure / length). Anchors fact preservation and stops fact drift.
+  - **Media (Pexels + Wikimedia)**: `EPV2_Media::pexels_query()` and `wikimedia_query()` first check `$source_dossier['story_card']` and use `card.media_search_terms` directly when present. `EPV2_Publisher` injects `_meta.story_card` into the dossier copy at all three media-resolver call sites.
+- Validation row 1178 (UA war story, Ukrainska Pravda source) shows the chain working:
+  - card.category = `ukraine` 0.95 (was `deutschland` from heuristic)
+  - card.tags = `["Ротація","ЗСУ","Сирський","Фронт","Військові"]`
+  - card.media_search_terms = `["Сирський","український військовий на позиції","солдати на передовій"]`
+  - card.key_facts[0] = `"Головком ЗСУ Сирський підписав наказ щодо обов'язкової ротації..."`
+  - payload.tags inherited from card; payload.categories=["ukraine"]
+  - DE title: `"Syrskij unterzeichnete Anordnung zur verpflichtenden Rotation an der Front"` — name transliterated correctly, factual structure matching card.
+  - Media: `https://24tv.ua/resources/photos/.../3062439.jpg` — source-host image (24tv.ua), NOT generic Pexels stock. `card.media_required=source_first` respected end-to-end.
+- The cruise-ship hantavirus / Phagentherapie / Ein-Jahr-Schwarz-Rot / Helgoland test set all routed correctly; the BMW Pexels-stock regression earlier today should now pull a BMW-on-bild.de image when the card names the company.
+- Outstanding wiring (low priority, lower marginal value):
+  - SEO stage (`worker-v21/src/epv2_worker/seo.py`) could read `card.seo.primary_keyword` and `card.seo.secondary_keywords` instead of re-deriving from rewritten German.
+  - WP-CLI re-categorization sweep over existing `ready_publish` / `ready_review` rows (would only refresh the visible category column for old payloads; doesn't improve future automation).
+- Selection-pipeline efficiency from earlier today still holds: noise rejects 96% drop, low-score 46% drop, staged→queued conversion 6%→94%, 32 active sources curated for top-tier German + Ukrainian outlets.
+
 ## Latest Handoff 2026-05-06 09:50 UTC — Story Card upfront semantic pass
 
 - Implemented the user's "карта новости" architecture as a first-class upfront stage. One AI pass per fresh row produces a structured `_meta.story_card` (commit `46a1e5c`):

@@ -280,9 +280,17 @@ final class EPV2_Collector {
 				if ((int) $by_category[$category] >= $collect_limit) {
 					break;
 				}
+				// Previously this branch broke out of the inner loop after the
+				// first successful ingest, hard-capping every collect pulse to
+				// at most one new row per category regardless of
+				// max_collect_per_category. With max=99 we observed 246 staged
+				// candidates collapsing to only 11 queued. `continue` lets
+				// $collect_limit do its real job; ingest_candidate still runs
+				// dedup / planner / queue gates per item and increments
+				// $by_category[$category] when it accepts.
 				if (self::ingest_candidate((array) $candidate['item'], (object) $candidate['source'], $by_category)) {
 					$count++;
-					break;
+					continue;
 				}
 			}
 		}

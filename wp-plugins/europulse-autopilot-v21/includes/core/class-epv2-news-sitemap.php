@@ -52,7 +52,9 @@ final class EPV2_News_Sitemap {
 		$language = self::site_language();
 
 		echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-		echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">' . "\n";
+		echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
+			. ' xmlns:news="http://www.google.com/schemas/sitemap-news/0.9"'
+			. ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">' . "\n";
 
 		foreach ($posts as $post) {
 			$post_id = (int) $post->ID;
@@ -62,16 +64,27 @@ final class EPV2_News_Sitemap {
 			}
 			$title = wp_strip_all_tags(get_the_title($post_id));
 			$published_at = get_post_time('c', true, $post_id);
+			$keywords = self::keywords_for_post($post_id);
+			$post_lang = self::post_language_or_site_language($post_id, $language);
 			echo "  <url>\n";
 			echo '    <loc>' . esc_xml($permalink) . "</loc>\n";
 			echo "    <news:news>\n";
 			echo "      <news:publication>\n";
 			echo '        <news:name>' . esc_xml($site_name) . "</news:name>\n";
-			echo '        <news:language>' . esc_xml($language) . "</news:language>\n";
+			echo '        <news:language>' . esc_xml($post_lang) . "</news:language>\n";
 			echo "      </news:publication>\n";
 			echo '      <news:publication_date>' . esc_xml($published_at) . "</news:publication_date>\n";
 			echo '      <news:title>' . esc_xml($title) . "</news:title>\n";
+			if ($keywords !== '') {
+				echo '      <news:keywords>' . esc_xml($keywords) . "</news:keywords>\n";
+			}
 			echo "    </news:news>\n";
+			$image_url = (string) get_the_post_thumbnail_url($post_id, 'large');
+			if ($image_url !== '') {
+				echo "    <image:image>\n";
+				echo '      <image:loc>' . esc_xml($image_url) . "</image:loc>\n";
+				echo "    </image:image>\n";
+			}
 			echo "  </url>\n";
 		}
 
@@ -147,5 +160,55 @@ final class EPV2_News_Sitemap {
 			return 'de';
 		}
 		return $lang;
+	}
+
+	private static function post_language_or_site_language(int $post_id, string $fallback): string {
+		// Polylang: read the post's actual language so each language version
+		// reports its own locale to Google News.
+		if (function_exists('pll_get_post_language')) {
+			$lang = (string) pll_get_post_language($post_id, 'slug');
+			if ($lang !== '') {
+				return strtolower(substr($lang, 0, 2));
+			}
+		}
+		return $fallback;
+	}
+
+	private static function keywords_for_post(int $post_id): string {
+		$keywords = [];
+		// Prefer the upfront story_card tags — clean German nouns,
+		// LLM-curated, aligned with the rest of the SEO graph.
+		$queue_id = (int) get_post_meta($post_id, '_epv2_queue_id', true);
+		if ($queue_id > 0) {
+			global $wpdb;
+			$table = $wpdb->prefix . 'epv2_queue';
+			$row = $wpdb->get_row($wpdb->prepare("SELECT ai_payload FROM {$table} WHERE id = %d", $queue_id), ARRAY_A);
+			if (is_array($row)) {
+				$payload = json_decode((string) ($row['ai_payload'] ?? ''), true);
+				if (is_array($payload)) {
+					$card_tags = (array) ($payload['_meta']['story_card']['tags'] ?? []);
+					foreach ($card_tags as $tag) {
+						$tag = trim((string) $tag);
+						if ($tag !== '' && ! in_array($tag, $keywords, true)) {
+							$keywords[] = $tag;
+						}
+					}
+				}
+			}
+		}
+		// Fall back / supplement with WP post tags.
+		$tags = wp_get_post_tags($post_id, ['fields' => 'names']);
+		if (is_array($tags)) {
+			foreach ($tags as $name) {
+				$name = trim((string) $name);
+				if ($name !== '' && ! in_array($name, $keywords, true)) {
+					$keywords[] = $name;
+				}
+				if (count($keywords) >= 10) {
+					break;
+				}
+			}
+		}
+		return implode(', ', array_slice($keywords, 0, 10));
 	}
 }

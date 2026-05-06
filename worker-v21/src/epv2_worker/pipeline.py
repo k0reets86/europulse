@@ -314,6 +314,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         openai_api_key=ctx.openai_key,
         deepseek_api_key=ctx.deepseek_key,
         provider_order=ctx.provider_order,
+        story_card=story_card_for_rewrite,
     )
     ctx.german_master.seo_title = seo.seo_title
     ctx.german_master.meta_description = seo.meta_description
@@ -414,6 +415,13 @@ async def _regen_media(ctx: PipelineContext) -> None:
 
 async def _regen_seo(ctx: PipelineContext) -> None:
     existing = ctx.request.existing_payload
+    regen_card = None
+    if isinstance(existing, dict):
+        meta = existing.get("_meta") or {}
+        if isinstance(meta, dict):
+            sc = meta.get("story_card")
+            if isinstance(sc, dict) and sc:
+                regen_card = sc
     seo = await generate_seo(
         title_de=existing.get("title_de", ""),
         lead_de=existing.get("lead_de", ""),
@@ -422,6 +430,7 @@ async def _regen_seo(ctx: PipelineContext) -> None:
         openai_api_key=ctx.openai_key,
         deepseek_api_key=ctx.deepseek_key,
         provider_order=ctx.provider_order,
+        story_card=regen_card,
     )
     ctx.german_master = LanguagePackage(
         lang="de",

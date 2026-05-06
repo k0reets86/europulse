@@ -45,8 +45,35 @@ async def generate_seo(
     openai_api_key: str,
     deepseek_api_key: str = "",
     provider_order: list[tuple[str, str, str]] | None = None,
+    story_card: dict | None = None,
 ) -> SEOResult:
-    user = f"""Artikel-Titel: {title_de}
+    # When the upfront story card supplied an SEO seed, treat it as the
+    # primary keyword pool and as a baseline meta-description hint so the
+    # SEO output stays aligned with the same semantic snapshot the
+    # categorizer / rewriter / media used.
+    seed_block = ""
+    if isinstance(story_card, dict) and story_card:
+        seo_hint = story_card.get("seo") or {}
+        if isinstance(seo_hint, dict):
+            primary_kw = str(seo_hint.get("primary_keyword") or "").strip()
+            secondary = [str(k).strip() for k in (seo_hint.get("secondary_keywords") or []) if str(k).strip()]
+            title_pattern = str(seo_hint.get("title_pattern_hint") or "").strip()
+            lines: list[str] = []
+            if primary_kw:
+                lines.append(f"Primäres Keyword (verbindlich): {primary_kw}")
+            if secondary:
+                lines.append("Sekundäre Keywords: " + ", ".join(secondary[:5]))
+            if title_pattern:
+                lines.append(f"Titel-Muster-Hinweis: {title_pattern}")
+            tags_hint = story_card.get("tags") or []
+            if isinstance(tags_hint, list):
+                tag_names = [str(t).strip() for t in tags_hint if str(t).strip()]
+                if tag_names:
+                    lines.append("Tag-Pool: " + ", ".join(tag_names[:8]))
+            if lines:
+                seed_block = "STORY-CARD SEO-Hinweise:\n" + "\n".join(lines) + "\n\n"
+
+    user = f"""{seed_block}Artikel-Titel: {title_de}
 Teaser: {lead_de}
 Schlüsselbegriffe: {", ".join(key_phrases)}
 Artikelanfang: {body_de[:800]}

@@ -17,6 +17,9 @@ final class EPV2_Plugin {
 		EPV2_Publisher::register();
 		EPV2_News_Sitemap::register();
 		EPV2_News_Sitemap::maybe_render_early();
+		if ( class_exists( 'EPV2_Schema_Enricher' ) ) {
+			EPV2_Schema_Enricher::register();
+		}
 
 		if (is_admin()) {
 			EPV2_Admin::register();

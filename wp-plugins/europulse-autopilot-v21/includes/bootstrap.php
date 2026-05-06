@@ -43,6 +43,7 @@ final class EPV2_Bootstrap {
 			'EPV2_Internal_Linker' => 'core/class-epv2-internal-linker.php',
 			'EPV2_Time_Planner' => 'core/class-epv2-time-planner.php',
 			'EPV2_News_Sitemap' => 'core/class-epv2-news-sitemap.php',
+			'EPV2_Schema_Enricher' => 'seo/class-epv2-schema-enricher.php',
 			'EPV2_Story_Clusters' => 'core/class-epv2-story-clusters.php',
 			'EPV2_Capabilities' => 'core/class-epv2-capabilities.php',
 			'EPV2_Installer' => 'core/class-epv2-installer.php',

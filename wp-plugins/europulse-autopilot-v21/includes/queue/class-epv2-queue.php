@@ -1498,6 +1498,24 @@ final class EPV2_Queue {
 		if (! $current) {
 			return;
 		}
+		// Central terminal-state guard. Eight independent code paths used to
+		// call mark_state(rejected) or mark_state(error) directly: worker
+		// blocker terminalization, workflow_quarantine selection_blocked,
+		// workflow_quarantine retry_exhausted, normalize_non_active_recoverable,
+		// stale_time_sensitive, publisher media-fail, resilience-manager
+		// retry-exhausted, and the older repair sites. Every one of those
+		// could mass-reject items on a transient mid-pipeline issue. This
+		// single guard converts intended-rejection / intended-error to
+		// `ready_review` whenever the row carries a salvageable signal —
+		// ingest score >= 30 OR upfront story_card flagged the piece as
+		// publishable_estimate=high|medium — UNLESS the rejection reason
+		// is a genuinely-hard editorial block (duplicate, stale time-
+		// sensitive, hard_editorial_block, context_reject, sport_fixture).
+		// Operator triages ready_review manually; nothing gets silently
+		// killed.
+		if (in_array($state, ['rejected', 'error'], true)) {
+			$state = self::soft_terminal_state_guard((int) $id, $state, $extra, $current);
+		}
 		$state = self::canonicalize_single_workflow_state($id, $state, $current, $extra);
 		if ($state === 'ready_publish') {
 			$payload_json = array_key_exists('ai_payload', $extra) ? (string) $extra['ai_payload'] : (string) ($current->ai_payload ?? '');
@@ -2013,6 +2031,60 @@ final class EPV2_Queue {
 			return strcmp($aReadyAt, $bReadyAt);
 		}
 		return strcmp((string) $a->created_at, (string) $b->created_at);
+	}
+
+	/**
+	 * Convert a requested terminal state (rejected/error) to ready_review
+	 * unless the row is genuinely unsalvageable. Genuinely-hard reasons:
+	 * duplicates, stale time-sensitive, hard editorial block, context
+	 * reject, sport-fixture livepage. Everything else routes to manual
+	 * review so the operator (not a brittle automated re-score) decides.
+	 */
+	private static function soft_terminal_state_guard(int $id, string $intended_state, array $extra, ?object $current): string {
+		if (! $current) {
+			return $intended_state;
+		}
+		$error_message = (string) ($extra['error_message'] ?? '');
+		// Keep terminal for genuinely-hard reasons.
+		if (preg_match(
+			'/(duplicate|^stale_time_sensitive|stale_time_sensitive|hard_editorial|context_reject|sport_fixture|payload size guard|max_allowed_packet|community_promo|routine_official)/iu',
+			$error_message
+		) === 1) {
+			return $intended_state;
+		}
+		// Read the current payload + admin notes so we can consult ingest
+		// score and the upfront story card.
+		$payload_json = '';
+		if (array_key_exists('ai_payload', $extra) && is_string($extra['ai_payload'])) {
+			$payload_json = $extra['ai_payload'];
+		} else {
+			$row = self::get_item($id);
+			if ($row instanceof \stdClass) {
+				$payload_json = (string) ($row->ai_payload ?? '');
+			}
+		}
+		$payload = $payload_json !== '' ? json_decode($payload_json, true) : [];
+		if (! is_array($payload)) {
+			$payload = [];
+		}
+		$ingest_score = (int) ($current->story_score ?? 0);
+		$card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : null;
+		$card_estimate = '';
+		if (is_array($card)) {
+			$card_estimate = strtolower((string) ($card['publishable_estimate'] ?? ''));
+		}
+		$card_facts = is_array($card['key_facts'] ?? null) ? count($card['key_facts']) : 0;
+		// Salvageable when EITHER the ingest score cleared C-tier OR the
+		// upfront card thinks the piece is publishable OR the card pulled
+		// 3+ atomic key facts from the source.
+		$salvageable =
+			$ingest_score >= 30
+			|| in_array($card_estimate, ['high', 'medium'], true)
+			|| $card_facts >= 3;
+		if (! $salvageable) {
+			return $intended_state;
+		}
+		return 'ready_review';
 	}
 
 	public static function update_fields(int $id, array $fields): void {

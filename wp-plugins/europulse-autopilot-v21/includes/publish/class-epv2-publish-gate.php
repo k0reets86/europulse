@@ -165,9 +165,9 @@ final class EPV2_Publish_Gate {
 		if ($url === '') {
 			return false;
 		}
-		if (class_exists('EPV2_Media') && EPV2_Media::is_generated_story_cover_url($url)) {
-			return false;
-		}
+		// Generated story covers are accepted as last-resort media (Fix E2);
+		// the article is otherwise publish-grade and the cover is category-
+		// aware. Operator can swap the image after publish via WP admin.
 		if (preg_match('/<[^>]+>/', $url) === 1) {
 			return false;
 		}

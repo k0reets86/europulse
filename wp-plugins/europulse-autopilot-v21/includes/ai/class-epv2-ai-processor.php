@@ -2720,9 +2720,21 @@ final class EPV2_AI_Processor {
 			return true;
 		}
 		$dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? (array) $payload['_meta']['source_dossier'] : [];
-		return
-			! self::payload_featured_media_is_generic_stock($payload)
-			&& EPV2_Media::is_source_host_media($featured_media_url, $dossier);
+		if (! self::payload_featured_media_is_generic_stock($payload)
+			&& EPV2_Media::is_source_host_media($featured_media_url, $dossier)) {
+			return true;
+		}
+		// Last-resort acceptance: if the row carries a generated_story_cover
+		// (Fix E2 fallback when neither source-host nor Wikimedia/Pexels
+		// produced a usable image), allow it through. Otherwise the article
+		// gets stuck in ready_publish indefinitely waiting for media that
+		// will never appear, even though the rest of the contract is fine.
+		// The generated cover is category-aware and editorially honest —
+		// not an SEO-stuffing stock placeholder.
+		if (EPV2_Media::is_generated_story_cover_url($featured_media_url)) {
+			return true;
+		}
+		return false;
 	}
 
 	private static function publish_ready_gate_payload_integrity_passes(array $payload, array $meta): bool {

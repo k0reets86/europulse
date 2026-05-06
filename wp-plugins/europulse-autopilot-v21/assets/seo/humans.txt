@@ -1,0 +1,19 @@
+/* TEAM */
+
+Project: EuroPulse — Trilingual European news for the Ukrainian diaspora
+Site: https://europulse.eu/
+Languages: de, uk, en
+
+/* THANKS */
+
+WordPress core, Polylang, Rank Math SEO, Blocksy, FastCGI cache, Redis Object Cache,
+the OpenAI / DeepSeek / Anthropic / Google AI / Mistral teams whose models power
+the editorial pipeline, and the source publications named in every article.
+
+/* SITE */
+
+Last update: 2026-05-06
+Standards: HTML5, RFC 9116, Schema.org, Sitemaps.org, Google News Sitemap,
+  IndexNow.
+Languages of the editorial pipeline: PHP 8.3, Python 3.12, MariaDB 10.11.
+Hosting: Hetzner / Ubuntu 24.04, nginx, php-fpm, MariaDB.

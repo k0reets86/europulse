@@ -77,6 +77,7 @@ final class EPV2_Bootstrap {
 			'EPV2_AI_Processor' => 'ai/class-epv2-ai-processor.php',
 			'EPV2_AI_Client' => 'ai/class-epv2-ai-client.php',
 			'EPV2_AI_Response_Validator' => 'ai/class-epv2-ai-response-validator.php',
+			'EPV2_Content_Kinds' => 'ai/class-epv2-content-kinds.php',
 			'EPV2_Story_Card_Builder' => 'ai/class-epv2-story-card-builder.php',
 			'EPV2_Prompt_Profiles' => 'ai/class-epv2-prompt-profiles.php',
 			'EPV2_AI_Analyzer' => 'ai/class-epv2-ai-analyzer.php',

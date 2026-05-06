@@ -62,13 +62,21 @@ final class EPV2_Publish_Gate {
 				$blockers[] = 'stage_contract';
 			}
 
-			$brief_ticker = self::payload_is_brief_live_ticker($payload);
-			$quality_publishable = self::quality_set_publishable($meta, 'quality', $brief_ticker)
-				&& self::quality_set_publishable($meta, 'seo_quality', $brief_ticker)
-				&& self::quality_set_publishable($meta, 'release_quality', $brief_ticker)
-				&& self::quality_set_publishable($meta, 'google_quality', $brief_ticker);
+			$quality_publishable = EPV2_Content_Kinds::payload_meets_quality($payload);
 			if (! $quality_publishable) {
 				$blockers[] = 'quality_contract';
+			}
+			$enrichment_publishable = EPV2_Content_Kinds::payload_meets_enrichment($payload);
+			if (! $enrichment_publishable) {
+				$blockers[] = 'enrichment_required';
+			}
+			$length_publishable = EPV2_Content_Kinds::payload_meets_de_length($payload);
+			if (! $length_publishable) {
+				$blockers[] = 'length_below_kind_minimum';
+			}
+			$sources_publishable = EPV2_Content_Kinds::payload_meets_sources($payload);
+			if (! $sources_publishable) {
+				$blockers[] = 'sources_below_kind_minimum';
 			}
 
 			$media_publishable = self::payload_media_publishable($payload);
@@ -96,6 +104,9 @@ final class EPV2_Publish_Gate {
 		}
 
 		$blockers = array_values(array_unique(array_filter($blockers)));
+		$kind_publishable = ($enrichment_publishable ?? true)
+			&& ($length_publishable ?? true)
+			&& ($sources_publishable ?? true);
 		$allowed = $blockers === []
 			&& $selection_publishable
 			&& $context_publishable
@@ -104,6 +115,7 @@ final class EPV2_Publish_Gate {
 			&& $quality_publishable
 			&& $media_publishable
 			&& $payload_publishable
+			&& $kind_publishable
 			&& $schedule_publishable
 			&& ! $already_published;
 
@@ -112,6 +124,7 @@ final class EPV2_Publish_Gate {
 			'blockers' => $blockers,
 			'context' => $context,
 			'selection_decision' => $decision,
+			'content_kind' => $payload === [] ? '' : EPV2_Content_Kinds::detect_kind($payload),
 			'selection_publishable' => $selection_publishable,
 			'context_publishable' => $context_publishable,
 			'live_angle_publishable' => $live_angle_publishable,
@@ -119,6 +132,9 @@ final class EPV2_Publish_Gate {
 			'quality_publishable' => $quality_publishable,
 			'media_publishable' => $media_publishable,
 			'payload_publishable' => $payload_publishable,
+			'enrichment_publishable' => $enrichment_publishable ?? true,
+			'length_publishable' => $length_publishable ?? true,
+			'sources_publishable' => $sources_publishable ?? true,
 			'schedule_publishable' => $schedule_publishable,
 			'manual_override' => $manual_override,
 		];
@@ -153,35 +169,7 @@ final class EPV2_Publish_Gate {
 		return EPV2_Queue::item_has_publish_limit_override($item) || EPV2_Queue::item_has_priority_publish_override($item);
 	}
 
-	private static function quality_set_publishable(array $meta, string $key, bool $brief_ticker = false): bool {
-		$quality = is_array($meta[$key] ?? null) ? $meta[$key] : [];
-		if (empty($quality['pass'])) {
-			return false;
-		}
-		$score = (int) ($quality['score'] ?? 0);
-		// Brief live-tickers from authoritative sources (Tagesschau, dpa, etc.)
-		// pick up "may be too short" warnings on release_quality / google_quality
-		// that drop scores into the 80s. The story_card already declared the
-		// item intentionally brief and high-publishable; trust that signal and
-		// allow ≥80 for those two scorers. Editorial + SEO scores still need 90+.
-		if ($brief_ticker && in_array($key, ['release_quality', 'google_quality'], true)) {
-			return $score >= 80;
-		}
-		return $score >= 90;
-	}
-
-	private static function payload_is_brief_live_ticker(array $payload): bool {
-		$card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
-		if ($card === []) {
-			return false;
-		}
-		$length_profile = sanitize_key((string) ($card['rewrite']['length_profile'] ?? ''));
-		if ($length_profile !== 'brief') {
-			return false;
-		}
-		$publishable = strtolower((string) ($card['publishable_estimate'] ?? ''));
-		return in_array($publishable, ['high', 'medium'], true);
-	}
+	// Per-kind quality thresholds now live in EPV2_Content_Kinds::specs().
 
 	private static function payload_media_publishable(array $payload): bool {
 		if (class_exists('EPV2_AI_Processor') && method_exists('EPV2_AI_Processor', 'payload_media_contract_passes')) {

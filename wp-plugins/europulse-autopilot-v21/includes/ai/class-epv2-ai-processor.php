@@ -2744,7 +2744,7 @@ final class EPV2_AI_Processor {
 		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
 		$content_plain = trim(wp_strip_all_tags((string) ($de['content'] ?? '')));
 		$short_factual_ready = self::payload_allows_short_factual_bulletin($payload, $content_plain)
-			|| self::payload_allows_brief_live_ticker($payload, $content_plain);
+			|| self::payload_meets_kind_short_form($payload, $content_plain);
 		if (! self::quality_meets_publish_gate($quality, 'editorial')) {
 			return false;
 		}
@@ -4874,11 +4874,26 @@ final class EPV2_AI_Processor {
 		if (! empty($meta['blockers'])) {
 			return false;
 		}
-		return (int) ($meta['quality']['score'] ?? 0) >= 100
-			&& (int) ($meta['seo_quality']['score'] ?? 0) >= 100
-			&& (int) ($meta['release_quality']['score'] ?? 0) >= 100
-			&& (int) ($meta['google_quality']['score'] ?? 0) >= 100
-			&& self::payload_primary_media_url($payload) !== '';
+		if (self::payload_primary_media_url($payload) === '') {
+			return false;
+		}
+		$quality = (int) ($meta['quality']['score'] ?? 0);
+		$seo = (int) ($meta['seo_quality']['score'] ?? 0);
+		$release = (int) ($meta['release_quality']['score'] ?? 0);
+		$google = (int) ($meta['google_quality']['score'] ?? 0);
+		if ($quality >= 100 && $seo >= 100 && $release >= 100 && $google >= 100) {
+			return true;
+		}
+		// Per-kind quality thresholds: short forms (breaking_alert,
+		// news_brief, sport_result) accept lower release_quality /
+		// google_quality scores by spec — those scorers tax brief items
+		// for "may be too short" warnings that don't apply when the kind
+		// is intentionally brief. EPV2_Content_Kinds enforces the actual
+		// per-kind thresholds, here we just delegate.
+		if (EPV2_Content_Kinds::payload_meets_quality($payload)) {
+			return true;
+		}
+		return false;
 	}
 
 	private static function payload_requires_fresh_rebuild_fast(array $payload): bool {
@@ -5928,13 +5943,27 @@ final class EPV2_AI_Processor {
 		if (self::payload_allows_short_factual_bulletin($payload, $content_plain)) {
 			return true;
 		}
-		if (self::payload_allows_brief_live_ticker($payload, $content_plain)) {
+		if (self::payload_meets_kind_short_form($payload, $content_plain)) {
 			return true;
 		}
 		if ($source_count >= 2 && mb_strlen($content_plain) >= max($de_soft, $de_min + 120)) {
 			return true;
 		}
 		return false;
+	}
+
+	private static function payload_meets_kind_short_form(array $payload, string $content_plain): bool {
+		$kind = EPV2_Content_Kinds::detect_kind($payload);
+		$short_kinds = [
+			EPV2_Content_Kinds::KIND_BREAKING_ALERT,
+			EPV2_Content_Kinds::KIND_NEWS_BRIEF,
+			EPV2_Content_Kinds::KIND_SPORT_RESULT,
+		];
+		if (! in_array($kind, $short_kinds, true)) {
+			return false;
+		}
+		return EPV2_Content_Kinds::payload_meets_de_length($payload, $kind)
+			&& EPV2_Content_Kinds::payload_meets_quality($payload, $kind);
 	}
 
 	private static function payload_story_budget_profile(array $payload): array {
@@ -6541,6 +6570,9 @@ final class EPV2_AI_Processor {
 		$short_factual_ready =
 			self::payload_allows_short_factual_bulletin($payload, $content_plain)
 			&& self::payload_has_publish_grade_substance($payload);
+		$kind_short_form_ready =
+			self::payload_meets_kind_short_form($payload, $content_plain)
+			&& self::payload_has_publish_grade_substance($payload);
 		$ready_publish_fast =
 			$translations_ready
 			&& $publish_finish_ready
@@ -6553,6 +6585,7 @@ final class EPV2_AI_Processor {
 					&& (int) ($payload['_meta']['google_quality']['score'] ?? 0) >= 100
 				)
 				|| $short_factual_ready
+				|| $kind_short_form_ready
 			);
 		$completed = [
 			'source_received' => true,
@@ -6846,43 +6879,17 @@ final class EPV2_AI_Processor {
 		if ($source_count <= 0) {
 			return false;
 		}
-		return mb_strlen($content_plain) >= $de_min
-			|| self::payload_allows_short_factual_bulletin($payload, $content_plain)
-			|| self::payload_allows_brief_live_ticker($payload, $content_plain);
-	}
-
-	// Honors story_card editorial signal that the item is intentionally brief
-	// (length_profile=brief on a live-ticker / news-bulletin), so the budget
-	// profile's 700–980 char minimum (calibrated for full features) doesn't
-	// reject legitimately short authoritative-source tickers like Tagesschau /
-	// dpa eilmeldungen. Quality + selection gates still apply downstream.
-	private static function payload_allows_brief_live_ticker(array $payload, string $content_plain): bool {
-		if (mb_strlen($content_plain) < 250) {
-			return false;
+		// Default budget profile is calibrated for the news_article kind.
+		// Shorter kinds (breaking_alert / news_brief / sport_result) have
+		// their own length floor in EPV2_Content_Kinds and don't need to
+		// satisfy the budget profile's de_min.
+		if (mb_strlen($content_plain) >= $de_min) {
+			return true;
 		}
-		$card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
-		if ($card === []) {
-			return false;
+		if (self::payload_allows_short_factual_bulletin($payload, $content_plain)) {
+			return true;
 		}
-		$length_profile = sanitize_key((string) ($card['rewrite']['length_profile'] ?? ''));
-		if ($length_profile !== 'brief') {
-			return false;
-		}
-		$publishable = strtolower((string) ($card['publishable_estimate'] ?? ''));
-		if (! in_array($publishable, ['high', 'medium'], true)) {
-			return false;
-		}
-		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
-		if (! empty($meta['blockers'])) {
-			return false;
-		}
-		foreach (['quality', 'release_quality', 'google_quality'] as $key) {
-			$quality = is_array($meta[$key] ?? null) ? $meta[$key] : [];
-			if (empty($quality['pass'])) {
-				return false;
-			}
-		}
-		return (int) ($meta['source_count'] ?? 0) >= 1;
+		return self::payload_meets_kind_short_form($payload, $content_plain);
 	}
 
 	private static function payload_allows_short_factual_bulletin(array $payload, string $content_plain): bool {

@@ -1139,12 +1139,21 @@ final class EPV2_Budget_Manager {
 		int $editorialInterest,
 		int $consensusMentions
 	): int {
-		if ($score < 34 || $score >= 40) {
+		if ($score >= 40) {
 			return $score;
 		}
 
 		$category = self::canonical_category($category);
 		$seriousCategories = ['politik', 'wirtschaft', 'welt', 'ukraine', 'europa', 'leben-in-deutschland', 'sport', 'kultur', 'community', 'deutschland', 'bayern', 'muenchen'];
+		// Heavyweight news categories where a strong signal at score 30-33
+		// shouldn't fall off the cliff into D-tier reject. Borderline window
+		// for these categories starts at 30 (was 34); for the broader
+		// serious set the original 34..39 window applies.
+		$heavyweightCategories = ['politik', 'welt', 'ukraine', 'wirtschaft', 'deutschland'];
+		$lowerBound = in_array($category, $heavyweightCategories, true) ? 30 : 34;
+		if ($score < $lowerBound) {
+			return $score;
+		}
 		if (! in_array($category, $seriousCategories, true)) {
 			return $score;
 		}
@@ -1166,6 +1175,10 @@ final class EPV2_Budget_Manager {
 			return $score;
 		}
 
+		// Lift only as far as the publish_c review threshold for the
+		// category — never higher than 40 — so a 30-tier story becomes
+		// reviewable, not auto-published. publish_c is 40 by default for
+		// the heavyweight set; using max($score, 40) preserves that.
 		return max($score, 40);
 	}
 

@@ -985,6 +985,78 @@ final class EPV2_AI_Processor {
 							'run_id' => $run,
 							'duration_ms' => self::duration_ms_since($item_started_at),
 						]);
+							// Worker-blocker terminalization. Previously this was nested
+							// inside `if ($worker_stage === 'rebuild_bundle')`, so when
+							// publish_finish or translate_* returned `_meta.blockers`
+							// (e.g. "Primary source too thin for autopublish") the row
+							// kept cycling under a 30-minute cooldown instead of moving
+							// to ready_review. Hoisted out: any worker stage that
+							// returns blockers or ready_review outcome terminalizes
+							// immediately.
+							$worker_outcome_global = sanitize_key((string) ($worker_response['outcome'] ?? ''));
+							$worker_blockers_global = self::payload_blocker_strings($payload);
+							if (
+								isset($worker_stage)
+								&& in_array((string) $worker_stage, ['rebuild_bundle', 'publish_finish', 'translate_uk', 'translate_en', 'translate_finish'], true)
+								&& ($worker_outcome_global === 'ready_review' || $worker_blockers_global !== [])
+							) {
+								$payload = self::set_payload_pipeline_stage($payload, '');
+								$terminal_gate_global = EPV2_Publish_Gate::evaluate($item, $payload, [
+									'context' => 'worker_terminal_outcome',
+								]);
+								$terminal_state_global = empty($terminal_gate_global['selection_publishable']) ? 'rejected' : 'ready_review';
+								$terminal_notes_global = [
+									'selection' => $analysis,
+									'gate' => $gate,
+									'_system' => [
+										'workflow_terminal_reason' => 'worker_terminal_outcome',
+										'quarantine_reason' => $worker_blockers_global !== [] ? 'worker_blockers' : 'worker_ready_review',
+										'worker_outcome' => $worker_outcome_global,
+										'worker_blockers' => $worker_blockers_global,
+										'worker_stage_at_terminal' => (string) $worker_stage,
+										'last_publish_gate_blockers' => array_values((array) ($terminal_gate_global['blockers'] ?? [])),
+										'workflow_step' => '',
+										'workflow_step_status' => 'terminal',
+										'workflow_owner_token' => '',
+										'workflow_heartbeat_at' => '',
+										'next_operator_action' => $terminal_state_global === 'ready_review' ? 'manual_editorial_review' : 'review_source_or_restore_manually',
+									],
+								];
+								if ($terminal_state_global === 'ready_review') {
+									$terminal_notes_global['_system']['manual_confirmation_required'] = 'worker_blockers';
+								}
+								EPV2_Queue::mark_state((int) $item->id, $terminal_state_global, [
+									'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
+									'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+									'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
+									'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
+									'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+									'error_message' => $terminal_state_global === 'ready_review'
+										? sprintf(
+											'Материал остановлен для ручной проверки на стадии %s: worker вернул blockers (%s).',
+											(string) $worker_stage,
+											implode(', ', $worker_blockers_global)
+										)
+										: sprintf(
+											'Материал снят с автопубликации на стадии %s: canonical publish gate заблокировал selection decision "%s".',
+											(string) $worker_stage,
+											(string) ($terminal_gate_global['selection_decision'] ?? 'unknown')
+										),
+									'admin_notes' => wp_json_encode($terminal_notes_global, JSON_UNESCAPED_UNICODE),
+								]);
+								self::log_process_item_step('after_worker_terminal_outcome_global', (int) $item->id, [
+									'run_id' => $run,
+									'state' => $terminal_state_global,
+									'worker_stage' => (string) $worker_stage,
+									'worker_outcome' => $worker_outcome_global,
+									'blockers' => $worker_blockers_global,
+									'duration_ms' => self::duration_ms_since($item_started_at),
+								]);
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = 'worker_terminal_' . $terminal_state_global . '_' . (string) $worker_stage;
+								break;
+							}
 							if (isset($worker_stage) && (string) $worker_stage === 'rebuild_bundle') {
 							$worker_outcome = sanitize_key((string) ($worker_response['outcome'] ?? ''));
 							$payload_blockers = self::payload_blocker_strings($payload);

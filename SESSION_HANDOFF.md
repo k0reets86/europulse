@@ -56,6 +56,20 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 16:55 UTC — Five fixes for autonomous-run reject classes (A-E)
+
+- First autonomous run (10:39–16:50 UTC, ~6h) published 10 queue rows = 30 WP posts (DE/UK/EN trios) but mass-rejected ~85 mainstream news items. Audit traced every rejection to one of five distinct false-positive classes; commit `ba66f90` ships fixes for all five.
+- A. `core_geo` whitelist expanded to include Iran/Israel/Hormuz/China/Taiwan/Middle East/NATO partners/G7/WHO/IMF; `us_local` regex narrowed to actual local-US patterns (school district, state senate race, redistricting). Stops Trump-Hormuz / FDA-vaccines / Israel-Iran stories getting hard-blocked at ingest.
+- B. `biotech_pr` regex narrowed to true investor-PR markers (`reports positive Phase X`, `topline results`, etc.) so generic FDA / Therapeutics mentions in regulatory news survive.
+- C. `candidate_is_fresh_enough()` now grants the 18h freshness window to any heavyweight category (politik / welt / ukraine / wirtschaft / deutschland / bayern / muenchen) at score >= 30 and decision in {review, strong, priority}, not just at score >= 44. 12-17h-old yesterday-evening politik / welt pieces from Tagesschau / NDR / FAZ no longer get freshness-blocked.
+- D. `uplift_borderline_newsworthy_score()` adds named-politician / state-leader pattern (Merz / Scholz / Trump / Putin / Zelensky / Macron / Erdogan / Netanyahu / Xi / von der Leyen / ...) as an additional `meaningful_signal`. Score-30 named-leader stories now uplift to C/review.
+- E. Two stuck-publish fixes:
+  - `process_scheduled` worker-blocker terminalization: when worker's only blocker is "Primary source too thin for autopublish" AND `item.story_score >= 40` OR `story_card.publishable_estimate in [high,medium]`, route to ready_review instead of rejecting. Paywalled Spiegel / FAZ-premium / NDR-live-ticker no longer poison the queue.
+  - `Publisher::preflight_shared_publish_media_url()`: last-resort `generated_story_cover()` instead of throwing "у DE-версии не установлено featured image"; stops the whole publish run from stalling on one missing image.
+- Backfill: 87 rows that had been mass-rejected with the only-thin-blocker pattern were lifted back to ready_review by a one-shot WP-CLI eval; operator can salvage.
+- Live state at handoff: 133 ready_review, 93 new, 21 rejected, 10 published, 1 publishing. Both pause flags OFF. Orchestrator active. Worker /health=ok.
+- Re-run scheduled: orchestrator will publish more queue rows under the new gate; wakeup in 30 min checks ≥50 published WP posts and confirms thin-source stall is gone.
+
 ## Latest Handoff 2026-05-06 10:40 UTC — Top-tier SEO + LLM-friendly schema
 
 - Site is now optimized for Google News, Google Discover, and AI search agents (Perplexity, ChatGPT, Claude, Gemini Web).

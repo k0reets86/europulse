@@ -56,6 +56,20 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 06:45 UTC — dossier content propagation, 4 publish-ready articles
+
+- Identified and fixed the systemic source-thinness bug. Two layers were silently shrinking the article body fed to the worker:
+  - `EPV2_AI_Processor::compact_source_dossier()` was storing only an `excerpt` field truncated to 320–700 chars and dropping the `content` field entirely. Even when `EPV2_Source_Enricher` had fetched a 2.5–10 KB full article, only the headline + first paragraph survived in the saved compact dossier.
+  - `EPV2_Worker_Client::build_payload()` always passed `$item->original_content` (the raw RSS snippet, ~350 chars) to the worker, so the worker never saw the enriched body.
+- Commit `2c02bfa` adds a `content` field to compact_source_dossier with limits raised to primary 12 KB, shell_primary 8 KB, supporting 6 KB each (×4 the previous excerpt cap; well within the 10 MB ai_payload guard). And `build_payload` now prefers `_meta.source_dossier.primary.content` when it is at least 200 chars longer than `original_content`.
+- Fresh 7-row pulse executed end-to-end with all the fixes (collect → 25 process ticks). Outcomes:
+  - **4 ready_publish**: `1129` (welt, EU/Kazakhstan oil sanctions, 1974/1686/1756 DE/UK/EN), `1132` (leben-in-deutschland, NRW rescue costs, 2476/2265/2437), `1133` (sport, Ukraine drones, 2213/1640/1869), `1134` (ukraine, Selenskyj ceasefire, 3034/2808/2710). All real article bodies, all proper translations, all real source-domain media (tagesschau.de, abendzeitung-muenchen.de). `1132/1133/1134` ran on `openai/gpt-5-mini`; `1129` on `deepseek/deepseek-chat`.
+  - 2 ready_review via attempt-cap (`1131` sport FC Bayern, `1135` kultur museum) — backstop fired correctly at 6 attempts.
+  - 1 rejected via ultrathin-source-guard (`1130`) plus canonical publish-gate block.
+- DE master length jumped from ~412 chars (looping) to 1974–3034 chars (publish-grade). No "слишком короткий" warnings on the publish-ready rows.
+- Live state: queue 17 rows (9 stale ready_review from prior pulse + 4 fresh ready_publish + 2 fresh ready_review + 2 rejected). Pause flags ON. ai_payload avg 13.6 KB, max 22.7 KB — well under guards. `openai` saw 1 fresh failure during the run (cooldown 1607s remaining); `deepseek` healthy.
+- Operator decision pending: review the 4 `ready_publish` rows in the WP admin and either publish manually (`scripts/epv2_pulse.sh publish` with both pause flags still ON dispatches the canonical handler), salvage the 2 fresh ready_review rows, or reject. The 9 stale ready_review rows from the earlier pulse are still in queue and should be triaged or cleared.
+
 ## Latest Handoff 2026-05-06 06:30 UTC — first end-to-end pulse + rebuild-loop fix
 
 - First controlled pulse since freshness/source changes (commits `b29dcb2`, `6bc4d8e`). `scripts/epv2_pulse.sh collect` ran in 1m46s on 54 active sources, queueing 10 rows (`1119`-`1128`).

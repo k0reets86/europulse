@@ -1,5 +1,17 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-06 06:45 UTC — dossier content fix, 4 publish-ready articles
+
+- [x] Fixed systemic source-thinness bug in commit `2c02bfa`: `compact_source_dossier` now retains a `content` field (12 KB primary / 8 KB shell / 6 KB supporting), and `EPV2_Worker_Client::build_payload` prefers `_meta.source_dossier.primary.content` over the RSS snippet `$item->original_content`.
+- [x] Validation pulse on 7 fresh rows (`1129`-`1135`):
+  - `1129/1132/1133/1134` reached `ready_publish` with proper 2K-3K-char DE/UK/EN translations and real-source media. No warnings, no blockers, no loops.
+  - `1131/1135` terminalized via `rebuild_bundle_attempt_cap` after 6 attempts — backstop correct.
+  - `1130` rejected via ultrathin-source-guard + publish-gate.
+- [ ] Operator review of 4 `ready_publish` rows: read text in WP admin, decide whether to publish via `scripts/epv2_pulse.sh publish` (still pause-bypassing one canonical run) or hold for further edit.
+- [ ] Triage the 9 stale `ready_review` rows from the previous pulse (`1119-1128`). They were terminalized with thin compact dossiers; either reject or re-run after force-clearing their dossier (`UPDATE ep_epv2_queue SET ai_payload = ... source_dossier removed` then move state to `new`).
+- [ ] DW feeds and DER SPIEGEL via Google News are still high-reject under `noise`/`low_score`. Different problem class than freshness — content classification / scoring tuning.
+- [ ] OpenAI `gpt-5-mini` saw a fresh "empty response" failure during the validation run (cooldown 1607s). Watch for repeating empty-response pattern; if persistent, switch primary to deepseek-chat for autonomous mode and keep gpt-5-mini in fallback.
+
 ## Current Runtime Status 2026-05-06 06:30 UTC — first pulse done, rebuild loop fixed
 
 - [x] First end-to-end controlled pulse executed (collect → 12+ process ticks). 10 rows queued (`1119`-`1128`), all terminalized.

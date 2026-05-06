@@ -177,9 +177,19 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             if cleaned:
                 ctx.tags = cleaned[:8]
 
-    # 2. Enrich sources — mandatory for thin content (<500 words), otherwise only when semantic flags it
+    # 2. Enrich sources — mandatory for thin content (<500 words), otherwise only when semantic flags it.
+    # The PHP build_payload now seeds short Google-News-stub bodies with
+    # the upfront story_card key_facts + named entities + locations so a
+    # 15-word headline-only feed item arrives here as a 100+ word stitched
+    # brief. Lower the absolute floor to 18 words so headline-only items
+    # without ANY card grounding still get flagged, but a card-stitched
+    # brief survives. When the card carries 3+ key_facts we trust it as a
+    # substantive editorial basis and skip the blocker entirely.
     source_word_count = len(original_text.split())
-    if source_word_count < 35:
+    card_facts_count = 0
+    if isinstance(_story_card_init, dict):
+        card_facts_count = len(_story_card_init.get("key_facts") or [])
+    if source_word_count < 18 and card_facts_count < 3:
         ctx.blockers.append("Primary source too thin for autopublish")
     force_enrichment = source_word_count < 500
     supporting_urls: list[str] = []

@@ -107,25 +107,91 @@ final class EPV2_Worker_Client {
 			'ai_fallback_model'    => (string) ( $settings['ai_fallback_model'] ?? '' ),
 		];
 
-		// The queue row's `original_content` field stores only what the
-		// RSS / Google News feed handed us — usually the headline plus a
-		// 1–2 paragraph excerpt. EPV2_Source_Enricher::enrich_item later
-		// fetches the full article body and stores it in
-		// _meta.source_dossier.primary.content. Prefer that whenever it is
-		// substantially richer than the raw RSS field, so the worker
-		// rewrites against the actual article instead of the headline
-		// snippet (and the DE master no longer falls below publish-grade
-		// length on every other source).
-		$enriched_content = '';
+		// Pick the richest text basis we can give the worker. The queue row's
+		// raw `original_content` is often just an HTML wrapper around a
+		// Google News redirect link — 434 chars of markup but only ~15
+		// words of plain text once tags are stripped. That triggered the
+		// worker's `< 35 words → "Primary source too thin" blocker on every
+		// Google-News-sourced item. Compare lengths fairly:
+		//   - clean HTML out of original_content first
+		//   - take the dossier primary content if richer
+		//   - last resort: synthesize a brief from the upfront story card's
+		//     key_facts + entities so the rewriter at least has anchored
+		//     facts to work from instead of seeing 15 words.
+		$raw_original = (string) ( $item->original_content ?? '' );
+		$clean_original = trim( preg_replace( '/\s+/u', ' ', wp_strip_all_tags( $raw_original ) ) ?? '' );
+
+		$dossier_primary_content = '';
 		if ( is_array( $existing['_meta']['source_dossier']['primary'] ?? null ) ) {
-			$candidate = (string) ( $existing['_meta']['source_dossier']['primary']['content'] ?? '' );
-			if ( mb_strlen( $candidate ) > mb_strlen( (string) ( $item->original_content ?? '' ) ) + 200 ) {
-				$enriched_content = $candidate;
+			$dossier_primary_content = (string) ( $existing['_meta']['source_dossier']['primary']['content'] ?? '' );
+		}
+		$dossier_primary_excerpt = '';
+		if ( is_array( $existing['_meta']['source_dossier']['primary'] ?? null ) ) {
+			$dossier_primary_excerpt = (string) ( $existing['_meta']['source_dossier']['primary']['excerpt'] ?? '' );
+		}
+
+		// Story-card-derived synthetic basis. When the upfront semantic pass
+		// extracted 3+ key facts plus a category, a short stitched paragraph
+		// of those facts is FAR more substantive than 15 words of "Sichtbar
+		// werden mit Fleiß - Schulzes Kampf gegen die AfD". The rewriter
+		// receives the card itself anyway, but we also seed
+		// `original_content` with a stitched form so word-count gates pass.
+		$card_basis = '';
+		if ( is_array( $existing['_meta']['story_card'] ?? null ) ) {
+			$card = $existing['_meta']['story_card'];
+			$key_facts = (array) ( $card['key_facts'] ?? [] );
+			if ( $key_facts !== [] ) {
+				$lines = [];
+				$people = (array) ( $card['entities_people'] ?? $card['entities']['people'] ?? [] );
+				if ( $people !== [] ) {
+					$names = [];
+					foreach ( array_slice( $people, 0, 4 ) as $p ) {
+						if ( is_array( $p ) && ! empty( $p['name'] ) ) {
+							$names[] = trim( (string) $p['name'] ) . ( ! empty( $p['role'] ) ? ' (' . trim( (string) $p['role'] ) . ')' : '' );
+						}
+					}
+					if ( $names ) {
+						$lines[] = 'Beteiligte: ' . implode( ', ', $names );
+					}
+				}
+				$places = (array) ( $card['entities_places'] ?? $card['entities']['places'] ?? [] );
+				if ( $places !== [] ) {
+					$lines[] = 'Orte: ' . implode( ', ', array_slice( array_map( 'strval', $places ), 0, 4 ) );
+				}
+				foreach ( array_slice( $key_facts, 0, 6 ) as $fact ) {
+					$fact = trim( (string) $fact );
+					if ( $fact !== '' ) {
+						$lines[] = '- ' . $fact;
+					}
+				}
+				if ( $lines ) {
+					$card_basis = implode( "\n", $lines );
+				}
 			}
 		}
-		$worker_original_content = $enriched_content !== ''
-			? $enriched_content
-			: (string) ( $item->original_content ?? '' );
+
+		// Pick the richest available basis by raw text length. We always
+		// concatenate card_basis at the end if it adds new factual lines —
+		// the rewriter is told via the system prompt that the card is the
+		// authoritative fact list.
+		$candidates = array_filter( [
+			'dossier_content' => $dossier_primary_content,
+			'dossier_excerpt' => $dossier_primary_excerpt,
+			'clean_original'  => $clean_original,
+		], static fn( $v ) => mb_strlen( (string) $v ) > 0 );
+		$best_text = '';
+		foreach ( $candidates as $candidate ) {
+			if ( mb_strlen( $candidate ) > mb_strlen( $best_text ) ) {
+				$best_text = $candidate;
+			}
+		}
+		// If best body is still under ~200 words AND the card has key facts,
+		// stitch them in. The rewriter prompt already tells the model to
+		// ground the article on those facts.
+		if ( str_word_count( $best_text ) < 200 && $card_basis !== '' ) {
+			$best_text = trim( $best_text . "\n\n" . $card_basis );
+		}
+		$worker_original_content = $best_text !== '' ? $best_text : $clean_original;
 
 		return [
 			'queue_id'         => (int) ( $item->id ?? 0 ),

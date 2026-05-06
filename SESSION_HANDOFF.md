@@ -56,6 +56,22 @@
 - Add preliminary scoring audit to the next rejected-rate pass. Current `EPV2_Budget_Manager` tiering is global: `A>=70`, `B>=52`, `C>=34`, `D<34`; `decision_for_score()` maps `A=priority`, `B=strong`, `C>=40=review`, `C<40=low`, `D=reject`.
 - Do not blindly change policy to “publish only A/B”. That is probably too strict for a news site: some valuable news is informative/public-interest rather than directly useful. Better model: `A/B` fast autopublish, strong `C` publishable after source/quality/media gates, `D` reject, with per-category scorecards and dynamic thresholds.
 
+## Latest Handoff 2026-05-06 06:30 UTC — first end-to-end pulse + rebuild-loop fix
+
+- First controlled pulse since freshness/source changes (commits `b29dcb2`, `6bc4d8e`). `scripts/epv2_pulse.sh collect` ran in 1m46s on 54 active sources, queueing 10 rows (`1119`-`1128`).
+- New `selection_audit` window for the pulse: 579 events. **`stale` reject share dropped from 46% historical to 27% in this pulse** — `when:14d` Google News filter is working. UNIAN went 72% → 0% reject; Google News Ukraine 71.7% → 6.7%; BR24 40.8% → 26.7%. DW feeds stay high-reject but now under `noise`/`low_score`, not `stale` (different problem class — content quality, not freshness).
+- During processing, every row whose source passed the 35-word ultra-thin gate but produced a too-short DE master entered an infinite `rebuild_bundle` loop in the `build_de_master` step. Two guards (`recent_rebuild_bundle_runs_stalled`, `maybe_cooldown_stagnated_rebuild`) failed to fire reliably:
+  - `recent_rebuild_bundle_runs_stalled` filtered runs by `started_at >= queue.updated_at`; updated_at is bumped by every loop tick, excluding the very loops being counted.
+  - `maybe_cooldown_stagnated_rebuild` compares payload signatures, but AI generates slightly different content each tick so the signature drifts and the counter resets.
+- Both were addressed in commit `d3ab064`:
+  - `recent_rebuild_bundle_runs_stalled` now uses a fixed 30-minute window (`started_at >= NOW() - 30 min`).
+  - New backstop in `process_scheduled` triggers at `workflow_step_attempts >= 6` for `pipeline_stage=rebuild_bundle` + `workflow_step=build_de_master` and force-terminalizes to `ready_review` with `rebuild_bundle_attempt_cap` reason.
+- Final pulse terminal states: `ready_review=9`, `rejected=1` (1128 wirtschaft via ultrathin-guard reject path), `published=0`. No infinite loops after the fix landed.
+- Notable manual triage rows (`1119`/`1122`/`1123`) were directly SQL-flagged to `ready_review` before the attempt-cap was deployed; they're correct terminal-state entries but the operator may want to review/reject them.
+- Systemic finding the operator should weigh: most queued sources are RSS headlines + 1-paragraph excerpts, not full articles. The rewriter cannot reliably hit publish-grade from such thin input even with a strong model. If the goal is autonomous publishing, source enrichment (full-article fetch from URL) needs a closer look — `EPV2_Source_Enricher` exists at 2338 LOC; auditing whether it pulls enough body text for these specific RSS sources is the right next investigation.
+
+Live state at handoff: services active; queue 9 ready_review + 1 rejected; pause flags still ON; AI provider OpenAI/gpt-5-mini primary, deepseek fallback (no provider_health change). Tuning snapshot still present.
+
 ## Latest Handoff 2026-05-06 06:00 UTC
 
 - Pulse tuning continues. Both pause flags ON. Queue empty. Live healthy across all checks: `/wp-login.php=302`, front=200, services active, worker `/health=ok`, locks free.

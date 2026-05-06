@@ -1,5 +1,16 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-06 06:30 UTC — first pulse done, rebuild loop fixed
+
+- [x] First end-to-end controlled pulse executed (collect → 12+ process ticks). 10 rows queued (`1119`-`1128`), all terminalized.
+- [x] `when:14d` Google News filter validated: stale-reject share dropped 46% → 27%. UNIAN/Google News Ukraine moved from 70%+ to single digits.
+- [x] Rebuild-loop bug fixed (commit `d3ab064`):
+  - `recent_rebuild_bundle_runs_stalled` rewritten to use a fixed 30-minute `started_at` window instead of `started_at >= updated_at` (which was being defeated by every loop's own row update).
+  - Hard backstop added in `process_scheduled`: any row with `pipeline_stage=rebuild_bundle` + `workflow_step=build_de_master` + `workflow_step_attempts >= 6` is force-terminalized to `ready_review` with `rebuild_bundle_attempt_cap` reason. Verified on row `1124` during the same pulse.
+- [ ] Operator review of the 9 `ready_review` rows from the pulse: decide salvage vs reject. Most look like real news topics but with too-thin source material to hit publish-grade text. Rows: 1119 (politik EU/Ukraine), 1122 (sport), 1123 (kultur 007 game), 1124 (welt Iran), 1126 (community Herrmann integration), and 1120/1121/1125/1127 ultra-thin-guard. Row `1128` (wirtschaft) is auto-rejected.
+- [ ] Source enrichment audit. Pulse exposed that most RSS sources return headline + one-paragraph excerpt only. `EPV2_Source_Enricher` at 2338 LOC needs an audit to confirm whether full-article body fetch is happening for these sources. If not, autonomous publish-grade is unreachable for many candidates regardless of model strength.
+- [ ] DW feeds and DER SPIEGEL via Google News still hit high reject — but now under `noise` / `low_score`, not `stale`. Different problem class: content classification / scoring, not freshness. Lower priority than source enrichment.
+
 ## Current Runtime Status 2026-05-06 06:00 UTC Pulse Tuning + Hardening Pass 2 + Source Audit Acted
 
 - [x] Plugin hardening pass 2 deployed (commit `6bc4d8e`): primed post/meta/term caches in `EPV2_Deduplicator::is_story_duplicate()`; `JSON_THROW_ON_ERROR` in `EPV2_AI_Client::parse_response()`; bridge token success logging in `EPV2_REST::can_bridge()`.

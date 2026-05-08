@@ -32,6 +32,10 @@ final class EPV2_Content_Kinds {
 	const KIND_FEATURE        = 'feature';
 	const KIND_SPORT_RESULT   = 'sport_result';
 	const KIND_OBITUARY       = 'obituary';
+	const KIND_INTERVIEW      = 'interview';
+	const KIND_OPINION        = 'opinion';
+	const KIND_EXPLAINER      = 'explainer';
+	const KIND_LIVE_BLOG      = 'live_blog';
 
 	public static function all_kinds(): array {
 		return [
@@ -43,6 +47,10 @@ final class EPV2_Content_Kinds {
 			self::KIND_FEATURE,
 			self::KIND_SPORT_RESULT,
 			self::KIND_OBITUARY,
+			self::KIND_INTERVIEW,
+			self::KIND_OPINION,
+			self::KIND_EXPLAINER,
+			self::KIND_LIVE_BLOG,
 		];
 	}
 
@@ -152,6 +160,58 @@ final class EPV2_Content_Kinds {
 				],
 				'rewriter_profile'     => 'obituary',
 			],
+			self::KIND_INTERVIEW => [
+				'de_chars_min'         => 4000,
+				'de_chars_target'      => 6500,
+				'sources_min'          => 1,
+				'enrichment_required'  => false,
+				'quality_thresholds'   => [
+					'quality'         => 100,
+					'seo_quality'     => 100,
+					'release_quality' => 95,
+					'google_quality'  => 95,
+				],
+				'rewriter_profile'     => 'interview',
+			],
+			self::KIND_OPINION => [
+				'de_chars_min'         => 2500,
+				'de_chars_target'      => 4000,
+				'sources_min'          => 1,
+				'enrichment_required'  => false,
+				'quality_thresholds'   => [
+					'quality'         => 100,
+					'seo_quality'     => 100,
+					'release_quality' => 95,
+					'google_quality'  => 95,
+				],
+				'rewriter_profile'     => 'opinion',
+			],
+			self::KIND_EXPLAINER => [
+				'de_chars_min'         => 5000,
+				'de_chars_target'      => 8000,
+				'sources_min'          => 2,
+				'enrichment_required'  => true,
+				'quality_thresholds'   => [
+					'quality'         => 100,
+					'seo_quality'     => 100,
+					'release_quality' => 95,
+					'google_quality'  => 95,
+				],
+				'rewriter_profile'     => 'explainer',
+			],
+			self::KIND_LIVE_BLOG => [
+				'de_chars_min'         => 800,
+				'de_chars_target'      => 1500,
+				'sources_min'          => 1,
+				'enrichment_required'  => false,
+				'quality_thresholds'   => [
+					'quality'         => 95,
+					'seo_quality'     => 95,
+					'release_quality' => 85,
+					'google_quality'  => 85,
+				],
+				'rewriter_profile'     => 'live_blog',
+			],
 		];
 	}
 
@@ -198,7 +258,21 @@ final class EPV2_Content_Kinds {
 		$entities_people = is_array($card['entities_people'] ?? null) ? count($card['entities_people']) : 0;
 		$source_count = (int) ($payload['_meta']['source_count'] ?? 1);
 
-		// 3. Breaking alert: live_ticker + thin source + recent
+		// 3. Interview — explicit Q&A format
+		if (in_array($card_kind, ['interview', 'q_a', 'qa', 'q_and_a'], true)
+			|| preg_match('/(\binterview\b|\bим зустріч|интервью|gespräch mit|im gespräch)/iu', $haystack) === 1) {
+			return self::KIND_INTERVIEW;
+		}
+
+		// 4. Opinion / column / op-ed
+		$is_opinion_cat = in_array($primary_cat, ['meinung', 'opinion', 'думка', 'kolumne'], true)
+			|| in_array($card_category, ['meinung', 'opinion'], true);
+		if ($is_opinion_cat
+			|| in_array($card_kind, ['opinion', 'op_ed', 'op-ed', 'kommentar', 'kolumne', 'meinung', 'editorial'], true)) {
+			return self::KIND_OPINION;
+		}
+
+		// 5. Breaking alert: live_ticker / eilmeldung — short instant
 		if ($card_kind === 'live_ticker' || $card_kind === 'eilmeldung') {
 			$primary_date = (string) ($payload['_meta']['source_dossier']['primary']['date']
 				?? $payload['_meta']['source_dossier']['primary']['published_at']
@@ -215,30 +289,42 @@ final class EPV2_Content_Kinds {
 			}
 		}
 
-		// 4. Feature
+		// 6. Live blog — rolling coverage, distinct from breaking_alert
+		if (in_array($card_kind, ['live_blog', 'liveblog', 'live_updates', 'rolling_coverage'], true)
+			|| preg_match('/\b(liveblog|live[-\s]updates|live[-\s]ticker[-\s]aktuell)\b/iu', $haystack) === 1) {
+			return self::KIND_LIVE_BLOG;
+		}
+
+		// 7. Feature
 		if ($card_kind === 'feature' || $card_kind === 'reportage'
 			|| ($length_profile === 'long' && $topics >= 5 && $source_words >= 800)) {
 			return self::KIND_FEATURE;
 		}
 
-		// 5. Analysis
-		if ($card_kind === 'analysis' || $card_kind === 'explainer'
+		// 8. Explainer — pure educational pieces (separated from analysis)
+		if ($card_kind === 'explainer' || $card_kind === 'erklär' || $card_kind === 'q_explainer'
+			|| preg_match('/\b(explainer|erklärt|was bedeutet|im überblick|was steckt dahinter)\b/iu', $haystack) === 1) {
+			return self::KIND_EXPLAINER;
+		}
+
+		// 9. Analysis — opinion-laden interpretation, with multiple angles
+		if ($card_kind === 'analysis'
 			|| ($length_profile === 'long' && $topics >= 4)) {
 			return self::KIND_ANALYSIS;
 		}
 
-		// 6. Extended news
+		// 10. Extended news
 		if ($source_count >= 2 && $topics >= 3 && $entities_people >= 2) {
 			return self::KIND_EXTENDED_NEWS;
 		}
 
-		// 7. News article (multi-source potential, even if currently 1 source — enrichment will add)
+		// 11. News article (multi-source potential, even if currently 1 source — enrichment will add)
 		// Default for items that are NOT thin and NOT explicitly brief.
 		if ($length_profile !== 'brief' && $source_words >= 80) {
 			return self::KIND_NEWS_ARTICLE;
 		}
 
-		// 8. News brief (default fallthrough — thin or brief items)
+		// 12. News brief (default fallthrough — thin or brief items)
 		return self::KIND_NEWS_BRIEF;
 	}
 

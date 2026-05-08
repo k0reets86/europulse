@@ -193,10 +193,15 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         ctx.blockers.append("Primary source too thin for autopublish")
     force_enrichment = source_word_count < 500
     supporting_urls: list[str] = []
+    supporting_rich: list[dict[str, str]] = []
     if ctx.semantic.needs_enrichment or force_enrichment:
-        supporting_urls = await _search_supporting_sources(
-            ctx.semantic.key_phrases, req.original_url
+        # Phase 2.7 — primary path: structured supporting sources with
+        # title + domain so the rewriter can name each one in the
+        # synthesis. Plain-URL list is kept for legacy media/dossier code.
+        supporting_rich = await _search_supporting_sources_rich(
+            ctx.semantic.key_phrases, req.original_url, limit=5
         )
+        supporting_urls = [entry["url"] for entry in supporting_rich]
 
     # Group E: adjust length profile based on source richness and enrichment outcome
     effective_length_profile = req.length_profile or "standard"
@@ -240,21 +245,42 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             if isinstance(ck, str) and ck:
                 rewrite_kind = ck
             # Build a compact dossier block from primary + related sources.
+            # Phase 2.7: web_search-derived supporting sources from
+            # _search_supporting_sources_rich are merged in below (after
+            # this block) — they're the live primary enrichment now,
+            # in-house siblings are demoted to echo-block role per
+            # architecture audit section 2 step 5.
             dossier = meta.get("source_dossier") or {}
+            related_entries: list[dict[str, str]] = []
             if isinstance(dossier, dict):
-                related = dossier.get("related") or []
-                if isinstance(related, list) and related:
-                    lines = ["DOSSIER (Zusatzquellen für Synthese, jede beim Einbringen namentlich nennen):"]
-                    for entry in related[:6]:
-                        if not isinstance(entry, dict):
-                            continue
-                        title = str(entry.get("title") or "").strip()
-                        url = str(entry.get("url") or "").strip()
-                        domain = str(entry.get("domain") or "").strip()
-                        if title and (domain or url):
-                            lines.append(f"  • {domain or url}: {title}")
-                    if len(lines) > 1:
-                        rewrite_dossier_block = "\n".join(lines)
+                stored_related = dossier.get("related") or []
+                if isinstance(stored_related, list):
+                    for entry in stored_related[:6]:
+                        if isinstance(entry, dict):
+                            related_entries.append({
+                                "title": str(entry.get("title") or "").strip(),
+                                "url": str(entry.get("url") or "").strip(),
+                                "domain": str(entry.get("domain") or "").strip(),
+                            })
+            for entry in supporting_rich[:6]:
+                related_entries.append({
+                    "title": entry.get("title", ""),
+                    "url": entry.get("url", ""),
+                    "domain": entry.get("domain", ""),
+                })
+            if related_entries:
+                lines = ["DOSSIER (Zusatzquellen für Synthese, jede beim Einbringen namentlich nennen):"]
+                seen: set[str] = set()
+                for entry in related_entries:
+                    domain = entry["domain"] or entry["url"]
+                    title = entry["title"]
+                    key = (domain, title[:60])
+                    if key in seen or not (title and (domain or entry["url"])):
+                        continue
+                    seen.add(key)
+                    lines.append(f"  • {domain}: {title}")
+                if len(lines) > 1:
+                    rewrite_dossier_block = "\n".join(lines)
 
     # Phase 2.3: rubric_slug — prefer category_final, fall back to category_proposed.
     rewrite_rubric = (req.category_final or req.category_proposed or "").strip().lower()
@@ -487,26 +513,83 @@ async def _regen_seo(ctx: PipelineContext) -> None:
 # ---------------------------------------------------------------------------
 
 async def _search_supporting_sources(key_phrases: list[str], primary_url: str) -> list[str]:
-    """Fetch URLs of 2-3 supporting sources via Google News RSS."""
+    """Fetch URLs of 2-3 supporting sources via Google News RSS.
+
+    Kept for backward compatibility — returns plain URLs. Prefer
+    ``_search_supporting_sources_rich`` for new callers (returns dicts
+    with url+title+domain so the rewriter can name each source).
+    """
+    rich = await _search_supporting_sources_rich(key_phrases, primary_url, limit=3)
+    return [entry["url"] for entry in rich]
+
+
+async def _search_supporting_sources_rich(
+    key_phrases: list[str],
+    primary_url: str,
+    limit: int = 5,
+) -> list[dict[str, str]]:
+    """Phase 2.7 — return structured supporting-source entries for the
+    rewriter dossier.
+
+    Each entry has ``url``, ``title`` and ``domain``. The rewriter prompt
+    consumes these via dossier_block so it can write multi-source
+    synthesis with named attribution per fact.
+
+    Implementation: parses Google News RSS items rather than just <link>
+    tags. We extract title, source name (the publisher), and primary URL.
+    Domain is derived from the URL host. Same-domain duplicates and the
+    primary URL itself are filtered out so the rewriter sees only items
+    that actually add something.
+    """
     if not key_phrases:
         return []
     try:
         import httpx
         query = " ".join(key_phrases[:3])
         url = f"https://news.google.com/rss/search?q={query}&hl=de&gl=DE&ceid=DE:de"
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=12) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code != 200:
             return []
         import re
-        urls = re.findall(r"<link>https://[^<]+</link>", resp.text)
-        result = []
-        for raw in urls:
-            candidate = html.unescape(raw.replace("<link>", "").replace("</link>", "").strip())
-            if candidate == primary_url or not _usable_supporting_url(candidate):
+        # Each <item>...</item> block has <title>, <link>, <source url="...">.
+        items = re.findall(r"<item>(.*?)</item>", resp.text, flags=re.S)
+        primary_host = ""
+        try:
+            primary_host = urlparse(primary_url).netloc.lower()
+        except Exception:
+            pass
+
+        seen_hosts: set[str] = set()
+        if primary_host:
+            seen_hosts.add(primary_host)
+
+        result: list[dict[str, str]] = []
+        for block in items:
+            link_match = re.search(r"<link>([^<]+)</link>", block)
+            title_match = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", block, flags=re.S)
+            source_match = re.search(r"<source[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</source>", block, flags=re.S)
+            if not link_match:
                 continue
-            result.append(candidate)
-            if len(result) >= 3:
+            link = html.unescape(link_match.group(1).strip())
+            if link == primary_url or not _usable_supporting_url(link):
+                continue
+            try:
+                host = urlparse(link).netloc.lower()
+            except Exception:
+                continue
+            if not host or host in seen_hosts:
+                continue
+            seen_hosts.add(host)
+            title = html.unescape((title_match.group(1) if title_match else "").strip())
+            source_name = html.unescape((source_match.group(1) if source_match else "").strip())
+            domain = source_name or host.replace("www.", "")
+            result.append({
+                "url": link,
+                "title": title,
+                "domain": domain,
+            })
+            if len(result) >= limit:
                 break
         return result
     except Exception:

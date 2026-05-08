@@ -57,8 +57,8 @@ final class EPV2_Content_Kinds {
 	public static function specs(): array {
 		return [
 			self::KIND_BREAKING_ALERT => [
-				'de_chars_min'         => 200,
-				'de_chars_target'      => 400,
+				'de_chars_min'         => 80,
+				'de_chars_target'      => 300,
 				'sources_min'          => 1,
 				'enrichment_required'  => false,
 				'quality_thresholds'   => [
@@ -70,8 +70,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'eilmeldung',
 			],
 			self::KIND_NEWS_BRIEF => [
-				'de_chars_min'         => 600,
-				'de_chars_target'      => 1100,
+				'de_chars_min'         => 300,
+				'de_chars_target'      => 600,
 				'sources_min'          => 1,
 				'enrichment_required'  => false,
 				'quality_thresholds'   => [
@@ -83,8 +83,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'news_brief',
 			],
 			self::KIND_NEWS_ARTICLE => [
-				'de_chars_min'         => 2000,
-				'de_chars_target'      => 3000,
+				'de_chars_min'         => 600,
+				'de_chars_target'      => 1500,
 				'sources_min'          => 2,
 				'enrichment_required'  => true,
 				'quality_thresholds'   => [
@@ -96,8 +96,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'news_synthesis',
 			],
 			self::KIND_EXTENDED_NEWS => [
-				'de_chars_min'         => 4500,
-				'de_chars_target'      => 6000,
+				'de_chars_min'         => 1500,
+				'de_chars_target'      => 2500,
 				'sources_min'          => 3,
 				'enrichment_required'  => true,
 				'quality_thresholds'   => [
@@ -109,8 +109,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'extended_synthesis',
 			],
 			self::KIND_ANALYSIS => [
-				'de_chars_min'         => 7500,
-				'de_chars_target'      => 10000,
+				'de_chars_min'         => 2500,
+				'de_chars_target'      => 5000,
 				'sources_min'          => 4,
 				'enrichment_required'  => true,
 				'quality_thresholds'   => [
@@ -122,8 +122,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'analysis',
 			],
 			self::KIND_FEATURE => [
-				'de_chars_min'         => 15000,
-				'de_chars_target'      => 20000,
+				'de_chars_min'         => 2000,
+				'de_chars_target'      => 4000,
 				'sources_min'          => 5,
 				'enrichment_required'  => true,
 				'quality_thresholds'   => [
@@ -135,8 +135,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'feature',
 			],
 			self::KIND_SPORT_RESULT => [
-				'de_chars_min'         => 1500,
-				'de_chars_target'      => 2200,
+				'de_chars_min'         => 200,
+				'de_chars_target'      => 500,
 				'sources_min'          => 1,
 				'enrichment_required'  => false,
 				'quality_thresholds'   => [
@@ -148,8 +148,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'sport_result',
 			],
 			self::KIND_OBITUARY => [
-				'de_chars_min'         => 5000,
-				'de_chars_target'      => 7000,
+				'de_chars_min'         => 400,
+				'de_chars_target'      => 1500,
 				'sources_min'          => 3,
 				'enrichment_required'  => true,
 				'quality_thresholds'   => [
@@ -161,8 +161,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'obituary',
 			],
 			self::KIND_INTERVIEW => [
-				'de_chars_min'         => 4000,
-				'de_chars_target'      => 6500,
+				'de_chars_min'         => 1000,
+				'de_chars_target'      => 2500,
 				'sources_min'          => 1,
 				'enrichment_required'  => false,
 				'quality_thresholds'   => [
@@ -174,8 +174,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'interview',
 			],
 			self::KIND_OPINION => [
-				'de_chars_min'         => 2500,
-				'de_chars_target'      => 4000,
+				'de_chars_min'         => 600,
+				'de_chars_target'      => 2000,
 				'sources_min'          => 1,
 				'enrichment_required'  => false,
 				'quality_thresholds'   => [
@@ -187,8 +187,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'opinion',
 			],
 			self::KIND_EXPLAINER => [
-				'de_chars_min'         => 5000,
-				'de_chars_target'      => 8000,
+				'de_chars_min'         => 1000,
+				'de_chars_target'      => 2500,
 				'sources_min'          => 2,
 				'enrichment_required'  => true,
 				'quality_thresholds'   => [
@@ -200,8 +200,8 @@ final class EPV2_Content_Kinds {
 				'rewriter_profile'     => 'explainer',
 			],
 			self::KIND_LIVE_BLOG => [
-				'de_chars_min'         => 800,
-				'de_chars_target'      => 1500,
+				'de_chars_min'         => 200,
+				'de_chars_target'      => 800,
 				'sources_min'          => 1,
 				'enrichment_required'  => false,
 				'quality_thresholds'   => [

@@ -39,7 +39,7 @@ final class EPV2_Deduplicator {
 			return ['duplicate' => true, 'duplicate_of' => (int) $dup->id, 'reason' => 'hash'];
 		}
 
-		$terminal_states = ['rejected', 'duplicate', 'error', 'published'];
+		$terminal_states = ['rejected', 'duplicate', 'error', 'manual_review', 'published'];
 		$terminal_placeholders = implode(',', array_fill(0, count($terminal_states), '%s'));
 		if ($url !== '' && $normalized_url !== '') {
 			$terminal_dup = $wpdb->get_row(
@@ -178,7 +178,7 @@ final class EPV2_Deduplicator {
 				"SELECT id, state, original_title, original_excerpt, original_content, category_proposed, topic_label, created_at, admin_notes
 				FROM {$queue_table}
 				WHERE created_at >= DATE_SUB(NOW(), INTERVAL 72 HOUR)
-				  AND state NOT IN ('duplicate','rejected','error')
+				  AND state NOT IN ('duplicate','rejected','error','manual_review')
 				ORDER BY created_at DESC
 				LIMIT 40"
 			);
@@ -297,7 +297,7 @@ final class EPV2_Deduplicator {
 				"SELECT id, admin_notes
 				FROM {$wpdb->prefix}epv2_queue
 				WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
-				  AND state NOT IN ('duplicate','rejected','error')
+				  AND state NOT IN ('duplicate','rejected','error','manual_review')
 				  AND JSON_EXTRACT(admin_notes, '$._system.story_fingerprint') IS NOT NULL
 				ORDER BY created_at DESC
 				LIMIT 30"

@@ -2748,11 +2748,13 @@ final class EPV2_Admin {
 			'new' => 'Новый',
 			'active' => 'В работе',
 			'ready_publish' => 'Готов к публикации',
+			'ready_review' => 'Готов к проверке',
 			'publishing' => 'Публикуется',
+			'manual_review' => 'Требует ручной проверки',
 			'published' => 'Опубликовано',
 			'duplicate' => 'Дубликат',
 			'rejected' => 'Отклонено',
-			'error' => 'Ошибка',
+			'error' => 'Ошибка (legacy)',
 		];
 	}
 

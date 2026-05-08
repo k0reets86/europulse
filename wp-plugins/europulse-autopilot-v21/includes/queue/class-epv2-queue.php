@@ -1132,10 +1132,10 @@ final class EPV2_Queue {
 			$notes['_system']['workflow_owner_token'] = '';
 			$notes['_system']['workflow_heartbeat_at'] = '';
 			unset($notes['_system']['retry_after'], $notes['_system']['workflow_not_before']);
-			$state = $selection_blocked ? 'rejected' : 'error';
+			$state = $selection_blocked ? 'rejected' : 'manual_review';
 			$message = $selection_blocked
 				? 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($gate['selection_decision'] ?? 'unknown') . '".'
-				: 'Материал помещён в технический quarantine: стадия "' . ($stage !== '' ? $stage : 'unknown') . '" превысила лимит попыток (' . (string) $attempts . '/' . (string) $limit_for_stage . ').';
+				: 'Материал отправлен на ручную проверку: стадия "' . ($stage !== '' ? $stage : 'unknown') . '" превысила лимит попыток (' . (string) $attempts . '/' . (string) $limit_for_stage . ').';
 			self::mark_state((int) $item->id, $state, [
 				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 				'error_message' => $message,

@@ -6,13 +6,35 @@ if (! defined('ABSPATH')) {
 
 final class EPV2_Time_Planner {
 	public static function defaults(): array {
-		$publish_minutes = range(0, 55, 5);
+		// Architecture audit section 8 phase-3 schedule (agreed 2026-05-08).
+		// Each window's `publish_minutes` lists minute-of-hour slots when
+		// publishing is allowed; the gap between slots IS the operator-facing
+		// «timer between publications»:
+		//   every 5 min → 0/5/10/15/...
+		//   every 8 min → 0/8/16/24/32/40/48/56
+		//   every 15 min → 0/15/30/45
+		// The night window has zero allowed slots: only breaking_alert
+		// items override the schedule (handled in
+		// EPV2_Time_Planner::should_publish via has_breaking_watch()).
+		$timer_5  = range(0, 55, 5);
+		$timer_8  = [0, 8, 16, 24, 32, 40, 48, 56];
+		$timer_15 = [0, 15, 30, 45];
 		return [
 			'windows' => [
-				['start' => '06:00', 'end' => '11:00', 'mode' => 'morning_hourly', 'collect_minutes' => [0], 'publish_minutes' => $publish_minutes],
-				['start' => '11:00', 'end' => '18:00', 'mode' => 'day_half_hour', 'collect_minutes' => [0, 30], 'publish_minutes' => $publish_minutes],
-				['start' => '18:00', 'end' => '00:00', 'mode' => 'evening_hourly', 'collect_minutes' => [0], 'publish_minutes' => $publish_minutes],
-				['start' => '00:00', 'end' => '06:00', 'mode' => 'night_monitor', 'collect_minutes' => [0], 'publish_minutes' => $publish_minutes],
+				// Morning catch-up: ночные сводки + анонсы дня
+				['start' => '06:00', 'end' => '09:00', 'mode' => 'morning_catchup',  'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
+				// Daytime active flow
+				['start' => '09:00', 'end' => '12:00', 'mode' => 'daytime_active',   'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
+				// Lunch peak: brief / news / sport_result
+				['start' => '12:00', 'end' => '13:30', 'mode' => 'lunch_peak',       'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
+				// Daytime mid-tempo (8 min between publications)
+				['start' => '13:30', 'end' => '18:00', 'mode' => 'daytime_mid',      'collect_minutes' => [0, 30], 'publish_minutes' => $timer_8],
+				// Evening prime: long content (feature / analysis / extended)
+				['start' => '18:00', 'end' => '22:00', 'mode' => 'evening_prime',    'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
+				// Wind-down: max 4 publications per hour
+				['start' => '22:00', 'end' => '00:00', 'mode' => 'wind_down',        'collect_minutes' => [0],     'publish_minutes' => $timer_15],
+				// Night pause: only breaking_alert allowed
+				['start' => '00:00', 'end' => '06:00', 'mode' => 'night_monitor',    'collect_minutes' => [0],     'publish_minutes' => []],
 			],
 			'breaking_watch_minutes' => [0, 30],
 			'timezone' => 'Europe/Berlin',
@@ -167,10 +189,18 @@ final class EPV2_Time_Planner {
 	public static function current_mode_label(): string {
 		$mode = (string) (self::current_window()['mode'] ?? '');
 		return match ($mode) {
-			'morning_hourly' => 'Утренний режим',
-			'day_half_hour' => 'Дневной активный режим',
-			'evening_hourly' => 'Вечерний режим',
-			'night_monitor' => 'Ночной мониторинг',
+			// Architecture audit phase-3 schedule labels
+			'morning_catchup' => 'Утро (6:00–9:00, 5 мин)',
+			'daytime_active'  => 'Дневной актив (9:00–12:00, 5 мин)',
+			'lunch_peak'      => 'Обед (12:00–13:30, 5 мин)',
+			'daytime_mid'     => 'День мид (13:30–18:00, 8 мин)',
+			'evening_prime'   => 'Вечерний прайм (18:00–22:00, 5 мин)',
+			'wind_down'       => 'Wind-down (22:00–00:00, 15 мин)',
+			'night_monitor'   => 'Ночь (00:00–06:00, пауза, только breaking)',
+			// Legacy labels for older time_schedule_profile installations
+			'morning_hourly'  => 'Утренний режим (legacy)',
+			'day_half_hour'   => 'Дневной активный режим (legacy)',
+			'evening_hourly'  => 'Вечерний режим (legacy)',
 			default => $mode,
 		};
 	}
@@ -293,10 +323,19 @@ final class EPV2_Time_Planner {
 		$progress = min(1, max(0, $elapsed / $span));
 
 		$shares = [
-			'morning_hourly' => ['base' => 0.00, 'cap' => 0.15],
-			'day_half_hour' => ['base' => 0.15, 'cap' => 0.70],
-			'evening_hourly' => ['base' => 0.70, 'cap' => 0.95],
-			'night_monitor' => ['base' => 0.95, 'cap' => 1.00],
+			// Architecture audit phase-3 schedule (7 windows)
+			'morning_catchup' => ['base' => 0.00, 'cap' => 0.15],
+			'daytime_active'  => ['base' => 0.15, 'cap' => 0.40],
+			'lunch_peak'      => ['base' => 0.40, 'cap' => 0.55],
+			'daytime_mid'     => ['base' => 0.55, 'cap' => 0.70],
+			'evening_prime'   => ['base' => 0.70, 'cap' => 0.92],
+			'wind_down'       => ['base' => 0.92, 'cap' => 0.98],
+			'night_monitor'   => ['base' => 0.98, 'cap' => 1.00],
+			// Legacy 4-window schedule (kept for back-compat with existing
+			// time_schedule_profile option values that haven't been migrated)
+			'morning_hourly'  => ['base' => 0.00, 'cap' => 0.15],
+			'day_half_hour'   => ['base' => 0.15, 'cap' => 0.70],
+			'evening_hourly'  => ['base' => 0.70, 'cap' => 0.95],
 		];
 		$rule = $shares[$mode] ?? ['base' => 0.00, 'cap' => 1.00];
 		$fraction = (float) $rule['base'] + (((float) $rule['cap'] - (float) $rule['base']) * $progress);

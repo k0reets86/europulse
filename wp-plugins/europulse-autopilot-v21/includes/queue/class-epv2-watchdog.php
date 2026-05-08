@@ -30,6 +30,108 @@ if (! defined('ABSPATH')) {
 final class EPV2_Watchdog {
 
 	/**
+	 * Phase 3 auto-reset: items that were rejected / sent to manual_review
+	 * for reasons we have since fixed in code. Without this they sit stuck
+	 * forever and the operator has to manually reprocess each one. The
+	 * scan is conservative — only the substring matches below are eligible
+	 * — so genuinely-bad items (true editorial rejects, hard-terminal
+	 * causes) stay where they are.
+	 *
+	 * Eligible reasons (recovery candidates after the matching fix):
+	 *   * "перепредставлена"         — selection bump removed in 07ce190
+	 *   * "build_de_master"          — validator false positives fixed in
+	 *                                  7214525, threshold mismatch in 345484c
+	 *   * "publish_ready_gate"       — fixed by length-threshold realignment
+	 *                                  in 345484c
+	 *   * "length_below_kind_minimum"— same root cause
+	 *
+	 * Items already in `rejected` state are bumped back to `new` only if
+	 * their last_quarantine_at is older than 30 minutes (avoid thrashing).
+	 */
+	public static function auto_reset_legacy_quarantine(int $limit = 20): array {
+		$result = ['scanned' => 0, 'reset' => 0, 'items' => []];
+		global $wpdb;
+		$queue_table = $wpdb->prefix . 'epv2_queue';
+		$runs_table = $wpdb->prefix . 'epv2_runs';
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id, state, error_message, admin_notes, ai_payload
+			 FROM `{$queue_table}`
+			 WHERE state IN ('rejected', 'manual_review')
+			   AND updated_at <= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 MINUTE)
+			 ORDER BY updated_at ASC
+			 LIMIT %d",
+			$limit
+		));
+		$tokens = [
+			'перепредставлена',
+			'build_de_master',
+			'publish_ready_gate',
+			'length_below_kind_minimum',
+		];
+		foreach ((array) $rows as $row) {
+			$result['scanned']++;
+			$id = (int) $row->id;
+			$blob = strtolower(
+				(string) ($row->error_message ?? '') . ' ' .
+				(string) ($row->admin_notes ?? '')
+			);
+			$matched = '';
+			foreach ($tokens as $token) {
+				if (mb_stripos($blob, $token) !== false) {
+					$matched = $token;
+					break;
+				}
+			}
+			if ($matched === '') {
+				continue;
+			}
+			// 1. clear payload caches so Story Card and content_kind rebuild
+			$payload = json_decode((string) ($row->ai_payload ?? ''), true);
+			if (is_array($payload)) {
+				unset($payload['_meta']['content_kind']);
+				unset($payload['_meta']['story_card']);
+				EPV2_Queue::update_fields($id, [
+					'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+				]);
+			}
+			// 2. wipe stale selection + workflow counters
+			$notes = json_decode((string) ($row->admin_notes ?? ''), true);
+			$notes = is_array($notes) ? $notes : [];
+			unset($notes['selection']);
+			$sys = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			foreach ([
+				'workflow_step', 'workflow_step_attempts', 'workflow_step_status',
+				'workflow_terminal_reason', 'quarantine_reason', 'last_stage_blocker',
+				'retries', 'importance_score', 'importance_threshold', 'next_operator_action',
+			] as $k) {
+				unset($sys[$k]);
+			}
+			$notes['_system'] = $sys;
+			EPV2_Queue::update_fields($id, [
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+			]);
+			// 3. clear run history so attempts counter resets
+			$wpdb->query($wpdb->prepare(
+				"DELETE FROM `{$runs_table}`
+				 WHERE job_name = 'process'
+				   AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.last_item_id')) AS UNSIGNED) = %d",
+				$id
+			));
+			// 4. flip back to `new`
+			EPV2_Queue::mark_state($id, 'new', [
+				'error_message' => 'Auto-reset by watchdog: legacy reason "' . $matched . '" already fixed in code.',
+			]);
+			$result['reset']++;
+			$result['items'][] = [
+				'id' => $id,
+				'matched' => $matched,
+				'previous_state' => (string) ($row->state ?? ''),
+			];
+		}
+		return $result;
+	}
+
+	/**
 	 * Free the active automation slot when the current item has been
 	 * sitting there longer than the worker would normally take.
 	 *

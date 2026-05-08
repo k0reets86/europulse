@@ -334,9 +334,10 @@ final class EPV2_REST {
 		// safety nets — stuck-item release, Polylang link repair, dedup of
 		// published posts. All idempotent, all return small status arrays.
 		if (class_exists('EPV2_Watchdog')) {
-			$cleanup['watchdog_stuck_active'] = EPV2_Watchdog::release_stuck_active_item(15);
-			$cleanup['watchdog_polylang']     = EPV2_Watchdog::repair_polylang_links(30);
-			$cleanup['watchdog_dedupe']       = EPV2_Watchdog::dedupe_published_posts(20);
+			$cleanup['watchdog_stuck_active']    = EPV2_Watchdog::release_stuck_active_item(15);
+			$cleanup['watchdog_polylang']        = EPV2_Watchdog::repair_polylang_links(30);
+			$cleanup['watchdog_dedupe']          = EPV2_Watchdog::dedupe_published_posts(20);
+			$cleanup['watchdog_legacy_reset']    = EPV2_Watchdog::auto_reset_legacy_quarantine(20);
 		}
 		return rest_ensure_response([
 			'ok' => true,

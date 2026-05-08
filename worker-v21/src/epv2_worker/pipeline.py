@@ -169,6 +169,22 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             confidence = 0.0
         if primary and confidence >= 0.6:
             ctx.categories = [primary]
+        # Editorial-calibration cross-tag: append secondary if the card chose
+        # one. Story Card already enforced the rules (no sub-rubric in this
+        # slot, equal-importance test); we just propagate it here so the
+        # publisher can wp_set_post_terms() with both categories.
+        secondary = str(card_cat.get("secondary") or "").strip()
+        try:
+            sec_conf = float(card_cat.get("secondary_confidence") or 0.0)
+        except (TypeError, ValueError):
+            sec_conf = 0.0
+        if (
+            secondary
+            and secondary != primary
+            and secondary not in ctx.categories
+            and sec_conf >= 0.6
+        ):
+            ctx.categories.append(secondary)
         # Replace TF-IDF tag stub with the curated tags from the card —
         # they are clean German nouns, capitalized, vetted by the LLM.
         card_tags = _story_card_init.get("tags") or []

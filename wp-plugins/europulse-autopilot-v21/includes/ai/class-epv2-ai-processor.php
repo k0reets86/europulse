@@ -139,6 +139,29 @@ final class EPV2_AI_Processor {
 									]);
 								}
 							}
+
+							// Editorial-calibration filter (docs/editorial-calibration.md).
+							// Story Card already classified the item against the
+							// per-rubric stop-list. reject_low_value items are
+							// marked rejected immediately — no further AI tokens.
+							$editorial_match = strtolower((string) ($story_card['editorial_match'] ?? 'match'));
+							$editorial_reason = (string) ($story_card['editorial_reason'] ?? '');
+							if ($editorial_match === 'reject_low_value') {
+								$reason_slug = sanitize_key((string) ($story_card['category']['primary'] ?? 'unknown'));
+								$reason_msg = trim('Editorial calibration reject: ' . ($editorial_reason !== '' ? $editorial_reason : 'matches per-rubric stop-list')) . ' [' . $reason_slug . ']';
+								EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+									'error_message' => $reason_msg,
+								]);
+								self::log_process_item_step('editorial_calibration_reject', (int) $item->id, [
+									'category' => $reason_slug,
+									'editorial_reason' => $editorial_reason,
+									'duration_ms' => self::duration_ms_since($item_started_at),
+								]);
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = 'rejected_editorial_calibration';
+								break;
+							}
 						} else {
 							self::log_process_item_step('story_card_build_failed', (int) $item->id, [
 								'run_id' => $run,

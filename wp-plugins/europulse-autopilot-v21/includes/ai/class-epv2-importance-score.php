@@ -73,6 +73,16 @@ final class EPV2_Importance_Score {
 			$score += 5;
 		}
 
+		// 6. Editorial-calibration penalty (-15 pts) — borderline matches
+		// from Story Card per docs/editorial-calibration.md indicate the
+		// content is in «условно берём» tier; if it later lands in
+		// quarantine, prefer rejected over manual_review unless other
+		// signals push the score back over the threshold.
+		$story_card = is_array($meta['story_card'] ?? null) ? $meta['story_card'] : [];
+		if (isset($story_card['editorial_match']) && strtolower((string) $story_card['editorial_match']) === 'borderline') {
+			$score -= 15;
+		}
+
 		return (int) max(0, min(100, $score));
 	}
 

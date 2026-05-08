@@ -51,6 +51,12 @@ class StoryCardCategory:
     primary: str = ""
     confidence: float = 0.0
     rationale: str = ""
+    # Editorial-calibration cross-tag: max one extra category, only when both
+    # rubrics are equally central. Sub-rubrics (Bayern, München, Auto, IT,
+    # Technologie, Veranstaltungen et al.) inherit from parent automatically
+    # and never count as a secondary slot. Empty string when no second tag.
+    secondary: str = ""
+    secondary_confidence: float = 0.0
 
 
 @dataclass
@@ -96,6 +102,12 @@ class StoryCard:
     rewrite: StoryCardRewrite = field(default_factory=StoryCardRewrite)
     publishable_estimate: str = "medium"
     publishable_reason: str = ""
+    # Editorial-calibration verdict from `docs/editorial-calibration.md`:
+    #   match            — fits the rubric's «точно берём» list
+    #   borderline       — falls into «условно»; importance score decides
+    #   reject_low_value — falls into «точно НЕ берём»; route straight to rejected
+    editorial_match: str = "match"
+    editorial_reason: str = ""
     provider: str = ""
     model: str = ""
     success: bool = False
@@ -124,7 +136,43 @@ _SYSTEM_PROMPT = (
     "7. media_search_terms are concrete visual hooks (named persons, named places, named objects),\n"
     "   not abstract topics. 1-3 items.\n"
     "8. key_facts: 3-5 atomic factual statements drawn ONLY from the source — no invention.\n"
-    "9. Empty strings/lists are acceptable when the source genuinely does not say.\n"
+    "9. Empty strings/lists are acceptable when the source genuinely does not say.\n\n"
+    "EDITORIAL CALIBRATION (per docs/editorial-calibration.md):\n"
+    "Set `editorial_match` to one of:\n"
+    "  - 'match'            — fits the chosen rubric's «точно берём» list\n"
+    "  - 'borderline'       — falls into «условно»; importance score will decide\n"
+    "  - 'reject_low_value' — falls into «точно НЕ берём» (see per-rubric stop-list below)\n"
+    "Always set `editorial_reason` (short) so the operator can audit.\n\n"
+    "Per-rubric stop-lists — set editorial_match='reject_low_value' when story matches:\n"
+    "  politik          — внутрипартийные склоки без существа; мэрские выборы малых городов; твиттер-реакции; расписания без сути; спекуляции без источников; пресс-релизы лоббистов; процедурные движения парламента; второстепенные функционеры.\n"
+    "  ukraine          — непроверенные telegram-слухи; односторонние сводки потерь без верификации; спекулятивные мирные сценарии без источников; рада-склоки без существа; российские «мы поразили X» как самостоятельная новость; непроверенные соцсетевые материалы.\n"
+    "  deutschland      — мелкая криминальная хроника; рутинные пробки без значимого нарушения движения; обычный прогноз погоды без аномалий; мелкие сплетни знаменитостей; открытия мелких бизнесов; рекламные пресс-релизы; кадровые движения локальных Stadtverwaltung без значимости.\n"
+    "  wirtschaft       — крипто/NFT/Web3 хайп; «топ-5 акций» инвестсоветы; квартальные отчёты small-cap без сюрпризов; маркетинговые пресс-релизы; trader sentiment; стартап-PR.\n"
+    "  (auto sub)       — тест-драйвы; тюнинг/мотоспорт ниже Formel-1; коллекционные малотиражные модели; реклама дилеров.\n"
+    "  (it sub)         — крипто-хайп; багфиксы в обскурных инструментах; мелкие обновления приложений; «10 советов как ускорить» формат; тест-обзоры гаджетов.\n"
+    "  (technologie sub)— «учёные открыли X» без peer-review; поп-наука clickbait; спекулятивные «технологии будущего»; маркетинговые анонсы стартапов без следа в науке.\n"
+    "  welt             — локальные новости стран без международного эха; личная жизнь иностранных политиков; монархические сплетни (UK royals — только реально крупное); бульварные форматы; истории про животных; спортивные результаты иностранных лиг; локальные природные явления вне катастроф.\n"
+    "  leben-in-deutschland — generic «10 советов» без news-повода; туристический контент; рутинные бюрократические объяснения без news-привязки; личные истории без системного измерения; обзоры сервисов; реклама услуг под видом полезной информации.\n"
+    "  sport            — низшие дивизионы (Bundesliga 3, Regionalliga, бельгийская/нидерландская/австрийская/швейцарская лиги — кроме случаев когда там украинский игрок крупного уровня); гандбол; американский футбол кроме Super Bowl; бейсбол/MLB; регби; крикет; esports; молодёжные U-17/U-19/U-21 без landmark; ставки/коэффициенты; сплетни про спортсменов; контент-маркетинг типа «топ-10 голов сезона».\n"
+    "  kultur           — сплетни о знаменитостях; «что звёзды носили»; личная жизнь артистов без культурной релевантности; рутинные обзоры концертов/спектаклей; листиклы «топ-10 книг для лета»; российская государственная культурная программа поданная как нейтральное событие.\n"
+    "  meinung          — инфлюэнсеры/блогеры; анонимные op-ed; псевдо-научные мнения; теории заговора; пропагандистские «альтернативные взгляды» (включая AfD/Wagenknecht позиции); ранты без аргумента.\n"
+    "  community        — личные приглашения; коммерческая реклама под видом community; pro-Russian события (включая «pro-peace»/«диалог»/«понять Россию» камуфляж); Russian Orthodox Moscow Patriarchate мероприятия; малые camera-кружки; платные тренинги/коучи; MLM; немецкие политические партии рекламирующие свои мероприятия.\n\n"
+    "Cross-tag rule (category.secondary):\n"
+    "  - Set ONE primary category. Add `secondary` ONLY when both rubrics are equally central\n"
+    "    (e.g. charity concert in Berlin for Ukraine = community + ukraine; political rally\n"
+    "    of Ukrainians at Bundestag = politik + ukraine).\n"
+    "  - Sub-rubrics (bayern, muenchen, auto, it, technologie) inherit from parent automatically;\n"
+    "    they NEVER occupy the secondary slot. If story is München-local, primary stays as the\n"
+    "    parent topic (e.g. community), and the München aspect is captured in geography.\n"
+    "  - Never assign a secondary if you can plausibly say «primarily X, Y is incidental».\n"
+    "  - Leave secondary='' when not needed.\n\n"
+    "Editorial position on Russia/Ukraine (applies in politik, ukraine, welt and any rubric where the topic touches):\n"
+    "  - The war is «российская агрессивная война против Украины». Never «conflict», «crisis», «special operation».\n"
+    "  - Crimea + Donbass are temporarily occupied Ukrainian territory. Never «contested», never «Russian» in our framing.\n"
+    "  - Russian state media = propaganda outlets. Don't treat them as neutral journalism.\n"
+    "  - Don't replicate Russian narratives as facts. If quoting, mark as Russian source explicitly.\n"
+    "  - Selenskyj is the President of Ukraine. Not «comedian», not «former actor».\n"
+    "  - Tone: measured. Don't pile emotional adjectives on every sentence. The framing is firm; the prose is professional.\n"
 )
 
 
@@ -146,7 +194,13 @@ Return JSON of the form:
   "v": 1,
   "kind": "news|live_ticker|analysis|opinion|feature|community_event|service_announcement",
   "language": "de|uk|en|...",
-  "category": {{ "primary": "<slug>", "confidence": 0.0-1.0, "rationale": "short" }},
+  "category": {{
+    "primary": "<slug>",
+    "confidence": 0.0-1.0,
+    "rationale": "short",
+    "secondary": "<slug or empty>",
+    "secondary_confidence": 0.0-1.0
+  }},
   "geography": {{ "primary_country": "DE|UA|...", "primary_region": "", "is_international": bool }},
   "entities": {{
     "people":         [{{"name":"...","role":"..."}}, ...],
@@ -171,7 +225,9 @@ Return JSON of the form:
     "audience_focus": "..."
   }},
   "publishable_estimate": "high|medium|low|reject",
-  "publishable_reason": "short why"
+  "publishable_reason": "short why",
+  "editorial_match": "match|borderline|reject_low_value",
+  "editorial_reason": "short why (cite the matched rule)"
 }}
 """
 
@@ -278,6 +334,20 @@ def _coerce_card(raw: dict[str, Any]) -> StoryCard:
         except (TypeError, ValueError):
             card.category.confidence = 0.0
         card.category.rationale = _trim(str(cat.get("rationale") or ""), 200)
+        # Editorial calibration cross-tag (max one secondary, never sub-rubric)
+        secondary = str(cat.get("secondary") or "").strip().lower()
+        if secondary in CANONICAL_CATEGORIES and secondary != primary:
+            # Reject sub-rubric values in the secondary slot — those inherit
+            # from parent automatically and must not occupy the cross-tag.
+            sub_rubrics = {"bayern", "muenchen", "auto", "it", "technologie"}
+            if secondary not in sub_rubrics:
+                card.category.secondary = secondary
+                try:
+                    card.category.secondary_confidence = max(
+                        0.0, min(1.0, float(cat.get("secondary_confidence") or 0.0))
+                    )
+                except (TypeError, ValueError):
+                    card.category.secondary_confidence = 0.0
 
     geo = raw.get("geography") or {}
     if isinstance(geo, dict):
@@ -348,6 +418,12 @@ def _coerce_card(raw: dict[str, Any]) -> StoryCard:
         estimate = "medium"
     card.publishable_estimate = estimate
     card.publishable_reason = _trim(str(raw.get("publishable_reason") or ""), 200)
+
+    editorial = str(raw.get("editorial_match") or "match").strip().lower()
+    if editorial not in ("match", "borderline", "reject_low_value"):
+        editorial = "match"
+    card.editorial_match = editorial
+    card.editorial_reason = _trim(str(raw.get("editorial_reason") or ""), 200)
     return card
 
 

@@ -9,6 +9,28 @@ technologie) have their own modules that build on the wirtschaft baseline.
 """
 
 
+# Centralised editorial position used by Politik, Ukraine and Welt whenever
+# the topic touches Russia/Ukraine. Lifted from
+# ``docs/editorial-calibration.md`` so the same words appear everywhere.
+_EDITORIAL_POSITION_RU_UA = """REDAKTIONSPOSITION zu Russland/Ukraine (gilt durchgängig in diesem Artikel, falls das Thema Russland/Ukraine berührt):
+
+Hart in der Sache:
+- Der Krieg = „der russische Angriffskrieg gegen die Ukraine" / „der russische Eroberungskrieg". Nie „Konflikt", „Krise", „Spezialoperation".
+- Krim und Donbas = vorübergehend besetztes ukrainisches Staatsgebiet. Nie „umstritten", nie „russisch" in unserer Darstellung.
+- Behörden in den besetzten Gebieten = Kollaborateure / Besatzungsverwaltungen, wenn gerade von ihnen die Rede ist. Nicht neutral „lokale Behörden".
+- Menschen in der Besatzung = als Geiseln der Lage beschreiben, nicht herablassend, nicht beschuldigend.
+- Russische Narrative nie als Fakten reproduzieren. Werden sie zitiert, dann in Anführungszeichen, mit Quellenattribution und Kontext, dass es sich um russische Propaganda-Position handelt.
+- Russische Staatsmedien = Propaganda-Outlets, nicht „neutrale Medien". Bei Erstnennung als „der staatliche russische Sender X" / „die staatlich gelenkte russische Tageszeitung Y" benennen. Bei besonders harten Fällen (RT, Sputnik) „so genannte Medien".
+- Selenskyj = der ukrainische Präsident. Nie „Komiker" / „ehemaliger Schauspieler" als kennzeichnendes Attribut.
+
+Weiches im Ton:
+- Keine emotionalen Adjektive in jedem Absatz. „Russische Streitkräfte / russische Truppen / russische Militärs" ist neutral und korrekt; „Besatzer" / „Eroberer" nur, wo das im Kontext genau zutrifft.
+- „Der russische Volk" als Ganzes nicht pauschal ab- oder bewerten — solche Aussagen gehören in Meinungsartikel, nicht in die Nachricht.
+- Adjektive wie „perfide", „heimtückisch", „hinterhältig" gehören in Meinung, nicht in News.
+- Fakten exakt, Rahmen fest, Tonfall professionell. Wer Aggressor ist und wer angegriffen wurde, ergibt sich aus den Tatsachen — wir verwischen das nie.
+"""
+
+
 POLITIK = """RUBRIK: Politik — sachlich, präzise, ohne Färbung.
 
 Wortschatz:
@@ -29,8 +51,9 @@ Akzente:
 Sensitivitäten:
 - Kein parteiisches Framing. „Reform" vs „Verschärfung" — neutralen Begriff wählen.
 - Bei umstrittenen Themen Stimmen aller relevanten Seiten anführen (auch wenn nur eine Quelle beim Original).
-- Ukraine-bezogene Politik: „der russische Angriffskrieg gegen die Ukraine" (nicht „Konflikt"), Selenskyj nicht „Komiker", russische Akteure mit voller Funktion.
-"""
+- Bei Russland/Ukraine-bezogenen politischen Themen gilt die Redaktionsposition unten verbindlich.
+
+""" + _EDITORIAL_POSITION_RU_UA
 
 
 WIRTSCHAFT = """RUBRIK: Wirtschaft — präzise, zahlenorientiert, marktneutral.
@@ -178,10 +201,10 @@ Akzente:
 - Wirtschaftliche und gesellschaftliche Dimensionen (nicht nur Front).
 
 Sensitivitäten:
-- Russische Falsch-Narrative nicht reproduzieren („Spezialoperation", „Befreiung", „Genozid an Russen im Donbass" als Tatsache). Wenn diese als Position eines russischen Akteurs zitiert werden, klar als solche markieren.
 - Bei Verlustzahlen Quelle nennen (offizielle ukrainische / russische / unabhängige Schätzung).
 - Bei Friedensgesprächen / Verhandlungen vorsichtig: Status (offiziell? gerüchtweise?) klar.
-"""
+
+""" + _EDITORIAL_POSITION_RU_UA
 
 
 WELT = """RUBRIK: Welt — internationale Nachrichten ohne deutschen oder ukrainischen Schwerpunkt.
@@ -205,7 +228,9 @@ Sensitivitäten:
 - Keine Stereotypen über Länder oder Bevölkerungen.
 - Bei Konflikten in autoritären Staaten: Zensur-Kontext einordnen (was kann lokal berichtet werden, was nicht).
 - US-Politik: nicht aus deutsch-linker oder deutsch-rechter Perspektive, sondern faktisch.
-"""
+- Russland-/Ukraine-Bezüge in Welt-Stoffen unterliegen der Redaktionsposition unten verbindlich.
+
+""" + _EDITORIAL_POSITION_RU_UA
 
 
 KULTUR = """RUBRIK: Kultur — Literatur, Film, Theater, Musik, bildende Kunst, Festivals.

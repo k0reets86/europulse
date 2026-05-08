@@ -35,6 +35,7 @@ final class EPV2_Admin {
 		add_action('admin_post_epv2_promote_manual_review', [self::class, 'promote_manual_review']);
 		add_action('admin_post_epv2_reject_manual_review', [self::class, 'reject_manual_review']);
 		add_action('admin_post_epv2_reprocess_manual_review', [self::class, 'reprocess_manual_review']);
+		add_action('admin_post_epv2_reset_schedule_to_defaults', [self::class, 'reset_schedule_to_defaults']);
 		add_action('admin_post_epv2_clear_rejected_queue', [self::class, 'clear_rejected_queue']);
 		add_action('admin_post_epv2_delete_queue_item', [self::class, 'delete_queue_item']);
 		add_action('admin_post_epv2_delete_published_post', [self::class, 'delete_published_post']);
@@ -131,6 +132,43 @@ final class EPV2_Admin {
 		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_prune_queue'), 'epv2_prune_queue')) . '">Почистить очередь</a> ';
 		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_reset_stats'), 'epv2_reset_stats')) . '" onclick="return confirm(\'Сбросить сегодняшние счётчики?\')">Сбросить счётчики</a>';
 		echo '</p></div>';
+
+		// Phase 3 — schedule preview block on the dashboard.
+		// Operator sees the current 7-window schedule, current mode, and
+		// can reset to architecture-default if previously customised.
+		if (class_exists('EPV2_Time_Planner')) {
+			$profile = (array) (EPV2_Settings::get('time_schedule_profile', EPV2_Time_Planner::defaults()));
+			$windows = (array) ($profile['windows'] ?? []);
+			$current_mode = EPV2_Time_Planner::current_mode_label();
+			echo '<div style="margin:16px 0;padding:14px 16px;background:#fff;border:1px solid #dcdcde;border-radius:8px;max-width:980px">';
+			echo '<h2 style="margin:0 0 8px">Расписание публикаций</h2>';
+			echo '<p style="margin:0 0 12px;color:#50575e">Текущий режим: <strong>' . esc_html($current_mode) . '</strong>. Расписание задаётся в настройке <code>epv2_settings.time_schedule_profile</code>.</p>';
+			if ($windows !== []) {
+				echo '<table class="widefat striped" style="max-width:780px"><thead><tr><th>Слот</th><th>Режим</th><th>Таймер публикации</th><th>Сбор</th></tr></thead><tbody>';
+				foreach ($windows as $w) {
+					$start = (string) ($w['start'] ?? '');
+					$end = (string) ($w['end'] ?? '');
+					$mode = (string) ($w['mode'] ?? '');
+					$publish_minutes = (array) ($w['publish_minutes'] ?? []);
+					$collect_minutes = (array) ($w['collect_minutes'] ?? []);
+					$pub_count = count($publish_minutes);
+					$timer_label = $pub_count === 0
+						? '— (пауза)'
+						: ($pub_count >= 12 ? '5 мин' : ($pub_count >= 8 ? '8 мин' : ($pub_count >= 4 ? '15 мин' : sprintf('%d слотов в час', $pub_count))));
+					$col_label = $collect_minutes === [] ? '—' : implode(', ', array_map(fn($m) => sprintf('%02d', $m), $collect_minutes));
+					echo '<tr>';
+					echo '<td>' . esc_html($start) . '–' . esc_html($end) . '</td>';
+					echo '<td><code>' . esc_html($mode) . '</code></td>';
+					echo '<td>' . esc_html($timer_label) . '</td>';
+					echo '<td>:' . esc_html($col_label) . '</td>';
+					echo '</tr>';
+				}
+				echo '</tbody></table>';
+			}
+			echo '<p style="margin-top:12px"><a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_reset_schedule_to_defaults'), 'epv2_reset_schedule_to_defaults')) . '" onclick="return confirm(\'Сбросить расписание к архитектурному дефолту (7 окон)?\')">Сбросить к архитектурному дефолту</a></p>';
+			echo '</div>';
+		}
+
 		if (! empty($issues)) {
 			echo '<h2>Понятные проблемы</h2><table class="widefat striped" style="max-width:980px;margin-bottom:16px"><thead><tr><th>Где</th><th>Что происходит</th></tr></thead><tbody>';
 			foreach ($issues as $issue) {
@@ -2087,6 +2125,22 @@ final class EPV2_Admin {
 		}
 		set_transient('epv2_admin_notice', sprintf('Промоушен в готово к публикации: %d из %d', $promoted, count($ids)), 30);
 		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
+		exit;
+	}
+
+	/**
+	 * Phase 3 — reset publication schedule to the architecture-aligned
+	 * default (7 windows from EPV2_Time_Planner::defaults). Drops any
+	 * customised profile from the operator and lets defaults() take over.
+	 */
+	public static function reset_schedule_to_defaults(): void {
+		check_admin_referer('epv2_reset_schedule_to_defaults');
+		self::require_manage_capability();
+		$opt = (array) get_option('epv2_settings', []);
+		unset($opt['time_schedule_profile']);
+		update_option('epv2_settings', $opt, false);
+		set_transient('epv2_admin_notice', 'Расписание сброшено к архитектурному дефолту (7 окон).', 30);
+		wp_safe_redirect(admin_url('admin.php?page=epv2-dashboard'));
 		exit;
 	}
 

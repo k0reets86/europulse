@@ -2057,16 +2057,57 @@ final class EPV2_Queue {
 	 * reject, sport-fixture livepage. Everything else routes to manual
 	 * review so the operator (not a brittle automated re-score) decides.
 	 */
+	/**
+	 * Reasons that are genuinely hard-terminal: duplicates, hub pages,
+	 * paywall stubs, dead/sport-fixture livepages, hard-editorial blocks
+	 * and the size-guard tripwires. Items hitting these never get
+	 * re-promoted by maintenance — they stay where they were sent
+	 * (rejected for ingest issues, manual_review for downstream).
+	 *
+	 * Adding a new reason: append a substring here, no regex needed.
+	 * Checked case-insensitively as a substring match against the
+	 * error_message; that's why "stale_time_sensitive" appears once.
+	 */
+	private const HARD_TERMINAL_REASON_TOKENS = [
+		'duplicate',
+		'stale_time_sensitive',
+		'hard_editorial',
+		'context_reject',
+		'sport_fixture',
+		'payload size guard',
+		'max_allowed_packet',
+		'community_promo',
+		'routine_official',
+		'meta_index_page',
+		'hub_page',
+		'paywall_only',
+	];
+
+	/**
+	 * True when the given error_message contains a hard-terminal token.
+	 * Public so unit tests / admin tooling can introspect a reason
+	 * without re-implementing the substring scan.
+	 */
+	public static function is_hard_terminal_reason(string $error_message): bool {
+		if ($error_message === '') {
+			return false;
+		}
+		$haystack = mb_strtolower($error_message);
+		foreach (self::HARD_TERMINAL_REASON_TOKENS as $token) {
+			if (mb_stripos($haystack, $token) !== false) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private static function soft_terminal_state_guard(int $id, string $intended_state, array $extra, ?object $current): string {
 		if (! $current) {
 			return $intended_state;
 		}
 		$error_message = (string) ($extra['error_message'] ?? '');
-		// Keep terminal for genuinely-hard reasons.
-		if (preg_match(
-			'/(duplicate|^stale_time_sensitive|stale_time_sensitive|hard_editorial|context_reject|sport_fixture|payload size guard|max_allowed_packet|community_promo|routine_official|meta_index_page|hub_page|paywall_only)/iu',
-			$error_message
-		) === 1) {
+		// Keep terminal for genuinely-hard reasons (see HARD_TERMINAL_REASON_TOKENS).
+		if (self::is_hard_terminal_reason($error_message)) {
 			return $intended_state;
 		}
 		// Read the current payload + admin notes so we can consult ingest

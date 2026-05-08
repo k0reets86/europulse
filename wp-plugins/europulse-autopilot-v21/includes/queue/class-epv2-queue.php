@@ -1148,6 +1148,18 @@ final class EPV2_Queue {
 			}
 			$notes['_system']['importance_score'] = $importance;
 			$notes['_system']['importance_threshold'] = $importance_threshold;
+			if (class_exists('EPV2_Learning_Journal')) {
+				$event_type = $state === 'manual_review' ? 'manual_review_landed' : 'quarantine_rejected';
+				EPV2_Learning_Journal::record($event_type, (int) $item->id,
+					'stage_attempt_limit_' . ($stage !== '' ? $stage : 'unknown'),
+					[
+						'attempts' => $attempts,
+						'limit' => $limit_for_stage,
+						'importance' => $importance,
+						'last_blocker' => (string) (is_array($gate['blockers'] ?? null) ? implode(',', (array) $gate['blockers']) : ''),
+					]
+				);
+			}
 			$message = $selection_blocked
 				? 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($gate['selection_decision'] ?? 'unknown') . '".'
 				: ($state === 'manual_review'

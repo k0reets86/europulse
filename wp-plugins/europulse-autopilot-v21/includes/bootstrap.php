@@ -83,6 +83,7 @@ final class EPV2_Bootstrap {
 			'EPV2_Importance_Score' => 'ai/class-epv2-importance-score.php',
 			'EPV2_Watchdog' => 'queue/class-epv2-watchdog.php',
 			'EPV2_Notifier' => 'core/class-epv2-notifier.php',
+			'EPV2_Learning_Journal' => 'core/class-epv2-learning-journal.php',
 			'EPV2_Story_Card_Builder' => 'ai/class-epv2-story-card-builder.php',
 			'EPV2_Prompt_Profiles' => 'ai/class-epv2-prompt-profiles.php',
 			'EPV2_AI_Analyzer' => 'ai/class-epv2-ai-analyzer.php',

@@ -2145,6 +2145,9 @@ final class EPV2_Admin {
 			EPV2_Queue::mark_state($id, 'ready_publish', [
 				'error_message' => 'Promoted from manual_review by operator on ' . current_time('mysql'),
 			]);
+			if (class_exists('EPV2_Learning_Journal')) {
+				EPV2_Learning_Journal::record('manual_review_promoted', $id, 'operator_promote_to_publish');
+			}
 			$promoted++;
 		}
 		set_transient('epv2_admin_notice', sprintf('Промоушен в готово к публикации: %d из %d', $promoted, count($ids)), 30);
@@ -2541,6 +2544,9 @@ final class EPV2_Admin {
 			EPV2_Queue::mark_state($id, 'rejected', [
 				'error_message' => 'Rejected from manual_review by operator on ' . current_time('mysql'),
 			]);
+			if (class_exists('EPV2_Learning_Journal')) {
+				EPV2_Learning_Journal::record('manual_review_rejected', $id, 'operator_reject_from_manual_review');
+			}
 			$rejected++;
 		}
 		set_transient('epv2_admin_notice', sprintf('Отклонено: %d из %d', $rejected, count($ids)), 30);

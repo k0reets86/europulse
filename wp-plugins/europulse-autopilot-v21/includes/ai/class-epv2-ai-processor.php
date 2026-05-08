@@ -159,6 +159,12 @@ final class EPV2_AI_Processor {
 										$reason_slug . ': ' . $editorial_reason
 									);
 								}
+								if (class_exists('EPV2_Learning_Journal')) {
+									EPV2_Learning_Journal::record('editorial_reject', (int) $item->id, $editorial_reason, [
+										'category_primary' => $reason_slug,
+										'editorial_match' => $editorial_match,
+									]);
+								}
 								self::log_process_item_step('editorial_calibration_reject', (int) $item->id, [
 									'category' => $reason_slug,
 									'editorial_reason' => $editorial_reason,

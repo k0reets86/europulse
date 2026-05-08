@@ -558,8 +558,33 @@ def _unsupported_explicit_dates(generated_text: str, source_text: str) -> list[s
 
 
 _NAME_SKIP_LAST_WORDS = {
+    # Geographic and institutional terms that look like surnames after a
+    # German compound noun.
     "Deutschland", "Europa", "Ukraine", "Union", "Bundestag", "Bundesrat",
     "Kabinett", "Krankenversicherung", "Krankenkassen", "Deutschlandfunk",
+    "EU", "NATO", "UNO", "USA", "WHO", "OECD", "OSZE", "G7", "G20",
+    "Bundeswehr", "Bundesrepublik", "Bundesregierung", "Landesregierung",
+    # Publication and agency names that show up in attribution clauses
+    # ("wie Reuters berichtet"); the regex would otherwise treat
+    # «German-Compound Reuters» as a person name.
+    "Reuters", "AP", "AFP", "DPA", "EFE", "ANSA", "TASS", "Bloomberg",
+    "Spiegel", "Welt", "Zeit", "FAZ", "Tagesschau", "Tagesspiegel",
+    "Handelsblatt", "Süddeutsche", "Bild", "Stern", "Focus", "NDR", "BR",
+    "ARD", "ZDF", "BBC", "CNN", "Reuters", "Politico", "Guardian",
+    "Euronews", "DW", "Ukrinform", "Pravda", "Independent", "LIGA",
+    "UNIAN", "Suspilne",
+    # German articles / fillers that occasionally end up matched as a
+    # «last word» of a fake compound.
+    "Der", "Die", "Das", "The",
+}
+
+# Tokens that, if they appear AS the first word of a candidate full name,
+# rule the match out: they're either German articles/prepositions or a
+# composite-noun prefix that the regex misread as a first name.
+_NAME_SKIP_FIRST_WORDS = {
+    "Der", "Die", "Das", "Den", "Dem", "Des", "Ein", "Eine",
+    "The", "An", "A",
+    "Bundes", "Landes", "Stadt", "Land",
 }
 
 
@@ -683,6 +708,13 @@ def _unsupported_generated_full_name_pairs(generated_text: str, source_text: str
         if first.isupper() or last.isupper():
             continue
         if last in _NAME_SKIP_LAST_WORDS:
+            continue
+        if first in _NAME_SKIP_FIRST_WORDS:
+            continue
+        # Hyphen in the first token = it's a German compound noun (e.g.
+        # "US-Hauskarte"), not a personal first name. Skip — the next
+        # token is just attribution ("Reuters") or another noun.
+        if "-" in first:
             continue
         full = f"{first} {last}"
         if re.search(rf"\b{re.escape(full)}\b", source):

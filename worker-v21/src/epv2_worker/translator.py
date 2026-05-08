@@ -400,12 +400,20 @@ def _ukrainian_style_warnings(title: str, lead: str, body: str) -> list[str]:
         warnings.append("lead and first paragraph start too similarly")
     if _same_opening(title_n, lead_n, 5):
         warnings.append("title and lead start too similarly")
-    if _starts_with_source_formula(lead) and _starts_with_source_formula(first_paragraph):
-        warnings.append("lead and first paragraph both start with source attribution")
+    # NOTE: removed "lead and first paragraph both start with source
+    # attribution" warning. Architecture-audit base_voice rule #2 mandates
+    # source attribution in the lead; rule #10 mandates naming each
+    # additional source when its fact is introduced. Translator faithfully
+    # carries that pattern into Ukrainian — flagging it here would produce
+    # a self-defeating regen loop. Real over-attribution is still caught
+    # by the source_starts threshold below.
 
     combined = f"{title}\n{lead}\n{body}".lower()
     source_starts = len(re.findall(r"(?m)^\s*(як повідомляє|за даними|за повідомленням|згідно з повідомленням|у повідомленні)", combined))
-    if source_starts >= 2:
+    # Threshold raised from 2 to 4 so a typical 2–3 source synthesis (each
+    # source attributed once) does not trip the gate. 4+ paragraph-starts
+    # still flag — that's mechanical repetition, not editorial discipline.
+    if source_starts >= 4:
         warnings.append("too many paragraphs start with source attribution")
 
     banned_patterns = {

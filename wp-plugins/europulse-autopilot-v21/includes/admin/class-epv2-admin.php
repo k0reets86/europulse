@@ -35,6 +35,7 @@ final class EPV2_Admin {
 		add_action('admin_post_epv2_promote_manual_review', [self::class, 'promote_manual_review']);
 		add_action('admin_post_epv2_reject_manual_review', [self::class, 'reject_manual_review']);
 		add_action('admin_post_epv2_reprocess_manual_review', [self::class, 'reprocess_manual_review']);
+		add_action('admin_post_epv2_regen_stage', [self::class, 'regen_stage']);
 		add_action('admin_post_epv2_reset_schedule_to_defaults', [self::class, 'reset_schedule_to_defaults']);
 		add_action('admin_post_epv2_clear_rejected_queue', [self::class, 'clear_rejected_queue']);
 		add_action('admin_post_epv2_delete_queue_item', [self::class, 'delete_queue_item']);
@@ -742,6 +743,24 @@ final class EPV2_Admin {
 				$edit_url = self::queue_post_edit_url($item);
 				if ($edit_url !== '') {
 					echo '<a class="button button-small" href="' . esc_url($edit_url) . '">Редактировать пост</a> ';
+				}
+			}
+			// Phase 3 — per-stage AI regen for manual_review items.
+			// Granular complement to the bulk Reprocess; fires a single
+			// worker call with stage='title' / 'body' / 'seo' / 'media'.
+			if ((string) ($item->state ?? '') === 'manual_review') {
+				$item_id = (int) $item->id;
+				foreach ([
+					'title' => '📝 Title',
+					'body'  => '📰 Body',
+					'media' => '🖼 Media',
+					'seo'   => '🔍 SEO',
+				] as $stage => $label) {
+					$url = wp_nonce_url(
+						admin_url('admin-post.php?action=epv2_regen_stage&id=' . $item_id . '&stage=' . $stage),
+						'epv2_regen_stage_' . $item_id . '_' . $stage
+					);
+					echo '<a class="button button-small" href="' . esc_url($url) . '" onclick="return confirm(\'Перегенерить ' . esc_js($label) . ' (' . esc_js($stage) . ') для item #' . $item_id . '?\')" style="margin-right:4px">' . esc_html($label) . '</a>';
 				}
 			}
 			echo '<a class="button button-small" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_delete_queue_item&id=' . (int) $item->id), 'epv2_delete_queue_item_' . (int) $item->id)) . '" onclick="return confirm(\'Удалить этот материал?\')">Удалить</a>';
@@ -2124,6 +2143,86 @@ final class EPV2_Admin {
 			$promoted++;
 		}
 		set_transient('epv2_admin_notice', sprintf('Промоушен в готово к публикации: %d из %d', $promoted, count($ids)), 30);
+		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
+		exit;
+	}
+
+	/**
+	 * Phase 3 — per-stage AI regeneration for a single manual_review item.
+	 * Calls the worker with the chosen stage (title/body/media/seo) and
+	 * merges the response into existing_payload, then transitions the
+	 * item back to `new` so the next gate evaluation sees the fresh
+	 * artifact. Granular complement to the bulk Reprocess (which always
+	 * runs full_bundle).
+	 */
+	public static function regen_stage(): void {
+		$item_id = (int) ($_GET['id'] ?? 0);
+		$stage = sanitize_key((string) ($_GET['stage'] ?? ''));
+		check_admin_referer('epv2_regen_stage_' . $item_id . '_' . $stage);
+		self::require_manage_capability();
+		$allowed_stages = ['title', 'lead', 'body', 'media', 'seo'];
+		if (! in_array($stage, $allowed_stages, true)) {
+			set_transient('epv2_admin_notice', 'Недопустимая стадия: ' . $stage, 30);
+			wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
+			exit;
+		}
+		$row = EPV2_Queue::get_item($item_id);
+		if (! $row || (string) ($row->state ?? '') !== 'manual_review') {
+			set_transient('epv2_admin_notice', 'Item ' . $item_id . ' не в manual_review', 30);
+			wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
+			exit;
+		}
+		$existing = json_decode((string) ($row->ai_payload ?? ''), true);
+		$existing = is_array($existing) ? $existing : [];
+		try {
+			$result = EPV2_Worker_Client::process($row, $stage, $existing);
+		} catch (Throwable $e) {
+			set_transient('epv2_admin_notice', 'Worker error: ' . $e->getMessage(), 30);
+			wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
+			exit;
+		}
+		// Merge: worker returns a normalised payload for the regenerated
+		// stage. We selectively splice the relevant keys into existing.
+		if (is_array($result) && ! empty($result)) {
+			if (isset($result['languages']) && is_array($result['languages'])) {
+				$existing['languages'] = array_replace((array) ($existing['languages'] ?? []), $result['languages']);
+			}
+			if (isset($result['featured_media_url']) && $result['featured_media_url']) {
+				$existing['featured_media_url'] = (string) $result['featured_media_url'];
+				$existing['media_url'] = (string) $result['featured_media_url'];
+			}
+			if (isset($result['seo']) && is_array($result['seo'])) {
+				$existing['seo'] = array_replace((array) ($existing['seo'] ?? []), $result['seo']);
+			}
+			EPV2_Queue::update_fields($item_id, [
+				'ai_payload' => wp_json_encode($existing, JSON_UNESCAPED_UNICODE),
+			]);
+		}
+		// Reset workflow counters + run history so the gate gets a clean
+		// slate to evaluate the regenerated payload.
+		$notes = json_decode((string) ($row->admin_notes ?? ''), true) ?: [];
+		$sys = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		foreach ([
+			'workflow_step', 'workflow_step_attempts', 'workflow_step_status',
+			'workflow_terminal_reason', 'quarantine_reason', 'last_stage_blocker',
+			'retries', 'importance_score', 'importance_threshold', 'next_operator_action',
+		] as $key) {
+			unset($sys[$key]);
+		}
+		$notes['_system'] = $sys;
+		EPV2_Queue::update_fields($item_id, [
+			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+		]);
+		global $wpdb;
+		$wpdb->query($wpdb->prepare(
+			"DELETE FROM {$wpdb->prefix}epv2_runs WHERE job_name = 'process'
+			   AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.last_item_id')) AS UNSIGNED) = %d",
+			$item_id
+		));
+		EPV2_Queue::mark_state($item_id, 'new', [
+			'error_message' => sprintf('Regenerated stage=%s by operator on %s', $stage, current_time('mysql')),
+		]);
+		set_transient('epv2_admin_notice', sprintf('Item #%d: стадия "%s" перегенерирована, отправлено на gate.', $item_id, $stage), 30);
 		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
 		exit;
 	}

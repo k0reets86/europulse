@@ -37,6 +37,7 @@ final class EPV2_Admin {
 		add_action('admin_post_epv2_reprocess_manual_review', [self::class, 'reprocess_manual_review']);
 		add_action('admin_post_epv2_regen_stage', [self::class, 'regen_stage']);
 		add_action('admin_post_epv2_reset_schedule_to_defaults', [self::class, 'reset_schedule_to_defaults']);
+		add_action('admin_post_epv2_save_schedule', [self::class, 'save_schedule']);
 		add_action('admin_post_epv2_clear_rejected_queue', [self::class, 'clear_rejected_queue']);
 		add_action('admin_post_epv2_delete_queue_item', [self::class, 'delete_queue_item']);
 		add_action('admin_post_epv2_delete_published_post', [self::class, 'delete_published_post']);
@@ -82,6 +83,7 @@ final class EPV2_Admin {
 		add_submenu_page('epv2-dashboard', 'Настройки', 'Настройки', $page_cap, 'epv2-settings', [self::class, 'settings']);
 		add_submenu_page('epv2-dashboard', 'Ручной режим', 'Ручной режим', $page_cap, 'epv2-manual', [self::class, 'manual']);
 		add_submenu_page('epv2-dashboard', 'Проверка материала', 'Проверка материала', $page_cap, 'epv2-review', [self::class, 'review']);
+		add_submenu_page('epv2-dashboard', 'Расписание', 'Расписание', $page_cap, 'epv2-schedule', [self::class, 'schedule_page']);
 		add_submenu_page('epv2-dashboard', 'Логи', 'Логи', $page_cap, 'epv2-logs', [self::class, 'logs']);
 		add_submenu_page('epv2-dashboard', 'Запуски', 'Запуски', $page_cap, 'epv2-runs', [self::class, 'runs']);
 	}
@@ -2224,6 +2226,124 @@ final class EPV2_Admin {
 		]);
 		set_transient('epv2_admin_notice', sprintf('Item #%d: стадия "%s" перегенерирована, отправлено на gate.', $item_id, $stage), 30);
 		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
+		exit;
+	}
+
+	/**
+	 * Phase 3 — schedule editor page. Per-window edit form for the seven
+	 * publication slots (architecture audit section 8): start/end time,
+	 * mode label, timer minutes / pause. Save writes to
+	 * epv2_settings.time_schedule_profile.
+	 */
+	public static function schedule_page(): void {
+		self::require_view_capability();
+		$profile = (array) (EPV2_Settings::get('time_schedule_profile', EPV2_Time_Planner::defaults()));
+		$windows = (array) ($profile['windows'] ?? []);
+		$timezone = (string) ($profile['timezone'] ?? 'Europe/Berlin');
+		echo '<div class="wrap"><h1>Расписание публикаций</h1>';
+		$notice = get_transient('epv2_admin_notice');
+		if ($notice) {
+			delete_transient('epv2_admin_notice');
+			echo '<div class="notice notice-info"><p>' . esc_html((string) $notice) . '</p></div>';
+		}
+		echo '<p>Каждое окно описывает временной слот и таймер между публикациями. Ночное окно (timer=0) означает паузу — через него идут только breaking_alert.</p>';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+		wp_nonce_field('epv2_save_schedule');
+		echo '<input type="hidden" name="action" value="epv2_save_schedule">';
+		echo '<table class="widefat striped" style="max-width:1100px"><thead><tr>';
+		echo '<th style="width:80px">Старт</th><th style="width:80px">Конец</th><th>Mode</th><th style="width:120px">Таймер (мин)</th><th>Сбор (мин-час)</th>';
+		echo '</tr></thead><tbody>';
+		foreach ($windows as $i => $w) {
+			$start = (string) ($w['start'] ?? '');
+			$end = (string) ($w['end'] ?? '');
+			$mode = (string) ($w['mode'] ?? '');
+			$publish_minutes = (array) ($w['publish_minutes'] ?? []);
+			$collect_minutes = (array) ($w['collect_minutes'] ?? []);
+			// Derive the "timer minutes" from the publish_minutes step.
+			$timer = 0;
+			if (count($publish_minutes) >= 2) {
+				$diffs = [];
+				for ($k = 1; $k < count($publish_minutes); $k++) {
+					$diffs[] = (int) $publish_minutes[$k] - (int) $publish_minutes[$k - 1];
+				}
+				$timer = (int) (array_sum($diffs) / max(1, count($diffs)));
+			}
+			echo '<tr>';
+			echo '<td><input type="text" name="windows[' . $i . '][start]" value="' . esc_attr($start) . '" pattern="[0-2][0-9]:[0-5][0-9]" style="width:70px"></td>';
+			echo '<td><input type="text" name="windows[' . $i . '][end]" value="' . esc_attr($end) . '" pattern="[0-2][0-9]:[0-5][0-9]" style="width:70px"></td>';
+			echo '<td><input type="text" name="windows[' . $i . '][mode]" value="' . esc_attr($mode) . '" style="width:200px"></td>';
+			echo '<td><input type="number" name="windows[' . $i . '][timer_minutes]" value="' . (int) $timer . '" min="0" max="60" style="width:80px"> ';
+			echo $timer === 0 ? '<small>пауза</small>' : '<small>каждые</small>';
+			echo '</td>';
+			echo '<td><input type="text" name="windows[' . $i . '][collect_minutes]" value="' . esc_attr(implode(',', array_map('strval', $collect_minutes))) . '" placeholder="0,30" style="width:120px"></td>';
+			echo '</tr>';
+		}
+		echo '</tbody></table>';
+		echo '<p style="margin-top:12px">';
+		echo '<input type="text" name="timezone" value="' . esc_attr($timezone) . '" placeholder="Europe/Berlin"> ';
+		echo '<button class="button button-primary" type="submit">Сохранить расписание</button> ';
+		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_reset_schedule_to_defaults'), 'epv2_reset_schedule_to_defaults')) . '" onclick="return confirm(\'Сбросить расписание к архитектурному дефолту?\')">Сбросить к дефолту</a>';
+		echo '</p>';
+		echo '</form>';
+		echo '</div>';
+	}
+
+	/**
+	 * Phase 3 — save schedule edit form. Validates and writes back to
+	 * epv2_settings.time_schedule_profile.
+	 */
+	public static function save_schedule(): void {
+		check_admin_referer('epv2_save_schedule');
+		self::require_manage_capability();
+		$raw_windows = (array) ($_POST['windows'] ?? []);
+		$timezone = sanitize_text_field((string) ($_POST['timezone'] ?? 'Europe/Berlin'));
+		$normalised = [];
+		foreach ($raw_windows as $w) {
+			$start = preg_match('/^[0-2][0-9]:[0-5][0-9]$/', (string) ($w['start'] ?? '')) ? (string) $w['start'] : '';
+			$end = preg_match('/^[0-2][0-9]:[0-5][0-9]$/', (string) ($w['end'] ?? '')) ? (string) $w['end'] : '';
+			$mode = sanitize_key((string) ($w['mode'] ?? ''));
+			$timer_min = max(0, min(60, (int) ($w['timer_minutes'] ?? 0)));
+			$collect_csv = (string) ($w['collect_minutes'] ?? '');
+			$collect_minutes = [];
+			foreach (explode(',', $collect_csv) as $m) {
+				$m = trim($m);
+				if ($m === '' || ! ctype_digit($m)) continue;
+				$mi = (int) $m;
+				if ($mi < 0 || $mi > 59) continue;
+				$collect_minutes[] = $mi;
+			}
+			if ($start === '' || $end === '' || $mode === '') {
+				continue;
+			}
+			// Build publish_minutes from timer step.
+			$publish_minutes = [];
+			if ($timer_min > 0) {
+				for ($m = 0; $m < 60; $m += $timer_min) {
+					$publish_minutes[] = $m;
+				}
+			}
+			$normalised[] = [
+				'start' => $start,
+				'end' => $end,
+				'mode' => $mode,
+				'collect_minutes' => $collect_minutes ?: [0],
+				'publish_minutes' => $publish_minutes,
+			];
+		}
+		if ($normalised === []) {
+			set_transient('epv2_admin_notice', 'Не сохранено: нет валидных окон. Расписание оставлено без изменений.', 30);
+			wp_safe_redirect(admin_url('admin.php?page=epv2-schedule'));
+			exit;
+		}
+		$opt = (array) get_option('epv2_settings', []);
+		$opt['time_schedule_profile'] = [
+			'windows' => $normalised,
+			'breaking_watch_minutes' => [0, 30],
+			'timezone' => $timezone ?: 'Europe/Berlin',
+		];
+		update_option('epv2_settings', $opt, false);
+		set_transient('epv2_admin_notice', sprintf('Расписание сохранено: %d окон.', count($normalised)), 30);
+		wp_safe_redirect(admin_url('admin.php?page=epv2-schedule'));
 		exit;
 	}
 

@@ -243,8 +243,10 @@ final class EPV2_Resilience_Manager {
 		$rejects = (int) ($current['consecutive_quality_rejects'] ?? 0) + 1;
 		$cooldownUntil = (int) ($current['cooldown_until'] ?? 0);
 		$threshold = max(3, (int) EPV2_Settings::get('source_quality_reject_threshold', 5));
+		$reached_cooldown = false;
 		if ($rejects >= $threshold) {
 			$cooldownUntil = time() + (max(60, (int) EPV2_Settings::get('source_cooldown_minutes', 60)) * 2 * MINUTE_IN_SECONDS);
+			$reached_cooldown = $rejects === $threshold;
 		}
 		$health[$source_id] = array_merge($current, [
 			'consecutive_quality_rejects' => $rejects,
@@ -253,6 +255,12 @@ final class EPV2_Resilience_Manager {
 			'last_quality_reject_at' => time(),
 		]);
 		update_option(self::OPTION_SOURCE_HEALTH, $health, false);
+		if ($reached_cooldown && class_exists('EPV2_Notifier')) {
+			EPV2_Notifier::notify('warn', 'source_cooldown', sprintf(
+				'Source #%d auto-cooled down after %d consecutive editorial rejects',
+				$source_id, $rejects
+			), ['source_id' => $source_id, 'rejects' => $rejects, 'reason' => $reason]);
+		}
 	}
 
 	/**

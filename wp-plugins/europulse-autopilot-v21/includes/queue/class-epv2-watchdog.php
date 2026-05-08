@@ -185,6 +185,12 @@ final class EPV2_Watchdog {
 		$result['released'] = 1;
 		$result['item_id'] = $active_id;
 		$result['reason'] = 'stuck_in_' . $current_state;
+		if (class_exists('EPV2_Notifier')) {
+			EPV2_Notifier::notify('warn', 'watchdog', sprintf(
+				'Stuck active item #%d released (state=%s, idle > %d min)',
+				$active_id, $current_state, $stale_minutes
+			), ['item_id' => $active_id, 'state' => $current_state]);
+		}
 		return $result;
 	}
 
@@ -311,6 +317,12 @@ final class EPV2_Watchdog {
 				'cluster_id' => (string) $row->cluster_id,
 				'kept' => $kept,
 			];
+			if (class_exists('EPV2_Notifier')) {
+				EPV2_Notifier::notify('warn', 'watchdog', sprintf(
+					'Duplicate posts trimmed in cluster %s — kept oldest per language',
+					(string) $row->cluster_id
+				), ['cluster_id' => (string) $row->cluster_id, 'kept' => $kept]);
+			}
 		}
 		return $result;
 	}

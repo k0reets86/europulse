@@ -38,6 +38,8 @@ final class EPV2_Admin {
 		add_action('admin_post_epv2_regen_stage', [self::class, 'regen_stage']);
 		add_action('admin_post_epv2_reset_schedule_to_defaults', [self::class, 'reset_schedule_to_defaults']);
 		add_action('admin_post_epv2_save_schedule', [self::class, 'save_schedule']);
+		add_action('admin_post_epv2_save_telegram', [self::class, 'save_telegram']);
+		add_action('admin_post_epv2_test_telegram', [self::class, 'test_telegram']);
 		add_action('admin_post_epv2_clear_rejected_queue', [self::class, 'clear_rejected_queue']);
 		add_action('admin_post_epv2_delete_queue_item', [self::class, 'delete_queue_item']);
 		add_action('admin_post_epv2_delete_published_post', [self::class, 'delete_published_post']);
@@ -84,6 +86,7 @@ final class EPV2_Admin {
 		add_submenu_page('epv2-dashboard', 'Ручной режим', 'Ручной режим', $page_cap, 'epv2-manual', [self::class, 'manual']);
 		add_submenu_page('epv2-dashboard', 'Проверка материала', 'Проверка материала', $page_cap, 'epv2-review', [self::class, 'review']);
 		add_submenu_page('epv2-dashboard', 'Расписание', 'Расписание', $page_cap, 'epv2-schedule', [self::class, 'schedule_page']);
+		add_submenu_page('epv2-dashboard', 'Telegram', 'Telegram', $page_cap, 'epv2-telegram', [self::class, 'telegram_page']);
 		add_submenu_page('epv2-dashboard', 'Логи', 'Логи', $page_cap, 'epv2-logs', [self::class, 'logs']);
 		add_submenu_page('epv2-dashboard', 'Запуски', 'Запуски', $page_cap, 'epv2-runs', [self::class, 'runs']);
 	}
@@ -2226,6 +2229,88 @@ final class EPV2_Admin {
 		]);
 		set_transient('epv2_admin_notice', sprintf('Item #%d: стадия "%s" перегенерирована, отправлено на gate.', $item_id, $stage), 30);
 		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
+		exit;
+	}
+
+	/**
+	 * Phase 3 — Telegram bot configuration page (operator).
+	 * Architecture audit section 3 «6 категорий что не лечится автоматически
+	 * + Telegram-алерт». Bot token from @BotFather, chat id from
+	 * https://t.me/userinfobot or the chat's URL.
+	 */
+	public static function telegram_page(): void {
+		self::require_view_capability();
+		$opt = (array) get_option('epv2_settings', []);
+		$token = (string) ($opt['telegram_bot_token'] ?? '');
+		$chat_id = (string) ($opt['telegram_chat_id'] ?? '');
+		$inc_warn = ! empty($opt['telegram_include_warnings']);
+		$inc_info = ! empty($opt['telegram_include_info']);
+		echo '<div class="wrap"><h1>Telegram-бот</h1>';
+		$notice = get_transient('epv2_admin_notice');
+		if ($notice) {
+			delete_transient('epv2_admin_notice');
+			echo '<div class="notice notice-info"><p>' . esc_html((string) $notice) . '</p></div>';
+		}
+		echo '<p>Алерты от автопилота приходят сюда: застрявшие items, дубли, source-cooldowns, провал API. По умолчанию шлются только <code>error</code> и <code>alert</code> уровни — warnings и info логируются, но в TG не идут.</p>';
+		echo '<ol>';
+		echo '<li>Создай бота в Telegram через <a href="https://t.me/BotFather" target="_blank">@BotFather</a> командой <code>/newbot</code>, скопируй токен сюда.</li>';
+		echo '<li>Создай приватный канал или группу, добавь бота туда. Получи chat_id у <a href="https://t.me/userinfobot" target="_blank">@userinfobot</a> (или в URL канала после <code>https://web.telegram.org/k/#</code>).</li>';
+		echo '<li>Сохрани → нажми «Тестовое сообщение» — должно прийти ✅.</li>';
+		echo '</ol>';
+		echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="max-width:680px">';
+		wp_nonce_field('epv2_save_telegram');
+		echo '<input type="hidden" name="action" value="epv2_save_telegram">';
+		echo '<table class="form-table">';
+		echo '<tr><th><label for="tg_token">Токен бота</label></th>';
+		echo '<td><input type="text" id="tg_token" name="telegram_bot_token" value="' . esc_attr($token) . '" class="regular-text" placeholder="123456:ABC-...">';
+		if ($token !== '') {
+			echo '<p class="description">Конфигурация активна.</p>';
+		}
+		echo '</td></tr>';
+		echo '<tr><th><label for="tg_chat">Chat ID</label></th>';
+		echo '<td><input type="text" id="tg_chat" name="telegram_chat_id" value="' . esc_attr($chat_id) . '" class="regular-text" placeholder="-1001234567890 или @channelname"></td></tr>';
+		echo '<tr><th>Что слать в бот</th><td>';
+		echo '<label><input type="checkbox" name="telegram_include_warnings" value="1"' . checked($inc_warn, true, false) . '> Warnings (например watchdog освободил застрявший item)</label><br>';
+		echo '<label><input type="checkbox" name="telegram_include_info" value="1"' . checked($inc_info, true, false) . '> Info-сообщения (тихие, чатные)</label>';
+		echo '<p class="description">Errors и alerts шлются всегда.</p>';
+		echo '</td></tr>';
+		echo '</table>';
+		echo '<p><button class="button button-primary" type="submit">Сохранить</button></p>';
+		echo '</form>';
+		if ($token !== '' && $chat_id !== '') {
+			echo '<p><a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_test_telegram'), 'epv2_test_telegram')) . '">📨 Тестовое сообщение</a></p>';
+		}
+		echo '</div>';
+	}
+
+	public static function save_telegram(): void {
+		check_admin_referer('epv2_save_telegram');
+		self::require_manage_capability();
+		$opt = (array) get_option('epv2_settings', []);
+		$opt['telegram_bot_token'] = trim(sanitize_text_field((string) ($_POST['telegram_bot_token'] ?? '')));
+		$opt['telegram_chat_id'] = trim(sanitize_text_field((string) ($_POST['telegram_chat_id'] ?? '')));
+		$opt['telegram_include_warnings'] = ! empty($_POST['telegram_include_warnings']) ? 1 : 0;
+		$opt['telegram_include_info'] = ! empty($_POST['telegram_include_info']) ? 1 : 0;
+		update_option('epv2_settings', $opt, false);
+		set_transient('epv2_admin_notice', 'Настройки Telegram сохранены.', 30);
+		wp_safe_redirect(admin_url('admin.php?page=epv2-telegram'));
+		exit;
+	}
+
+	public static function test_telegram(): void {
+		check_admin_referer('epv2_test_telegram');
+		self::require_manage_capability();
+		if (! class_exists('EPV2_Notifier')) {
+			set_transient('epv2_admin_notice', 'EPV2_Notifier не загружен — проверь bootstrap.', 30);
+			wp_safe_redirect(admin_url('admin.php?page=epv2-telegram'));
+			exit;
+		}
+		$result = EPV2_Notifier::test_send();
+		$msg = ! empty($result['ok'])
+			? 'Тест отправлен ✓ (chat_id=' . (string) ($result['chat_id'] ?? '') . ')'
+			: 'Тест НЕ отправлен ✗: ' . (string) ($result['error'] ?? 'unknown');
+		set_transient('epv2_admin_notice', $msg, 30);
+		wp_safe_redirect(admin_url('admin.php?page=epv2-telegram'));
 		exit;
 	}
 

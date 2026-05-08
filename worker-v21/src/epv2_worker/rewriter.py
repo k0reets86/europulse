@@ -239,8 +239,17 @@ async def rewrite_to_german(
     length_profile: str = "standard",
     source_url: str = "",
     story_card: dict | None = None,
+    kind: str = "",
+    rubric_slug: str = "",
+    dossier_block: str = "",
 ) -> RewriteResult:
-    """Rewrite to German master. Falls back to DeepSeek if OpenAI fails."""
+    """Rewrite to German master. Falls back to DeepSeek if OpenAI fails.
+
+    When both ``kind`` (KIND_SPECS slug) and ``rubric_slug`` (WP category slug)
+    are provided, the composed type×rubric prompt matrix from
+    ``epv2_worker.prompts`` is used. Otherwise the legacy length-profile
+    prompt is used (backwards compatible for older callers).
+    """
     length_hint = {
         # AP-Wire-Stil: knappe Meldung, nur Kerninformation
         "brief":    "90–170 Wörter im body (Kurzmeldung, nur Kernfakten, kein Kontext-Ausbau, keine Deutung)",
@@ -273,15 +282,30 @@ async def rewrite_to_german(
         )
 
     story_card_block = _format_story_card_block(story_card)
-    if story_card_block:
-        # When a card is present, mention category in the length hint so the
-        # model picks structure intelligently (analysis vs reportage vs
-        # live-summary). We do not OVERRIDE length_profile here — that is
-        # already chosen upstream — but we surface the card-suggested
-        # structure as a soft hint inside the prompt body.
-        pass
 
-    user_prompt = f"""Quellensprache: {source_language}
+    # Phase 2.3: composed type×rubric prompt matrix when both signals present.
+    if kind and rubric_slug:
+        from .prompts import compose_rewrite_prompt
+        # Combine the legacy thin-source guard into the dossier block so the
+        # composed prompt still warns the model about ultra-thin sources.
+        dossier_combined = dossier_block
+        if thin_source_guard:
+            dossier_combined = (dossier_block + "\n\n" + thin_source_guard).strip() if dossier_block else thin_source_guard
+        user_prompt = compose_rewrite_prompt(
+            kind=kind,
+            rubric_slug=rubric_slug,
+            story_card_block=story_card_block,
+            dossier_block=dossier_combined,
+            original_title=original_title,
+            original_content=original_content,
+            source_url=source_url,
+            source_language=source_language,
+            publication_name=pub_name,
+        )
+    else:
+        # Legacy length-profile prompt (used when caller does not supply
+        # kind/rubric — keeps older test fixtures working).
+        user_prompt = f"""Quellensprache: {source_language}
 Content-Typ: {content_type}
 Schlüsselbegriffe: {", ".join(key_phrases)}
 Ziel-Länge: {length_hint}

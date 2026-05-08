@@ -227,12 +227,37 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     # an independent "best guess" from the raw source text.
     existing_payload = getattr(req, "existing_payload", None) or {}
     story_card_for_rewrite: dict | None = None
+    rewrite_kind: str = ""
+    rewrite_dossier_block: str = ""
     if isinstance(existing_payload, dict):
         meta = existing_payload.get("_meta") or {}
         if isinstance(meta, dict):
             sc = meta.get("story_card")
             if isinstance(sc, dict) and sc:
                 story_card_for_rewrite = sc
+            # Phase 2.3: kind set by EPV2_Content_Kinds::detect_kind() upstream.
+            ck = meta.get("content_kind")
+            if isinstance(ck, str) and ck:
+                rewrite_kind = ck
+            # Build a compact dossier block from primary + related sources.
+            dossier = meta.get("source_dossier") or {}
+            if isinstance(dossier, dict):
+                related = dossier.get("related") or []
+                if isinstance(related, list) and related:
+                    lines = ["DOSSIER (Zusatzquellen für Synthese, jede beim Einbringen namentlich nennen):"]
+                    for entry in related[:6]:
+                        if not isinstance(entry, dict):
+                            continue
+                        title = str(entry.get("title") or "").strip()
+                        url = str(entry.get("url") or "").strip()
+                        domain = str(entry.get("domain") or "").strip()
+                        if title and (domain or url):
+                            lines.append(f"  • {domain or url}: {title}")
+                    if len(lines) > 1:
+                        rewrite_dossier_block = "\n".join(lines)
+
+    # Phase 2.3: rubric_slug — prefer category_final, fall back to category_proposed.
+    rewrite_rubric = (req.category_final or req.category_proposed or "").strip().lower()
 
     rewrite = await rewrite_to_german(
         original_title=req.original_title,
@@ -246,6 +271,9 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         length_profile=effective_length_profile,
         source_url=req.original_url,
         story_card=story_card_for_rewrite,
+        kind=rewrite_kind,
+        rubric_slug=rewrite_rubric,
+        dossier_block=rewrite_dossier_block,
     )
     if not rewrite.success:
         ctx.blockers.append(f"Rewrite failed: {rewrite.error}")

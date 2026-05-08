@@ -32,6 +32,8 @@ final class EPV2_Admin {
 		add_action('admin_post_epv2_import_recommended_sources', [self::class, 'import_recommended_sources']);
 		add_action('admin_post_epv2_delete_queue_items', [self::class, 'delete_queue_items']);
 		add_action('admin_post_epv2_clear_queue', [self::class, 'clear_queue']);
+		add_action('admin_post_epv2_promote_manual_review', [self::class, 'promote_manual_review']);
+		add_action('admin_post_epv2_reject_manual_review', [self::class, 'reject_manual_review']);
 		add_action('admin_post_epv2_clear_rejected_queue', [self::class, 'clear_rejected_queue']);
 		add_action('admin_post_epv2_delete_queue_item', [self::class, 'delete_queue_item']);
 		add_action('admin_post_epv2_delete_published_post', [self::class, 'delete_published_post']);
@@ -349,6 +351,24 @@ final class EPV2_Admin {
 		echo '<input type="hidden" name="ids_csv" id="epv2-bulk-delete-ids" value="">';
 		echo '<button class="button button-secondary" type="submit" onclick="var ids=[...document.querySelectorAll(\'.epv2-queue-check:checked\')].map(function(cb){return cb.value;}); if(!ids.length){alert(\'Выберите материалы для удаления\'); return false;} document.getElementById(\'epv2-bulk-delete-ids\').value=ids.join(\',\'); return confirm(\'Удалить выбранные материалы?\');">Удалить выбранные</button>';
 		echo '</form>';
+
+		// Phase 3 — manual_review bulk actions visible only when filtering
+		// that state. Two buttons share the same JS pattern as bulk-delete.
+		if ($state_filter === 'manual_review') {
+			echo '<form id="epv2-promote-mr-form" method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="display:inline-block;margin-right:8px">';
+			wp_nonce_field('epv2_promote_manual_review');
+			echo '<input type="hidden" name="action" value="epv2_promote_manual_review">';
+			echo '<input type="hidden" name="ids_csv" id="epv2-promote-mr-ids" value="">';
+			echo '<button class="button button-primary" type="submit" onclick="var ids=[...document.querySelectorAll(\'.epv2-queue-check:checked\')].map(function(cb){return cb.value;}); if(!ids.length){alert(\'Выберите материалы для публикации\'); return false;} document.getElementById(\'epv2-promote-mr-ids\').value=ids.join(\',\'); return confirm(\'Отправить в публикацию: \'+ids.length+\' материал(ов)?\');">→ В публикацию</button>';
+			echo '</form>';
+			echo '<form id="epv2-reject-mr-form" method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="display:inline-block;margin-right:8px">';
+			wp_nonce_field('epv2_reject_manual_review');
+			echo '<input type="hidden" name="action" value="epv2_reject_manual_review">';
+			echo '<input type="hidden" name="ids_csv" id="epv2-reject-mr-ids" value="">';
+			echo '<button class="button" type="submit" onclick="var ids=[...document.querySelectorAll(\'.epv2-queue-check:checked\')].map(function(cb){return cb.value;}); if(!ids.length){alert(\'Выберите материалы для отклонения\'); return false;} document.getElementById(\'epv2-reject-mr-ids\').value=ids.join(\',\'); return confirm(\'Отклонить: \'+ids.length+\' материал(ов)?\');">✕ Отклонить</button>';
+			echo '</form>';
+		}
+
 		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_clear_queue'), 'epv2_clear_queue')) . '" onclick="return confirm(\'Очистить всю очередь?\')">Очистить очередь</a>';
 		echo '<div id="epv2-queue-blocks">';
 		echo self::queue_lightweight_blocks_html();
@@ -2035,6 +2055,56 @@ final class EPV2_Admin {
 		self::require_manage_capability();
 		EPV2_Queue::clear_all();
 		wp_safe_redirect(admin_url('admin.php?page=epv2-queue'));
+		exit;
+	}
+
+	/**
+	 * Phase 3 — manual_review action: bulk-promote items to ready_publish.
+	 * Operator decided the content is OK after triage.
+	 */
+	public static function promote_manual_review(): void {
+		check_admin_referer('epv2_promote_manual_review');
+		self::require_manage_capability();
+		$ids_csv = sanitize_text_field((string) ($_POST['ids_csv'] ?? ''));
+		$ids = array_filter(array_map('intval', explode(',', $ids_csv)));
+		$promoted = 0;
+		foreach ($ids as $id) {
+			$row = EPV2_Queue::get_item($id);
+			if (! $row || (string) ($row->state ?? '') !== 'manual_review') {
+				continue;
+			}
+			EPV2_Queue::mark_state($id, 'ready_publish', [
+				'error_message' => 'Promoted from manual_review by operator on ' . current_time('mysql'),
+			]);
+			$promoted++;
+		}
+		set_transient('epv2_admin_notice', sprintf('Промоушен в готово к публикации: %d из %d', $promoted, count($ids)), 30);
+		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
+		exit;
+	}
+
+	/**
+	 * Phase 3 — manual_review action: bulk-reject items.
+	 * Operator decided the content is not worth publishing after triage.
+	 */
+	public static function reject_manual_review(): void {
+		check_admin_referer('epv2_reject_manual_review');
+		self::require_manage_capability();
+		$ids_csv = sanitize_text_field((string) ($_POST['ids_csv'] ?? ''));
+		$ids = array_filter(array_map('intval', explode(',', $ids_csv)));
+		$rejected = 0;
+		foreach ($ids as $id) {
+			$row = EPV2_Queue::get_item($id);
+			if (! $row || (string) ($row->state ?? '') !== 'manual_review') {
+				continue;
+			}
+			EPV2_Queue::mark_state($id, 'rejected', [
+				'error_message' => 'Rejected from manual_review by operator on ' . current_time('mysql'),
+			]);
+			$rejected++;
+		}
+		set_transient('epv2_admin_notice', sprintf('Отклонено: %d из %d', $rejected, count($ids)), 30);
+		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
 		exit;
 	}
 

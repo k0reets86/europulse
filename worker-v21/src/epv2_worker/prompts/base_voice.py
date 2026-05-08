@@ -29,7 +29,12 @@ BASE_VOICE = """REDAKTIONSSTIL EUROPULSE — Pflichtregeln (gelten immer):
 
 9. Vornamen, Amtsbezeichnungen, Motive, Folgen und nächste Schritte nur, wenn sie im Original stehen.
 
-10. Quellenintegrität bei mehreren Quellen: jede zusätzliche Quelle wird beim Einbringen ihres Faktums namentlich genannt. „Reuters meldet zudem, dass …", „Der Tagesspiegel führt aus, …".
+10. Quellenintegrität bei mehreren Quellen — Pflicht-Mindestmass:
+    - Bei 1 Quelle: 1 Namensnennung im Lead reicht.
+    - Bei 2 Quellen: Lead nennt die Hauptquelle namentlich, plus mindestens 1 weitere Namensnennung der Sekundärquelle im Body („Reuters meldet zudem, dass …").
+    - Bei 3+ Quellen: Lead + mindestens 2 weitere namentliche Erwähnungen im Body, jede beim Einbringen ihres eigenen Faktums.
+    - Floskeln wie „Medien berichten", „Quellen sagen", „nach Informationen" zählen NICHT als Namensnennung — sie sind verboten.
+    - Beispiele: „Wie Spiegel berichtet, …" / „Reuters fügt hinzu, dass …" / „Der Tagesspiegel führt aus, …" / „Laut DW war …".
 
 11. Eindeutigkeit: ≥ 80% Originalität. Keine wörtlichen Übernahmen aus der Quelle, ausgenommen Eigennamen und feststehende Begriffe (Bundestag, EU, NATO).
 

@@ -87,18 +87,21 @@ final class EPV2_Category_Planner {
 		if ($total24 < 8) {
 			return ['delta' => 0, 'reason' => 'insufficient_density', 'stats' => $stats];
 		}
-			if ($target > 0 && $share24 < max(0.01, $target - 0.05)) {
-				return ['delta' => -4, 'reason' => 'underrepresented_24h_threshold_relief', 'stats' => $stats];
-			}
-			if ($cat6 === 0 && $target > 0 && $share24 < $target) {
-				return ['delta' => -2, 'reason' => 'missing_recent_presence_threshold_relief', 'stats' => $stats];
-			}
-			if ($cat6 >= $cap6 + 2 && $share24 > ($target + 0.08)) {
-				return ['delta' => 6, 'reason' => 'burst_and_overrepresented_threshold_raise', 'stats' => $stats];
-			}
-			if ($cat6 >= $cap6 && $share24 > ($target + 0.04)) {
-				return ['delta' => 4, 'reason' => 'burst_soft_threshold_raise', 'stats' => $stats];
-			}
+		if ($target > 0 && $share24 < max(0.01, $target - 0.05)) {
+			return ['delta' => -4, 'reason' => 'underrepresented_24h_threshold_relief', 'stats' => $stats];
+		}
+		if ($cat6 === 0 && $target > 0 && $share24 < $target) {
+			return ['delta' => -2, 'reason' => 'missing_recent_presence_threshold_relief', 'stats' => $stats];
+		}
+		// Editorial calibration drives selection now (docs/editorial-calibration.md):
+		// reject_low_value items leave at Story Card stage, not via the
+		// selection threshold. Raising the threshold for «overrepresented»
+		// rubrics on top of that double-punishes legitimate items in
+		// active news cycles (e.g. Wirtschaft on a budget-vote day).
+		// Keep only the negative deltas (relief for underrepresented);
+		// drop positive deltas. The architecture audit section 6 tradeoff
+		// «не понижать пороги ради прохода, но и не повышать
+		// искусственно ради баланса» applies in both directions.
 
 		return ['delta' => 0, 'reason' => '', 'stats' => $stats];
 	}

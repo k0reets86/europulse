@@ -139,19 +139,32 @@ final class EPV2_Collector {
 
 	public static function collect_source(object $source): array {
 		$type = (string) $source->type;
-		if (in_array($type, ['rss', 'atom'], true)) {
+		// Phase 3: is_aggregator flag generalises the Google-News-specific
+		// path. Any source that wraps third-party content in an RSS stub
+		// (Google News today; Bing News / Yahoo News / RSS-bridges in the
+		// future) carries is_aggregator=1 and follows the same flow:
+		//   1. fetch the wrapper RSS;
+		//   2. hand individual items downstream where the URL gets resolved
+		//      to the real publisher (handled in stage_candidate / story
+		//      card pipeline);
+		//   3. when resolution fails, the worker's
+		//      _search_supporting_sources_rich() finds the same topic on
+		//      other publishers (phase 2.7).
+		// Right now only Google News has wrapper-specific URL syntax we
+		// need to massage (when:14d freshness filter), so that branch
+		// stays GN-syntax-bound, but the flag is what selects the path.
+		$is_aggregator = ! empty($source->is_aggregator) || $type === 'google_news';
+		if (in_array($type, ['rss', 'atom'], true) && ! $is_aggregator) {
 			return EPV2_Feed_Reader::fetch((string) $source->url, false);
 		}
-		if ($type === 'google_news') {
-			// Inject when:14d into Google News searches that lack a time
-			// filter. Audit of ep_epv2_selection_audit found many GN
-			// queries returning items thousands of hours old; this caps
-			// the search horizon at 14 days without changing the query.
-			$gn_url = (string) $source->url;
-			if (class_exists('EPV2_Google_News') && method_exists('EPV2_Google_News', 'ensure_recent_filter')) {
-				$gn_url = EPV2_Google_News::ensure_recent_filter($gn_url, 14);
+		if ($is_aggregator) {
+			$feed_url = (string) $source->url;
+			if ($type === 'google_news' && class_exists('EPV2_Google_News') && method_exists('EPV2_Google_News', 'ensure_recent_filter')) {
+				// GN-specific: inject when:14d so we don't re-ingest items
+				// that are thousands of hours old.
+				$feed_url = EPV2_Google_News::ensure_recent_filter($feed_url, 14);
 			}
-			return EPV2_Feed_Reader::fetch($gn_url, true);
+			return EPV2_Feed_Reader::fetch($feed_url, true);
 		}
 		if ($type === 'scrape') {
 			$rules = json_decode((string) ($source->parse_rules ?? ''), true);

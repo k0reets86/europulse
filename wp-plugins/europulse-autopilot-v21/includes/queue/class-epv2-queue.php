@@ -1132,10 +1132,27 @@ final class EPV2_Queue {
 			$notes['_system']['workflow_owner_token'] = '';
 			$notes['_system']['workflow_heartbeat_at'] = '';
 			unset($notes['_system']['retry_after'], $notes['_system']['workflow_not_before']);
-			$state = $selection_blocked ? 'rejected' : 'manual_review';
+			// Phase 2.6 — when stage attempt limit is exhausted, importance
+			// score decides between manual_review (operator triages) and
+			// rejected (low-value content, do not waste operator time).
+			// selection_publish_blocked still always routes to rejected.
+			$importance = 0;
+			$importance_threshold = EPV2_Importance_Score::DEFAULT_THRESHOLD;
+			if (! $selection_blocked && class_exists('EPV2_Importance_Score')) {
+				$importance = EPV2_Importance_Score::compute($item, $payload);
+			}
+			if ($selection_blocked) {
+				$state = 'rejected';
+			} else {
+				$state = $importance >= $importance_threshold ? 'manual_review' : 'rejected';
+			}
+			$notes['_system']['importance_score'] = $importance;
+			$notes['_system']['importance_threshold'] = $importance_threshold;
 			$message = $selection_blocked
 				? 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($gate['selection_decision'] ?? 'unknown') . '".'
-				: 'Материал отправлен на ручную проверку: стадия "' . ($stage !== '' ? $stage : 'unknown') . '" превысила лимит попыток (' . (string) $attempts . '/' . (string) $limit_for_stage . ').';
+				: ($state === 'manual_review'
+					? 'Материал отправлен на ручную проверку: стадия "' . ($stage !== '' ? $stage : 'unknown') . '" превысила лимит попыток (' . (string) $attempts . '/' . (string) $limit_for_stage . '). Importance score=' . (string) $importance . '/' . (string) $importance_threshold . '.'
+					: 'Материал отбракован после исчерпания попыток: стадия "' . ($stage !== '' ? $stage : 'unknown') . '", importance score=' . (string) $importance . ' ниже порога ' . (string) $importance_threshold . '.');
 			self::mark_state((int) $item->id, $state, [
 				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 				'error_message' => $message,
@@ -3913,14 +3930,20 @@ final class EPV2_Queue {
 	}
 
 	private static function workflow_stage_attempt_limit(string $stage): int {
+		// Phase 2.4 — Architecture audit section 6 tradeoff #4:
+		// "2 attempts per failed step, then manual_review".
+		// Each stage gets the same independent budget; once exhausted,
+		// quarantine routes the item to manual_review (Queue::quarantine).
 		$stage = sanitize_key($stage);
 		return match ($stage) {
-			'build_de_master' => 3,
-			'rebuild_bundle' => 4,
-			'publish_finish' => 3,
-			'publish_ready_gate' => 2,
-			'translate_uk', 'translate_en', 'translate_finish' => 3,
-			default => 6,
+			'build_de_master',
+			'rebuild_bundle',
+			'publish_finish',
+			'publish_ready_gate',
+			'translate_uk',
+			'translate_en',
+			'translate_finish' => 2,
+			default => 2,
 		};
 	}
 

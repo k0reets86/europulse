@@ -15,8 +15,10 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 
 final class EPV2_Weekly_Analysis {
 
-    private const ANALYSE_TAG  = 'Top-Thema';
-    private const MIN_MENTIONS = 5;
+    private const ANALYSE_TAG    = 'Top-Thema';
+    private const MIN_MENTIONS   = 5;
+    private const SOURCE_TARGET  = 8;   // Architecture audit section 4 phase-3 spec: 5–8 sources for weekly analysis.
+    private const ECHO_LOOKBACK_DAYS = 30;
 
     // -------------------------------------------------------------------------
     // Cron registration
@@ -70,20 +72,38 @@ final class EPV2_Weekly_Analysis {
         // Mark cluster as used for this week's analysis to avoid duplication on Thursday run
         self::mark_cluster_used( $cluster );
 
-        // Fetch 5 supporting sources via Google News
-        $sources = EPV2_Google_News::fetch( $topic, 'de', 'DE', 5 );
+        // Phase-3 broadening: 5–8 fresh sources via Google News (architecture
+        // audit section 4 — weekly analytics is supposed to synthesise across
+        // sources, not paraphrase one). The new is_aggregator-aware collector
+        // path will follow GN wrappers automatically.
+        $sources = EPV2_Google_News::fetch( $topic, 'de', 'DE', self::SOURCE_TARGET );
         if ( empty( $sources ) ) {
             EPV2_Logger::warning( 'weekly_analysis', 'No supporting sources found for ' . $topic );
         }
 
-        $source_text = self::compile_sources( $sources );
+        // Pull our own past coverage on this cluster — these become the
+        // "Europulse berichtete zuvor" echo block in the analytical piece,
+        // turning isolated weekly news into a continuous narrative arc.
+        $internal_echo = self::collect_internal_coverage( $cluster );
+
+        $source_text = self::compile_sources( $sources, $internal_echo, $topic );
 
         if ( ! EPV2_Worker_Client::is_available() ) {
             EPV2_Logger::error( 'weekly_analysis', 'Worker unavailable, aborting' );
             return;
         }
 
-        // Build a synthetic queue item for the worker; use 'analysis' length profile
+        // Resolve the cluster's actual rubric so the prompt matrix
+        // (worker-v21/src/epv2_worker/prompts/rubrics.py) picks up the
+        // right stylistic module — politik and ukraine carry the
+        // editorial-position addendum, kultur/wirtschaft don't.
+        $rubric = self::resolve_cluster_rubric( $cluster );
+
+        // Build a synthetic queue item for the worker. story_format=analysis
+        // + length_profile=analysis both push the rewriter onto the longer
+        // analysis-tier prompt. category_proposed/final feed rubric_slug
+        // through pipeline.py so compose_rewrite_prompt() picks the right
+        // RUBRIC × TYPE combo.
         $fake_item = (object) [
             'id'               => 0,
             'original_url'     => '',
@@ -92,18 +112,105 @@ final class EPV2_Weekly_Analysis {
             'original_content' => $source_text,
             'original_date'    => current_time( 'mysql' ),
             'source_image_url' => '',
-            'category_proposed'=> 'Analyse',
+            'category_proposed'=> $rubric,
+            'category_final'   => $rubric,
             'source_language'  => 'de',
             'story_format'     => 'analysis',
-            'length_profile'   => 'analysis', // EPV2_Worker_Client::build_payload() respects this
+            'length_profile'   => 'analysis',
+            'topic_label'      => $topic,
+            'cluster_id'       => (int) ( $cluster->id ?? 0 ),
         ];
 
         try {
-            $result = EPV2_Worker_Client::process( $fake_item, 'full_bundle' );
+            // Pre-seed _meta.content_kind = analysis so the worker matrix
+            // composes the analysis type module immediately; otherwise
+            // detect_kind would have to infer from a synthetic story.
+            $existing = [
+                '_meta' => [
+                    'content_kind' => 'analysis',
+                    'weekly_analysis' => [
+                        'cluster_id' => (int) ( $cluster->id ?? 0 ),
+                        'topic_label' => $topic,
+                        'source_count' => count( $sources ),
+                        'internal_coverage' => count( $internal_echo ),
+                    ],
+                ],
+            ];
+            $result = EPV2_Worker_Client::process( $fake_item, 'full_bundle', $existing );
             self::publish_analysis( $topic, $result, $cluster );
         } catch ( Throwable $e ) {
             EPV2_Logger::error( 'weekly_analysis', 'Worker error: ' . $e->getMessage() );
         }
+    }
+
+    /**
+     * Pull EuroPulse's own past coverage of the same cluster — last
+     * ECHO_LOOKBACK_DAYS days, max 5 entries. Output rows go into the
+     * source_text under a "BISHERIGE EUROPULSE-BERICHTE" header that the
+     * rewriter is instructed to weave into a closing «Europulse berichtete
+     * zuvor» paragraph. This is the architectural «echo» block from
+     * section 2 step 5B of the audit.
+     */
+    private static function collect_internal_coverage( object $cluster ): array {
+        global $wpdb;
+        $cluster_id = (int) ( $cluster->id ?? 0 );
+        $cluster_key = (string) ( $cluster->cluster_key ?? '' );
+        if ( $cluster_id <= 0 && $cluster_key === '' ) {
+            return [];
+        }
+        $sql = "SELECT p.ID, p.post_title, p.post_excerpt, p.post_date_gmt,
+                       (SELECT meta_value FROM {$wpdb->postmeta} pm WHERE pm.post_id=p.ID AND pm.meta_key='_epv2_source_url' LIMIT 1) AS source_url
+                FROM {$wpdb->posts} p
+                WHERE p.post_type='post' AND p.post_status='publish'
+                  AND p.post_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY)
+                  AND (
+                    EXISTS (SELECT 1 FROM {$wpdb->postmeta} m1 WHERE m1.post_id=p.ID AND m1.meta_key='_epv2_cluster_id' AND m1.meta_value=%s)
+                    OR EXISTS (SELECT 1 FROM {$wpdb->postmeta} m2 WHERE m2.post_id=p.ID AND m2.meta_key='_epv2_cluster_key' AND m2.meta_value=%s)
+                  )
+                ORDER BY p.post_date_gmt DESC
+                LIMIT 5";
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            $sql,
+            self::ECHO_LOOKBACK_DAYS,
+            (string) $cluster_id,
+            $cluster_key
+        ) );
+        $out = [];
+        foreach ( (array) $rows as $row ) {
+            $out[] = [
+                'title'   => (string) ( $row->post_title ?? '' ),
+                'excerpt' => wp_trim_words( wp_strip_all_tags( (string) ( $row->post_excerpt ?? '' ) ), 40, '…' ),
+                'date'    => (string) ( $row->post_date_gmt ?? '' ),
+                'url'     => get_permalink( (int) $row->ID ) ?: '',
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Resolve the cluster's editorial rubric using ingested-content tag
+     * frequency. Falls back to politik when the cluster has no clear
+     * tag majority (politik is the safest analytical default).
+     */
+    private static function resolve_cluster_rubric( object $cluster ): string {
+        $candidate = strtolower( trim( (string) ( $cluster->primary_category ?? '' ) ) );
+        $allowed = [
+            'politik', 'ukraine', 'deutschland', 'wirtschaft', 'welt',
+            'leben-in-deutschland', 'sport', 'kultur', 'community', 'meinung',
+        ];
+        if ( in_array( $candidate, $allowed, true ) ) {
+            return $candidate;
+        }
+        // Heuristic from cluster topic_label / cluster_key tokens.
+        $signal = mb_strtolower( (string) ( $cluster->topic_label ?? $cluster->cluster_key ?? '' ) );
+        if ( $signal !== '' ) {
+            if ( preg_match( '/\b(ukrain|kyiv|kiew|selenskyj|krieg)/u', $signal ) ) return 'ukraine';
+            if ( preg_match( '/\b(bundestag|merz|scholz|wahl|koalition|partei)/u', $signal ) ) return 'politik';
+            if ( preg_match( '/\b(wirtschaft|inflation|euro|aktie|markt|export|tarif)/u', $signal ) ) return 'wirtschaft';
+            if ( preg_match( '/\b(kultur|literatur|theater|oper|festival|berlinale)/u', $signal ) ) return 'kultur';
+            if ( preg_match( '/\b(sport|fussball|champions|league|olymp|biathlon)/u', $signal ) ) return 'sport';
+        }
+        return 'politik';
     }
 
     // -------------------------------------------------------------------------
@@ -166,16 +273,49 @@ final class EPV2_Weekly_Analysis {
     // Source text compilation
     // -------------------------------------------------------------------------
 
-    private static function compile_sources( array $sources ): string {
-        $parts = [];
+    private static function compile_sources( array $sources, array $internal_echo = [], string $topic = '' ): string {
+        $blocks = [];
+
+        // Phase-3 weekly-analysis specific framing block — instructs the
+        // rewriter to use expert tone, span the week, weave predictions
+        // and reference past EuroPulse coverage. Augments the existing
+        // ANALYSIS type module from prompts/types.py with weekly-specific
+        // angles.
+        $blocks[] = sprintf(
+            "WÖCHENTLICHE TOP-THEMA-ANALYSE — Aufgabentyp: tiefgehende Wochenanalyse zu «%s».\n" .
+            "Strukturwünsche zusätzlich zur Standard-Analysis-Vorgabe:\n" .
+            "  • Lead: setzt das Thema der Woche in den Kontext (warum gerade diese Woche).\n" .
+            "  • Body: 4–7 Absätze, jeder mit Beleg aus mindestens einer der Quellen unten.\n" .
+            "  • Mindestens 2 Quellen pro Hauptthese namentlich nennen («wie Spiegel berichtet», «laut Reuters»).\n" .
+            "  • Ein Ausblicks-/Prognose-Absatz: was im Verlauf der nächsten Woche / Monate beobachtet werden sollte.\n" .
+            "  • Schluss-Absatz: «Europulse berichtete zuvor zu diesem Thema, dass …» — 1–2 Sätze, mit Querverweis auf unsere früheren Stücke (siehe BISHERIGE EUROPULSE-BERICHTE unten).\n" .
+            "  • Kein eigenes «Ich» — analytischer Ton, keine Meinungsspalte.\n" .
+            "  • Eindeutigkeit ≥ 80 %% gegenüber den Quelltexten (Anti-Plagiat-Gate kontrolliert).\n",
+            $topic !== '' ? $topic : 'das Wochenthema'
+        );
+
+        $blocks[] = "QUELLEN DIESER WOCHE (Aussen):";
         foreach ( $sources as $i => $src ) {
             $n       = $i + 1;
             $title   = (string) ( $src['title']   ?? '' );
             $excerpt = (string) ( $src['excerpt']  ?? '' );
             $url     = (string) ( $src['url']      ?? '' );
-            $parts[] = "### Quelle {$n}: {$title}\nURL: {$url}\n{$excerpt}";
+            $blocks[] = "### Quelle {$n}: {$title}\nURL: {$url}\n{$excerpt}";
         }
-        return implode( "\n\n", $parts );
+
+        if ( $internal_echo !== [] ) {
+            $blocks[] = "BISHERIGE EUROPULSE-BERICHTE ZU DIESEM CLUSTER (für den Schluss-Echo-Absatz):";
+            foreach ( $internal_echo as $i => $row ) {
+                $n     = $i + 1;
+                $title = (string) ( $row['title']   ?? '' );
+                $excerpt = (string) ( $row['excerpt'] ?? '' );
+                $date  = (string) ( $row['date']    ?? '' );
+                $url   = (string) ( $row['url']     ?? '' );
+                $blocks[] = "### Eigener Bericht {$n} ({$date}): {$title}\nURL: {$url}\n{$excerpt}";
+            }
+        }
+
+        return implode( "\n\n", $blocks );
     }
 
     // -------------------------------------------------------------------------

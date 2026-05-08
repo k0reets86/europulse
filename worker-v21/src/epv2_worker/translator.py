@@ -396,10 +396,13 @@ def _ukrainian_style_warnings(title: str, lead: str, body: str) -> list[str]:
     first_paragraph = next((p.strip() for p in re.split(r"\n{2,}", body) if p.strip()), body.strip())
     first_n = _norm_words(first_paragraph)
 
-    if _same_opening(lead_n, first_n, 5):
-        warnings.append("lead and first paragraph start too similarly")
-    if _same_opening(title_n, lead_n, 5):
-        warnings.append("title and lead start too similarly")
+    # NOTE: title/lead and lead/first-paragraph similarity warnings
+    # removed from the gate. They diagnose upstream German-master style,
+    # not translation quality — if the German title and lead start with
+    # the same 5 words, the translator can't fix that without changing
+    # facts. Same opening is also natural in inverted-pyramid news for
+    # subjects like "Bundeskanzler Merz". Real translation problems
+    # (banned bureaucratic phrases, Cyrillic in EN, etc.) stay below.
     # NOTE: removed "lead and first paragraph both start with source
     # attribution" warning. Architecture-audit base_voice rule #2 mandates
     # source attribution in the lead; rule #10 mandates naming each

@@ -2157,31 +2157,64 @@ final class EPV2_Admin {
 		$ids_csv = sanitize_text_field((string) ($_POST['ids_csv'] ?? ''));
 		$ids = array_filter(array_map('intval', explode(',', $ids_csv)));
 		$reprocessed = 0;
+		global $wpdb;
+		$runs_table = $wpdb->prefix . 'epv2_runs';
 		foreach ($ids as $id) {
 			$row = EPV2_Queue::get_item($id);
 			if (! $row || (string) ($row->state ?? '') !== 'manual_review') {
 				continue;
 			}
+
+			// 1. Drop cached story_card / content_kind so the next run
+			// rebuilds them against current prompts + editorial calibration.
 			$payload = json_decode((string) ($row->ai_payload ?? ''), true) ?: [];
 			if (is_array($payload)) {
-				// Drop the cached content_kind / story_card so the next
-				// run computes them fresh against the latest prompts.
-				if (isset($payload['_meta']['content_kind'])) {
-					unset($payload['_meta']['content_kind']);
-				}
-				if (isset($payload['_meta']['story_card'])) {
-					unset($payload['_meta']['story_card']);
-				}
+				unset($payload['_meta']['content_kind']);
+				unset($payload['_meta']['story_card']);
 				EPV2_Queue::update_fields($id, [
 					'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 				]);
 			}
+
+			// 2. Reset workflow counters in admin_notes._system. Without
+			// this the maintenance loop reads the legacy attempt count
+			// (workflow_step_attempts: 6) and re-quarantines on the
+			// next 5-min tick before the worker has a chance to produce
+			// fresh output. Strip every counter / status / blocker key.
+			$notes = json_decode((string) ($row->admin_notes ?? ''), true) ?: [];
+			$sys = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			foreach ([
+				'workflow_step', 'workflow_step_attempts', 'workflow_step_status',
+				'workflow_terminal_reason', 'quarantine_reason', 'last_stage_blocker',
+				'retries', 'importance_score', 'importance_threshold', 'next_operator_action',
+			] as $key) {
+				unset($sys[$key]);
+			}
+			$notes['_system'] = $sys;
+			EPV2_Queue::update_fields($id, [
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+			]);
+
+			// 3. Clear the item's process-run history.
+			// recent_process_attempt_count() counts records in
+			// ep_epv2_runs over a 2-hour window; legacy entries from
+			// the failed cycle would otherwise be added to fresh attempts
+			// and trip the per-step limit again.
+			$wpdb->query($wpdb->prepare(
+				"DELETE FROM `{$runs_table}`
+				 WHERE job_name = 'process'
+				   AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.last_item_id')) AS UNSIGNED) = %d",
+				$id
+			));
+
+			// 4. Flip back to `new` so the orchestrator picks the item
+			// up on the next process tick.
 			EPV2_Queue::mark_state($id, 'new', [
 				'error_message' => 'Reprocess from manual_review by operator on ' . current_time('mysql'),
 			]);
 			$reprocessed++;
 		}
-		set_transient('epv2_admin_notice', sprintf('Отправлено на повторную обработку: %d из %d', $reprocessed, count($ids)), 30);
+		set_transient('epv2_admin_notice', sprintf('Отправлено на повторную обработку: %d из %d (полный сброс счётчиков и run-history)', $reprocessed, count($ids)), 30);
 		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
 		exit;
 	}

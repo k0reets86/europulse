@@ -3994,7 +3994,18 @@ final class EPV2_Queue {
 			return 0;
 		}
 		$table = $wpdb->prefix . 'epv2_runs';
-		$since = gmdate('Y-m-d H:i:s', time() - max(HOUR_IN_SECONDS, $window_seconds));
+		// Architecture audit phase 2.4 mandates "2 attempts per failed
+		// step then manual_review". The default 24-hour window meant an
+		// item that failed twice in the morning and twice in the
+		// afternoon got quarantined immediately on the next run, even
+		// though the morning failures were stale. 2-hour window keeps
+		// the per-step semantics tight: 2 attempts within 2 hours →
+		// quarantine. Anything older than that does not count.
+		$default_window = 2 * HOUR_IN_SECONDS;
+		$effective_window = $window_seconds === DAY_IN_SECONDS
+			? $default_window
+			: max(HOUR_IN_SECONDS, $window_seconds);
+		$since = gmdate('Y-m-d H:i:s', time() - $effective_window);
 		return (int) $wpdb->get_var($wpdb->prepare(
 			"SELECT COUNT(*)
 			FROM {$table}

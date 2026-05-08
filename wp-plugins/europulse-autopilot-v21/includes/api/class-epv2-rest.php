@@ -330,6 +330,14 @@ final class EPV2_REST {
 		$cleanup['rejected_low_grade_ready_publish_rows'] = EPV2_Queue::sanitize_low_grade_ready_publish_items(50);
 		$cleanup['workflow_quarantine'] = EPV2_Queue::quarantine_pathological_workflow_loops(100);
 		$cleanup['promoted_ready_like_rows'] = EPV2_Queue::promote_ready_like_rows(50);
+		// Phase 3 watchdogs (architecture audit section 3): three background
+		// safety nets — stuck-item release, Polylang link repair, dedup of
+		// published posts. All idempotent, all return small status arrays.
+		if (class_exists('EPV2_Watchdog')) {
+			$cleanup['watchdog_stuck_active'] = EPV2_Watchdog::release_stuck_active_item(15);
+			$cleanup['watchdog_polylang']     = EPV2_Watchdog::repair_polylang_links(30);
+			$cleanup['watchdog_dedupe']       = EPV2_Watchdog::dedupe_published_posts(20);
+		}
 		return rest_ensure_response([
 			'ok' => true,
 			'action' => 'maintenance',

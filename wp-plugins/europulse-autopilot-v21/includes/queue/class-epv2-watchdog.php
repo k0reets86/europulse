@@ -1,0 +1,215 @@
+<?php
+/**
+ * EuroPulse AutoPilot v2.1 — Watchdog routines.
+ *
+ * Three background safety nets, all run from the maintenance bridge
+ * (`EPV2_Rest::bridge_maintenance`) every ~5 minutes by the
+ * orchestrator:
+ *
+ *   1. release_stuck_active_item()  — frees the active-automation slot
+ *      when an item has been "in work" longer than its expected ceiling.
+ *      Without this the orchestrator can deadlock on a single item.
+ *   2. repair_polylang_links()      — fixes published bundles whose three
+ *      language posts lost their Polylang association (e.g. after a
+ *      crash mid-publish). Without re-linking, the language switcher on
+ *      the frontend lands on 404, and the canonical/hreflang pair break
+ *      (SEO downgrade).
+ *   3. dedupe_published_posts()     — finds pairs of published posts
+ *      with the same cluster_id (or same normalized title) within the
+ *      last 7 days and trashes the younger one. Belt-and-braces over
+ *      the at-ingest dedup gate.
+ *
+ * Each method returns a small status array suitable for inclusion in
+ * the maintenance JSON response so the operator can audit.
+ */
+
+if (! defined('ABSPATH')) {
+	exit;
+}
+
+final class EPV2_Watchdog {
+
+	/**
+	 * Free the active automation slot when the current item has been
+	 * sitting there longer than the worker would normally take.
+	 *
+	 * @param int $stale_minutes default 15. After this many minutes
+	 *                           with no progress the slot is released.
+	 */
+	public static function release_stuck_active_item(int $stale_minutes = 15): array {
+		$result = ['released' => 0, 'item_id' => 0, 'stale_minutes' => $stale_minutes];
+		$active_id = (int) get_option('epv2_active_automation_item', 0);
+		if ($active_id <= 0) {
+			return $result;
+		}
+		global $wpdb;
+		$row = $wpdb->get_row($wpdb->prepare(
+			"SELECT id, state, updated_at FROM {$wpdb->prefix}epv2_queue WHERE id = %d",
+			$active_id
+		));
+		if (! $row) {
+			// Pointer dangles — clear it.
+			delete_option('epv2_active_automation_item');
+			$result['released'] = 1;
+			$result['item_id'] = $active_id;
+			$result['reason'] = 'dangling_pointer';
+			return $result;
+		}
+		$updated_ts = strtotime((string) ($row->updated_at ?? '')) ?: 0;
+		$stale_at = time() - ($stale_minutes * MINUTE_IN_SECONDS);
+		if ($updated_ts > $stale_at) {
+			return $result;
+		}
+		$current_state = (string) ($row->state ?? '');
+		// Already in a terminal state? just release the slot.
+		if (in_array($current_state, ['published', 'rejected', 'manual_review', 'duplicate'], true)) {
+			delete_option('epv2_active_automation_item');
+			$result['released'] = 1;
+			$result['item_id'] = $active_id;
+			$result['reason'] = 'active_pointed_to_terminal';
+			return $result;
+		}
+		// Push the item back to `new` so it gets a fresh attempt on the
+		// next orchestrator tick. The per-step retry budget (phase 2.4)
+		// will route to manual_review if it fails again.
+		EPV2_Queue::mark_state($active_id, 'new', [
+			'error_message' => sprintf(
+				'Watchdog: освобождён active_automation_item — застрял в "%s" более %d минут.',
+				$current_state,
+				$stale_minutes
+			),
+		]);
+		delete_option('epv2_active_automation_item');
+		$result['released'] = 1;
+		$result['item_id'] = $active_id;
+		$result['reason'] = 'stuck_in_' . $current_state;
+		return $result;
+	}
+
+	/**
+	 * Find published bundles where the Polylang translation chain is broken
+	 * and re-attach all three language posts.
+	 *
+	 * @param int $limit Process at most this many bundles per run.
+	 */
+	public static function repair_polylang_links(int $limit = 30): array {
+		$result = ['checked' => 0, 'repaired' => 0, 'pairs' => []];
+		if (! function_exists('pll_get_post_translations') || ! function_exists('pll_save_post_translations')) {
+			$result['polylang_unavailable'] = true;
+			return $result;
+		}
+		global $wpdb;
+		// Recently published items where queue carries _epv2_queue_id linking
+		// the three language posts. We pick distinct queue_ids that have ≥2
+		// language posts on file but Polylang doesn't agree.
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT pm.meta_value AS queue_id, GROUP_CONCAT(pm.post_id) AS post_ids
+			 FROM {$wpdb->postmeta} pm
+			 JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+			 WHERE pm.meta_key = '_epv2_queue_id'
+			   AND p.post_type = 'post'
+			   AND p.post_status = 'publish'
+			   AND p.post_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
+			 GROUP BY pm.meta_value
+			 HAVING COUNT(*) >= 2
+			 ORDER BY MAX(p.post_date_gmt) DESC
+			 LIMIT %d",
+			$limit
+		));
+		foreach ($rows as $row) {
+			$result['checked']++;
+			$post_ids = array_filter(array_map('intval', explode(',', (string) $row->post_ids)));
+			if (count($post_ids) < 2) {
+				continue;
+			}
+			$by_lang = [];
+			foreach ($post_ids as $post_id) {
+				$lang = function_exists('pll_get_post_language') ? pll_get_post_language($post_id) : '';
+				if ($lang) {
+					$by_lang[$lang] = $post_id;
+				}
+			}
+			if (count($by_lang) < 2) {
+				continue;
+			}
+			// Check if the existing translation map already covers all of them.
+			$first_post = (int) array_values($by_lang)[0];
+			$linked = pll_get_post_translations($first_post);
+			$linked = is_array($linked) ? $linked : [];
+			ksort($by_lang);
+			ksort($linked);
+			if ($by_lang === array_filter($linked) && count($linked) >= count($by_lang)) {
+				continue;
+			}
+			pll_save_post_translations($by_lang);
+			$result['repaired']++;
+			$result['pairs'][] = [
+				'queue_id' => (int) $row->queue_id,
+				'before' => $linked,
+				'after' => $by_lang,
+			];
+		}
+		return $result;
+	}
+
+	/**
+	 * Trash the younger of any pair of published posts that share the same
+	 * cluster_id within a recent window. Belt-and-braces over the at-ingest
+	 * deduplicator — protects against rare race-condition double publishes
+	 * (e.g. two orchestrator workers each picking the same retry tick).
+	 *
+	 * @param int $limit Process at most this many duplicate pairs per run.
+	 */
+	public static function dedupe_published_posts(int $limit = 50): array {
+		$result = ['checked_pairs' => 0, 'deleted' => 0, 'kept_pairs' => []];
+		global $wpdb;
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT pm.meta_value AS cluster_id,
+			        GROUP_CONCAT(pm.post_id ORDER BY p.post_date_gmt ASC) AS post_ids,
+			        GROUP_CONCAT(p.post_date_gmt ORDER BY p.post_date_gmt ASC) AS dates,
+			        GROUP_CONCAT(pl.meta_value ORDER BY p.post_date_gmt ASC SEPARATOR '|||') AS languages
+			 FROM {$wpdb->postmeta} pm
+			 JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+			 LEFT JOIN {$wpdb->postmeta} pl ON pl.post_id = pm.post_id AND pl.meta_key = '_polylang_language'
+			 WHERE pm.meta_key = '_epv2_cluster_id'
+			   AND pm.meta_value <> '0'
+			   AND pm.meta_value <> ''
+			   AND p.post_type = 'post'
+			   AND p.post_status = 'publish'
+			   AND p.post_date_gmt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY)
+			 GROUP BY pm.meta_value
+			 HAVING COUNT(*) > 3
+			 ORDER BY MAX(p.post_date_gmt) DESC
+			 LIMIT %d",
+			$limit
+		));
+		foreach ($rows as $row) {
+			$result['checked_pairs']++;
+			$post_ids = array_filter(array_map('intval', explode(',', (string) $row->post_ids)));
+			// Group by language; keep the OLDEST post per language, trash newer ones.
+			$by_lang_ordered = [];
+			foreach ($post_ids as $post_id) {
+				$lang = function_exists('pll_get_post_language') ? pll_get_post_language($post_id) : 'de';
+				if (! isset($by_lang_ordered[$lang])) {
+					$by_lang_ordered[$lang] = [];
+				}
+				$by_lang_ordered[$lang][] = $post_id;
+			}
+			$kept = [];
+			foreach ($by_lang_ordered as $lang => $ids) {
+				$kept[$lang] = (int) $ids[0];
+				if (count($ids) > 1) {
+					foreach (array_slice($ids, 1) as $younger) {
+						wp_trash_post((int) $younger);
+						$result['deleted']++;
+					}
+				}
+			}
+			$result['kept_pairs'][] = [
+				'cluster_id' => (string) $row->cluster_id,
+				'kept' => $kept,
+			];
+		}
+		return $result;
+	}
+}

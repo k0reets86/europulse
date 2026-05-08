@@ -50,6 +50,7 @@ final class EPV2_Installer {
 			fetch_interval INT NOT NULL DEFAULT 1800,
 			is_active TINYINT(1) NOT NULL DEFAULT 1,
 			risk_level VARCHAR(16) NOT NULL DEFAULT 'low',
+			is_top_tier TINYINT(1) NOT NULL DEFAULT 0,
 			parse_rules LONGTEXT NULL,
 			attribution_rule LONGTEXT NULL,
 			robots_status VARCHAR(32) NULL,
@@ -61,7 +62,8 @@ final class EPV2_Installer {
 			PRIMARY KEY (id),
 			KEY type (type),
 			KEY is_active (is_active),
-			KEY language (language)
+			KEY language (language),
+			KEY is_top_tier (is_top_tier)
 		) {$charset};";
 
 			$tables[] = "CREATE TABLE {$prefix}epv2_queue (

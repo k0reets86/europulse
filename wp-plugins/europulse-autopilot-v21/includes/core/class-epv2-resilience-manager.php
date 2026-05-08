@@ -215,12 +215,64 @@ final class EPV2_Resilience_Manager {
 		if ($failures >= $threshold) {
 			$cooldownUntil = time() + (max(10, (int) EPV2_Settings::get('source_cooldown_minutes', 60)) * MINUTE_IN_SECONDS);
 		}
-		$health[$source_id] = [
+		$health[$source_id] = array_merge($current, [
 			'consecutive_failures' => $failures,
 			'cooldown_until' => $cooldownUntil,
 			'last_error' => self::humanize_error($message),
 			'last_failure_at' => time(),
-		];
+		]);
+		update_option(self::OPTION_SOURCE_HEALTH, $health, false);
+	}
+
+	/**
+	 * Phase 3 — automatic editorial-quality cooldown.
+	 *
+	 * Counts consecutive editorial rejects (reject_low_value, manual_review)
+	 * for a source. After `source_quality_reject_threshold` (default 5) the
+	 * source goes on cooldown for `source_cooldown_minutes` × 2 (because the
+	 * problem is editorial fit, not transient infra — needs longer settle).
+	 * The counter resets to zero when the source produces an item that
+	 * Story Card classifies as editorial_match=match.
+	 */
+	public static function register_source_quality_reject(int $source_id, string $reason): void {
+		if ($source_id <= 0) {
+			return;
+		}
+		$health = get_option(self::OPTION_SOURCE_HEALTH, []);
+		$current = is_array($health[$source_id] ?? null) ? $health[$source_id] : [];
+		$rejects = (int) ($current['consecutive_quality_rejects'] ?? 0) + 1;
+		$cooldownUntil = (int) ($current['cooldown_until'] ?? 0);
+		$threshold = max(3, (int) EPV2_Settings::get('source_quality_reject_threshold', 5));
+		if ($rejects >= $threshold) {
+			$cooldownUntil = time() + (max(60, (int) EPV2_Settings::get('source_cooldown_minutes', 60)) * 2 * MINUTE_IN_SECONDS);
+		}
+		$health[$source_id] = array_merge($current, [
+			'consecutive_quality_rejects' => $rejects,
+			'cooldown_until' => $cooldownUntil,
+			'last_quality_reject_reason' => mb_substr((string) $reason, 0, 120),
+			'last_quality_reject_at' => time(),
+		]);
+		update_option(self::OPTION_SOURCE_HEALTH, $health, false);
+	}
+
+	/**
+	 * Reset the editorial-quality reject counter on the next match.
+	 * Does not touch the technical-failure counter — those are independent
+	 * health signals (infra vs editorial fit).
+	 */
+	public static function register_source_quality_success(int $source_id): void {
+		if ($source_id <= 0) {
+			return;
+		}
+		$health = get_option(self::OPTION_SOURCE_HEALTH, []);
+		$current = is_array($health[$source_id] ?? null) ? $health[$source_id] : [];
+		if ((int) ($current['consecutive_quality_rejects'] ?? 0) === 0) {
+			return;
+		}
+		$health[$source_id] = array_merge($current, [
+			'consecutive_quality_rejects' => 0,
+			'last_quality_match_at' => time(),
+		]);
 		update_option(self::OPTION_SOURCE_HEALTH, $health, false);
 	}
 

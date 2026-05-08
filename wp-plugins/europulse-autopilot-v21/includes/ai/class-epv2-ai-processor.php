@@ -146,12 +146,19 @@ final class EPV2_AI_Processor {
 							// marked rejected immediately — no further AI tokens.
 							$editorial_match = strtolower((string) ($story_card['editorial_match'] ?? 'match'));
 							$editorial_reason = (string) ($story_card['editorial_reason'] ?? '');
+							$source_id_for_health = (int) ($source_item->source_id ?? 0);
 							if ($editorial_match === 'reject_low_value') {
 								$reason_slug = sanitize_key((string) ($story_card['category']['primary'] ?? 'unknown'));
 								$reason_msg = trim('Editorial calibration reject: ' . ($editorial_reason !== '' ? $editorial_reason : 'matches per-rubric stop-list')) . ' [' . $reason_slug . ']';
 								EPV2_Queue::mark_state((int) $item->id, 'rejected', [
 									'error_message' => $reason_msg,
 								]);
+								if ($source_id_for_health > 0 && class_exists('EPV2_Resilience_Manager')) {
+									EPV2_Resilience_Manager::register_source_quality_reject(
+										$source_id_for_health,
+										$reason_slug . ': ' . $editorial_reason
+									);
+								}
 								self::log_process_item_step('editorial_calibration_reject', (int) $item->id, [
 									'category' => $reason_slug,
 									'editorial_reason' => $editorial_reason,
@@ -161,6 +168,12 @@ final class EPV2_AI_Processor {
 								$run_payload['processed_item_id'] = (int) $item->id;
 								$run_payload['result'] = 'rejected_editorial_calibration';
 								break;
+							}
+							// editorial_match='match' resets the quality-reject
+							// counter so a healthy source recovers from
+							// occasional bad items.
+							if ($editorial_match === 'match' && $source_id_for_health > 0 && class_exists('EPV2_Resilience_Manager')) {
+								EPV2_Resilience_Manager::register_source_quality_success($source_id_for_health);
 							}
 						} else {
 							self::log_process_item_step('story_card_build_failed', (int) $item->id, [

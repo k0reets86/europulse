@@ -60,6 +60,7 @@ final class EPV2_Collector {
 			try {
 				$progress['current_source'] = (string) $source->name;
 				$items = self::collect_source($source);
+				$items = self::trim_to_recent_per_source($items, $source);
 				foreach ($items as $item) {
 					self::stage_candidate($item, $source, $staged_candidates);
 				}
@@ -620,5 +621,72 @@ final class EPV2_Collector {
 
 	private static function effective_queue_new_max_per_category(): int {
 		return max(1, (int) EPV2_Settings::get('queue_new_max_per_category', 2));
+	}
+
+	/**
+	 * Phase 3.B prep — selective ingest.
+	 *
+	 * Cap how many items we ingest per source per cycle:
+	 *   - drop items older than 2 × fetch_interval (default cutoff = 60 min);
+	 *   - sort remainder by date DESC (newest first); items without parsable
+	 *     date stay in their relative order at the tail;
+	 *   - keep only the top N where N depends on source priority:
+	 *       priority ≥ 9   → 5 items (top-tier outlets)
+	 *       priority 7–8   → 3 items
+	 *       priority ≤ 6   → 2 items
+	 *
+	 * Reduces typical incoming volume from ~300/cycle to ~50/cycle so the
+	 * downstream selection pyramid (Story Card → importance score → gate)
+	 * does not burn AI tokens on items that would never publish anyway.
+	 */
+	private static function trim_to_recent_per_source(array $items, object $source): array {
+		if ($items === []) {
+			return $items;
+		}
+		$priority = (int) ($source->priority ?? 5);
+		if ($priority >= 9) {
+			$cap = 5;
+		} elseif ($priority >= 7) {
+			$cap = 3;
+		} else {
+			$cap = 2;
+		}
+
+		$fetch_interval_seconds = max(900, (int) ($source->fetch_interval ?? 1800));
+		$cutoff_ts = time() - ($fetch_interval_seconds * 2);
+
+		$indexed = [];
+		foreach ($items as $idx => $item) {
+			$date_str = (string) ($item['date'] ?? '');
+			$ts = $date_str !== '' ? strtotime($date_str) : false;
+			$indexed[] = [
+				'item' => $item,
+				'ts' => $ts === false ? 0 : (int) $ts,
+				'idx' => $idx,
+			];
+		}
+
+		// Drop items strictly older than cutoff. Items without a parsable
+		// date keep ts=0 and are NOT dropped here — they still get a chance
+		// (Google News stubs sometimes lack date in the entry).
+		$indexed = array_values(array_filter(
+			$indexed,
+			static function (array $row) use ($cutoff_ts): bool {
+				return $row['ts'] === 0 || $row['ts'] >= $cutoff_ts;
+			}
+		));
+
+		usort($indexed, static function (array $a, array $b): int {
+			if ($a['ts'] === $b['ts']) {
+				return $a['idx'] <=> $b['idx'];
+			}
+			// Newest (highest ts) first; ts=0 sinks to the bottom.
+			if ($a['ts'] === 0) return 1;
+			if ($b['ts'] === 0) return -1;
+			return $b['ts'] <=> $a['ts'];
+		});
+
+		$indexed = array_slice($indexed, 0, $cap);
+		return array_map(static fn (array $row) => $row['item'], $indexed);
 	}
 }

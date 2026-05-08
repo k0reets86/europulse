@@ -34,6 +34,7 @@ final class EPV2_Admin {
 		add_action('admin_post_epv2_clear_queue', [self::class, 'clear_queue']);
 		add_action('admin_post_epv2_promote_manual_review', [self::class, 'promote_manual_review']);
 		add_action('admin_post_epv2_reject_manual_review', [self::class, 'reject_manual_review']);
+		add_action('admin_post_epv2_reprocess_manual_review', [self::class, 'reprocess_manual_review']);
 		add_action('admin_post_epv2_clear_rejected_queue', [self::class, 'clear_rejected_queue']);
 		add_action('admin_post_epv2_delete_queue_item', [self::class, 'delete_queue_item']);
 		add_action('admin_post_epv2_delete_published_post', [self::class, 'delete_published_post']);
@@ -353,13 +354,19 @@ final class EPV2_Admin {
 		echo '</form>';
 
 		// Phase 3 — manual_review bulk actions visible only when filtering
-		// that state. Two buttons share the same JS pattern as bulk-delete.
+		// that state. Three buttons share the same JS pattern as bulk-delete.
 		if ($state_filter === 'manual_review') {
 			echo '<form id="epv2-promote-mr-form" method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="display:inline-block;margin-right:8px">';
 			wp_nonce_field('epv2_promote_manual_review');
 			echo '<input type="hidden" name="action" value="epv2_promote_manual_review">';
 			echo '<input type="hidden" name="ids_csv" id="epv2-promote-mr-ids" value="">';
 			echo '<button class="button button-primary" type="submit" onclick="var ids=[...document.querySelectorAll(\'.epv2-queue-check:checked\')].map(function(cb){return cb.value;}); if(!ids.length){alert(\'Выберите материалы для публикации\'); return false;} document.getElementById(\'epv2-promote-mr-ids\').value=ids.join(\',\'); return confirm(\'Отправить в публикацию: \'+ids.length+\' материал(ов)?\');">→ В публикацию</button>';
+			echo '</form>';
+			echo '<form id="epv2-reprocess-mr-form" method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="display:inline-block;margin-right:8px">';
+			wp_nonce_field('epv2_reprocess_manual_review');
+			echo '<input type="hidden" name="action" value="epv2_reprocess_manual_review">';
+			echo '<input type="hidden" name="ids_csv" id="epv2-reprocess-mr-ids" value="">';
+			echo '<button class="button" type="submit" onclick="var ids=[...document.querySelectorAll(\'.epv2-queue-check:checked\')].map(function(cb){return cb.value;}); if(!ids.length){alert(\'Выберите материалы для повторной обработки\'); return false;} document.getElementById(\'epv2-reprocess-mr-ids\').value=ids.join(\',\'); return confirm(\'Перегенерить заново: \'+ids.length+\' материал(ов)? Сбросит story_card и пропустит через полный пайплайн.\');">↻ Перегенерить</button>';
 			echo '</form>';
 			echo '<form id="epv2-reject-mr-form" method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="display:inline-block;margin-right:8px">';
 			wp_nonce_field('epv2_reject_manual_review');
@@ -2079,6 +2086,48 @@ final class EPV2_Admin {
 			$promoted++;
 		}
 		set_transient('epv2_admin_notice', sprintf('Промоушен в готово к публикации: %d из %d', $promoted, count($ids)), 30);
+		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
+		exit;
+	}
+
+	/**
+	 * Phase 3 — manual_review action: re-process selected items.
+	 * Resets state to `new` and clears the content_kind cache so the
+	 * full_bundle pipeline runs fresh on the next orchestrator tick.
+	 * Useful when the operator wants the AI to take another swing at
+	 * an item that the per-step retry budget gave up on.
+	 */
+	public static function reprocess_manual_review(): void {
+		check_admin_referer('epv2_reprocess_manual_review');
+		self::require_manage_capability();
+		$ids_csv = sanitize_text_field((string) ($_POST['ids_csv'] ?? ''));
+		$ids = array_filter(array_map('intval', explode(',', $ids_csv)));
+		$reprocessed = 0;
+		foreach ($ids as $id) {
+			$row = EPV2_Queue::get_item($id);
+			if (! $row || (string) ($row->state ?? '') !== 'manual_review') {
+				continue;
+			}
+			$payload = json_decode((string) ($row->ai_payload ?? ''), true) ?: [];
+			if (is_array($payload)) {
+				// Drop the cached content_kind / story_card so the next
+				// run computes them fresh against the latest prompts.
+				if (isset($payload['_meta']['content_kind'])) {
+					unset($payload['_meta']['content_kind']);
+				}
+				if (isset($payload['_meta']['story_card'])) {
+					unset($payload['_meta']['story_card']);
+				}
+				EPV2_Queue::update_fields($id, [
+					'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+				]);
+			}
+			EPV2_Queue::mark_state($id, 'new', [
+				'error_message' => 'Reprocess from manual_review by operator on ' . current_time('mysql'),
+			]);
+			$reprocessed++;
+		}
+		set_transient('epv2_admin_notice', sprintf('Отправлено на повторную обработку: %d из %d', $reprocessed, count($ids)), 30);
 		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
 		exit;
 	}

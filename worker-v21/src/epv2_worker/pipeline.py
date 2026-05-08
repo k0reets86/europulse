@@ -322,6 +322,15 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         return
     _record_ai_runtime(ctx, "rewrite_de", rewrite.provider, rewrite.model)
 
+    # Anti-plagiarism gate (architecture phase 3) — surface the score.
+    # Failure does not block the pipeline yet; the WP-side gate uses the
+    # warning to decide on regeneration within its 2-attempts budget.
+    if not rewrite.uniqueness_passed:
+        ctx.warnings.append(
+            f"plagiarism_gate_de: uniqueness {rewrite.uniqueness_pct:.1f}% < 80%"
+            + (f" ({rewrite.uniqueness_reason})" if rewrite.uniqueness_reason else "")
+        )
+
     ctx.german_master = LanguagePackage(
         lang="de",
         title=rewrite.title_de,
@@ -367,10 +376,18 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         ctx.blockers.append(f"UK translation failed: {uk_result.error}")
     else:
         _record_ai_runtime(ctx, "translate_uk", uk_result.provider, uk_result.model)
+        if not uk_result.uniqueness_passed:
+            ctx.warnings.append(
+                f"plagiarism_gate_uk: uniqueness {uk_result.uniqueness_pct:.1f}% < 80%"
+            )
     if not en_result.success:
         ctx.blockers.append(f"EN translation failed: {en_result.error}")
     else:
         _record_ai_runtime(ctx, "translate_en", en_result.provider, en_result.model)
+        if not en_result.uniqueness_passed:
+            ctx.warnings.append(
+                f"plagiarism_gate_en: uniqueness {en_result.uniqueness_pct:.1f}% < 80%"
+            )
     for lang, package in {"de": ctx.german_master, "uk": ctx.ukrainian, "en": ctx.english}.items():
         if not _language_package_complete(package):
             ctx.blockers.append(f"{lang.upper()} language package incomplete")

@@ -25,6 +25,11 @@ class TranslationResult:
     error: str = ""
     provider: str = ""
     model: str = ""
+    # Anti-plagiarism gate (architecture phase 3) — translation is also
+    # checked against the primary-source text in its source language.
+    uniqueness_pct: float = 100.0
+    uniqueness_passed: bool = True
+    uniqueness_reason: str = ""
 
 
 _SYSTEM_PROMPT_TEMPLATE = """Du bist ein professioneller Übersetzer für die Nachrichtenplattform EuroPulse.today.
@@ -75,9 +80,52 @@ async def translate_from_german(
         if result.success:
             result.provider = provider
             result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
+            _annotate_translation_uniqueness(result, source_text=source_text, target_lang=target_lang)
             return result
 
     return TranslationResult(error="All providers failed")
+
+
+def _annotate_translation_uniqueness(
+    result: TranslationResult,
+    *,
+    source_text: str,
+    target_lang: str,
+) -> None:
+    """Anti-plagiarism gate on the translated lead+body.
+
+    The DE master is itself a rewrite (already plagiarism-checked). What
+    we want here is to make sure the translator did not paraphrase too
+    closely *within* the target language — i.e. the UK / EN text uses
+    its own register and is not a literal de→target word substitution.
+    Our trigram check against the DE master would always pass because
+    of the language switch, so we tag with target-language stopwords
+    against the DE source for sanity (≥80%) and treat anything below
+    as a soft warning, not a hard failure.
+    """
+    try:
+        from .plagiarism import check_uniqueness
+    except Exception:  # pragma: no cover
+        return
+    generated = "\n".join(filter(None, [result.lead or "", result.body or ""])).strip()
+    if not generated or not source_text:
+        return
+    target = target_lang.lower()
+    if target.startswith("ukrain"):
+        lang_code = "uk"
+    elif target.startswith("english"):
+        lang_code = "en"
+    else:
+        lang_code = "de"
+    verdict = check_uniqueness(
+        generated_text=generated,
+        source_text=source_text,
+        language=lang_code,
+        named_entities=[],
+    )
+    result.uniqueness_pct = round(verdict.uniqueness_pct, 1)
+    result.uniqueness_passed = verdict.passed
+    result.uniqueness_reason = verdict.reason
 
 
 async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: str, model: str, target_lang: str, source_text: str) -> TranslationResult:

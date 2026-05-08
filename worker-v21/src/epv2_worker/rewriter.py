@@ -86,6 +86,12 @@ class RewriteResult:
     error: str = ""
     provider: str = ""
     model: str = ""
+    # Anti-plagiarism gate (architecture phase 3). Surface the score so
+    # callers can log it / decide on regeneration. Default leaves the
+    # gate inactive when not computed.
+    uniqueness_pct: float = 100.0
+    uniqueness_passed: bool = True
+    uniqueness_reason: str = ""
 
 
 _SYSTEM_PROMPT = """Du bist ein professioneller deutschsprachiger Nachrichtenredakteur für EuroPulse.today —
@@ -347,11 +353,54 @@ Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "body":
         if result.success:
             result.provider = provider
             result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
+            _annotate_uniqueness(result, source_text=source_text, story_card=story_card, language="de")
             return result
         provider_errors.append(f"{provider}/{model or 'default'}: {result.error}")
         logger.warning("Rewrite via %s failed: %s", provider, result.error)
 
     return RewriteResult(error="All AI providers failed: " + "; ".join(provider_errors))
+
+
+def _annotate_uniqueness(
+    result: RewriteResult,
+    *,
+    source_text: str,
+    story_card: dict | None,
+    language: str,
+) -> None:
+    """Run the anti-plagiarism gate on the just-rewritten DE bundle.
+
+    Architecture phase 3: ≥80% uniqueness against the primary source.
+    We score lead+body together (the title is too short to score reliably)
+    and tag the result so the pipeline can log + decide on regeneration.
+    """
+    try:
+        from .plagiarism import check_uniqueness
+    except Exception:  # pragma: no cover — import-time safety net
+        return
+    generated = "\n".join(filter(None, [result.lead_de or "", result.body_de or ""])).strip()
+    if not generated or not source_text:
+        return
+    entities: list[str] = []
+    if isinstance(story_card, dict):
+        for person in story_card.get("entities_people") or []:
+            if isinstance(person, dict) and person.get("name"):
+                entities.append(str(person["name"]))
+        for org in story_card.get("entities_organizations") or []:
+            if isinstance(org, dict) and org.get("name"):
+                entities.append(str(org["name"]))
+        for place in story_card.get("entities_places") or []:
+            if place:
+                entities.append(str(place))
+    verdict = check_uniqueness(
+        generated_text=generated,
+        source_text=source_text,
+        language=language,
+        named_entities=entities,
+    )
+    result.uniqueness_pct = round(verdict.uniqueness_pct, 1)
+    result.uniqueness_passed = verdict.passed
+    result.uniqueness_reason = verdict.reason
 
 
 def _safe_ultrathin_rewrite(original_title: str, original_content: str, source_url: str = "") -> RewriteResult:

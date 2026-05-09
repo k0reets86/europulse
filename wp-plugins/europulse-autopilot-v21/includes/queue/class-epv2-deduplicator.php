@@ -123,6 +123,237 @@ final class EPV2_Deduplicator {
 		return ['duplicate' => false];
 	}
 
+	/**
+	 * Variant D — Multi-tier event-signature dedup.
+	 *
+	 * Runs AFTER the Story Card AI returns, BEFORE worker pipeline. Looks
+	 * for queue rows + recent posts whose Story Card produced the same
+	 * "event signature" (top entity + event keyword + date_day) and
+	 * applies a time-based decision tree:
+	 *
+	 *   age 0-30 min     → drop as duplicate (4 sources publishing the
+	 *                       same announcement at once)
+	 *   age 30 min - 3 h → keep IF breaking/top_story OR key_facts
+	 *                       differ from the existing item; otherwise drop
+	 *   age 3-12 h        → keep (assumed update — winner's speech, end
+	 *                       result, reactions)
+	 *   age 12-24 h       → keep (recap)
+	 *   age > 24 h        → ignore old cluster entirely (new day, new
+	 *                       cluster)
+	 *
+	 * Returns ['duplicate' => bool, 'reason' => string, 'duplicate_of' => int]
+	 */
+	public static function is_event_duplicate(int $current_id, array $story_card, array $payload = []): array {
+		if ($story_card === []) {
+			return ['duplicate' => false, 'reason' => 'no_story_card'];
+		}
+		$signature = self::compute_event_signature($story_card, $payload);
+		if ($signature === '') {
+			return ['duplicate' => false, 'reason' => 'empty_signature'];
+		}
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+
+		// Find earliest item in same event cluster (last 24h, any state
+		// except this row itself). Searching by JSON_EXTRACT on
+		// story_card payload — index-friendly via the explicit signature
+		// column would be even better, but we keep the change small.
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id, state, updated_at, ai_payload
+			 FROM {$table}
+			 WHERE id != %d
+			   AND updated_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
+			   AND state IN ('new','reserve','processing_de','retry_process','ready_review','ready_publish','publishing','published')
+			 ORDER BY updated_at ASC
+			 LIMIT 100",
+			$current_id
+		));
+		if (! $rows) {
+			return ['duplicate' => false, 'reason' => 'no_recent_cluster'];
+		}
+		$first = null;
+		foreach ($rows as $row) {
+			$other_payload = json_decode((string) ($row->ai_payload ?? ''), true);
+			if (! is_array($other_payload)) {
+				continue;
+			}
+			$other_card = is_array($other_payload['_meta']['story_card'] ?? null) ? $other_payload['_meta']['story_card'] : [];
+			if ($other_card === []) {
+				continue;
+			}
+			$other_signature = self::compute_event_signature($other_card, $other_payload);
+			if ($other_signature !== '' && $other_signature === $signature) {
+				$first = $row;
+				$first->story_card = $other_card;
+				break;
+			}
+		}
+		if (! $first) {
+			return ['duplicate' => false, 'reason' => 'signature_unique'];
+		}
+		$age_seconds = max(0, time() - (int) strtotime((string) $first->updated_at));
+		// Tier 1: 0-30 min — strict drop
+		if ($age_seconds <= 30 * MINUTE_IN_SECONDS) {
+			return [
+				'duplicate' => true,
+				'reason' => 'event_signature_under_30_min',
+				'duplicate_of' => (int) $first->id,
+				'signature' => $signature,
+				'age_seconds' => $age_seconds,
+			];
+		}
+		// Tier 3+4: 3-24 h — allow as update / recap
+		if ($age_seconds >= 3 * HOUR_IN_SECONDS) {
+			return [
+				'duplicate' => false,
+				'reason' => 'allowed_as_update_or_recap',
+				'cluster_anchor' => (int) $first->id,
+				'age_seconds' => $age_seconds,
+			];
+		}
+		// Tier 2: 30 min - 3 h — allow only if breaking/top_story OR new key_facts
+		$is_breaking = ! empty($story_card['breaking_candidate'])
+			|| ! empty($story_card['top_story_candidate'])
+			|| (string) ($story_card['publishable_estimate'] ?? '') === 'high';
+		if ($is_breaking) {
+			return [
+				'duplicate' => false,
+				'reason' => 'breaking_override',
+				'cluster_anchor' => (int) $first->id,
+				'age_seconds' => $age_seconds,
+			];
+		}
+		$current_facts = self::extract_key_facts_set($story_card);
+		$first_facts = self::extract_key_facts_set($first->story_card);
+		$jaccard = self::jaccard_similarity($current_facts, $first_facts);
+		// 60%+ overlap = same angle, drop. Below = new facts, allow.
+		if ($jaccard >= 0.6) {
+			return [
+				'duplicate' => true,
+				'reason' => 'event_signature_high_facts_overlap',
+				'duplicate_of' => (int) $first->id,
+				'signature' => $signature,
+				'similarity' => $jaccard,
+				'age_seconds' => $age_seconds,
+			];
+		}
+		return [
+			'duplicate' => false,
+			'reason' => 'new_facts_present',
+			'cluster_anchor' => (int) $first->id,
+			'similarity' => $jaccard,
+			'age_seconds' => $age_seconds,
+		];
+	}
+
+	/**
+	 * Compute "event signature" for a Story Card:
+	 *   top_entity | top_event_keyword | date_day
+	 * All lowercase, normalized. Returns '' if not enough signal.
+	 */
+	public static function compute_event_signature(array $story_card, array $payload = []): string {
+		// Top entity from story_card.entities_people[0]
+		$entity = '';
+		$people = (array) ($story_card['entities_people'] ?? []);
+		foreach ($people as $person) {
+			if (is_array($person)) {
+				$name = trim((string) ($person['name'] ?? ''));
+				if ($name !== '') {
+					$entity = $name;
+					break;
+				}
+			} elseif (is_string($person) && trim($person) !== '') {
+				$entity = trim($person);
+				break;
+			}
+		}
+		// Event keyword: payload._meta.context_memory.event_title is where
+		// the worker stores the AI-extracted event title; it's our richest
+		// source. Fall back to story_card.topics[0] / tags[0] /
+		// search_queries[0] / key_phrases[0] in that order.
+		$event_kw = '';
+		$context_memory = is_array($payload['_meta']['context_memory'] ?? null) ? $payload['_meta']['context_memory'] : [];
+		$event_title = (string) ($context_memory['event_title'] ?? '');
+		if ($event_title === '') {
+			$event_title = (string) (is_array($story_card['event_context'] ?? null) ? ($story_card['event_context']['event_title'] ?? '') : '');
+		}
+		if ($event_title !== '') {
+			$tokens = preg_split('/[\s\-—,.:;!?\/«»"„"\'()]+/u', mb_strtolower($event_title)) ?: [];
+			$stop = ['der','die','das','und','mit','von','des','dem','den','eine','einer','einem','ein','auch','sich','ist','sind','wird','werden','auf','im','in','an','am','zu','zum','zur','beim','beim','bei','beim','dass','wenn','dann','noch','nicht','schon','heute','morgen','gestern','letzte','letzten','letzter','this','for','the','and','with','von','on','at','by','of','to','as','or','о','про','для','та','і','в','на','з','за','до','об','а','i','y','o','also','ohne','ohne'];
+			$candidates = array_filter($tokens, static fn($t) => mb_strlen($t) >= 5 && ! in_array($t, $stop, true));
+			if ($candidates !== []) {
+				usort($candidates, static fn($a, $b) => mb_strlen($b) <=> mb_strlen($a));
+				$event_kw = $candidates[0];
+			}
+		}
+		if ($event_kw === '') {
+			foreach (['topics','tags','search_queries','key_phrases'] as $field) {
+				$arr = (array) ($story_card[$field] ?? []);
+				foreach ($arr as $entry) {
+					$text = is_array($entry) ? trim((string) ($entry['text'] ?? $entry['name'] ?? '')) : trim((string) $entry);
+					if (mb_strlen($text) >= 5) {
+						$event_kw = mb_strtolower($text);
+						break 2;
+					}
+				}
+			}
+		}
+		if ($entity === '' || $event_kw === '') {
+			return '';
+		}
+		// Date day from context_memory.dates[0] / event_context.dates[0]
+		// / story_card.dates[0]; fall back to today UTC.
+		$date_day = '';
+		foreach ([
+			(array) ($context_memory['dates'] ?? []),
+			(array) (is_array($story_card['event_context'] ?? null) ? ($story_card['event_context']['dates'] ?? []) : []),
+			(array) ($story_card['dates'] ?? []),
+		] as $dates) {
+			foreach ($dates as $date) {
+				$ts = strtotime((string) $date);
+				if ($ts !== false) {
+					$date_day = gmdate('Y-m-d', $ts);
+					break 2;
+				}
+			}
+		}
+		if ($date_day === '') {
+			$date_day = gmdate('Y-m-d');
+		}
+		// Truncate event_kw to first 12 characters of the lemma — the
+		// 4 parade items had "siegesparade", "tag", "siege" — we want
+		// the longest single word but capped to keep the signature tight.
+		return mb_strtolower($entity) . '|' . mb_substr(mb_strtolower($event_kw), 0, 16) . '|' . $date_day;
+	}
+
+	private static function extract_key_facts_set(array $story_card): array {
+		$facts = (array) ($story_card['key_facts'] ?? []);
+		$tokens = [];
+		foreach ($facts as $fact) {
+			$text = is_array($fact) ? trim((string) ($fact['text'] ?? $fact['fact'] ?? '')) : trim((string) $fact);
+			if ($text === '') {
+				continue;
+			}
+			foreach (preg_split('/[\s\-—,.:;!?\/«»"„"\'()]+/u', mb_strtolower($text)) ?: [] as $tok) {
+				if (mb_strlen($tok) >= 4) {
+					$tokens[$tok] = true;
+				}
+			}
+		}
+		return array_keys($tokens);
+	}
+
+	private static function jaccard_similarity(array $a, array $b): float {
+		if ($a === [] && $b === []) {
+			return 0.0;
+		}
+		$set_a = array_flip($a);
+		$set_b = array_flip($b);
+		$intersection = count(array_intersect_key($set_a, $set_b));
+		$union = count($set_a + $set_b);
+		return $union > 0 ? ($intersection / $union) : 0.0;
+	}
+
 	public static function is_story_duplicate(array $item, array $cluster = []): array {
 		global $wpdb;
 		$event_key = self::event_key_for_candidate($item, $cluster);

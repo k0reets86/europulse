@@ -5,6 +5,27 @@ if (! defined('ABSPATH')) {
 }
 
 final class EPV2_Categorizer {
+	/**
+	 * Story-Card-aware category detection. If the caller passed a payload
+	 * carrying a Story Card with category.confidence ≥ 0.7, we trust the
+	 * AI verdict and skip the keyword-driven detect entirely — the
+	 * keyword path was over-eager (mention of "Ukraine-Krieg" in a piece
+	 * about Putin's parade in Moscow flipped category to ukraine even
+	 * though Story Card said welt with confidence 0.9). The keyword path
+	 * remains as a fallback for items without a trusted Story Card.
+	 */
+	public static function detect_with_payload(string $title, string $content, string $source_bias, array $payload): string {
+		$story_card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
+		if ($story_card !== []) {
+			$confidence = (float) ($story_card['category']['confidence'] ?? 0.0);
+			$primary = trim((string) ($story_card['category']['primary'] ?? ''));
+			if ($confidence >= 0.7 && $primary !== '') {
+				return self::canonical_slug($primary);
+			}
+		}
+		return self::detect($title, $content, $source_bias);
+	}
+
 	public static function detect(string $title, string $content, string $source_bias = ''): string {
 		$text = mb_strtolower($title . ' ' . wp_strip_all_tags($content));
 		$title_text = mb_strtolower(wp_strip_all_tags($title));

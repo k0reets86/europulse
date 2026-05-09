@@ -181,6 +181,65 @@ final class EPV2_AI_Processor {
 							if ($editorial_match === 'match' && $source_id_for_health > 0 && class_exists('EPV2_Resilience_Manager')) {
 								EPV2_Resilience_Manager::register_source_quality_success($source_id_for_health);
 							}
+							// Variant-D event-signature dedup: with Story Card
+							// in hand, look up existing items in the same
+							// event cluster (top entity + event keyword +
+							// date_day) within the last 24 hours and apply
+							// time-tiered rules: 0-30 min strict drop;
+							// 30 min-3 h drop unless breaking/top_story or
+							// new key_facts; 3-24 h allow as update; >24 h
+							// new cluster.
+							if (class_exists('EPV2_Deduplicator')) {
+								// Pass full payload so signature can read
+								// _meta.context_memory.event_title (richest
+								// source for the event keyword).
+								$dup_payload = is_array($existing_payload) && $existing_payload !== [] ? $existing_payload : [];
+								if ($dup_payload === []) {
+									$row_payload = json_decode((string) ($item->ai_payload ?? ''), true);
+									if (is_array($row_payload)) {
+										$dup_payload = $row_payload;
+									}
+								}
+								$event_dup = EPV2_Deduplicator::is_event_duplicate((int) $item->id, $story_card, $dup_payload);
+								if (! empty($event_dup['duplicate'])) {
+									$dup_of = (int) ($event_dup['duplicate_of'] ?? 0);
+									$age_min = (int) round((int) ($event_dup['age_seconds'] ?? 0) / 60);
+									$reason_msg = sprintf(
+										'Дубликат события: то же сюжетное событие что и материал #%d (опубликован %d мин назад, причина: %s).',
+										$dup_of,
+										$age_min,
+										(string) ($event_dup['reason'] ?? 'event_signature')
+									);
+									EPV2_Queue::update_fields((int) $item->id, [
+										'duplicate_of' => $dup_of > 0 ? $dup_of : null,
+										'duplicate_reason' => sanitize_key((string) ($event_dup['reason'] ?? 'event_dup')),
+									]);
+									EPV2_Queue::mark_state((int) $item->id, 'duplicate', [
+										'error_message' => $reason_msg,
+									]);
+									if (class_exists('EPV2_Learning_Journal')) {
+										EPV2_Learning_Journal::record('event_duplicate', (int) $item->id,
+											(string) ($event_dup['reason'] ?? 'event_dup'),
+											[
+												'duplicate_of' => $dup_of,
+												'signature' => (string) ($event_dup['signature'] ?? ''),
+												'age_seconds' => (int) ($event_dup['age_seconds'] ?? 0),
+												'similarity' => (float) ($event_dup['similarity'] ?? 0.0),
+											]
+										);
+									}
+									self::log_process_item_step('event_signature_duplicate', (int) $item->id, [
+										'duplicate_of' => $dup_of,
+										'reason' => (string) ($event_dup['reason'] ?? ''),
+										'signature' => (string) ($event_dup['signature'] ?? ''),
+										'age_seconds' => (int) ($event_dup['age_seconds'] ?? 0),
+									]);
+									$count++;
+									$run_payload['processed_item_id'] = (int) $item->id;
+									$run_payload['result'] = 'event_duplicate';
+									break;
+								}
+							}
 						} else {
 							self::log_process_item_step('story_card_build_failed', (int) $item->id, [
 								'run_id' => $run,
@@ -930,7 +989,22 @@ final class EPV2_AI_Processor {
 				if ($reused_existing_context) {
 					$category = self::working_category_seed($item, $existing_payload);
 				} else {
-					$category = EPV2_Categorizer::detect((string) $source_item->original_title, (string) ($source_item->original_content ?? ''), (string) $source_item->category_proposed);
+					// Use Story-Card-aware detect: if existing_payload (the
+					// pre-rewrite payload that already contains the Story
+					// Card from analyze_story) carries a high-confidence
+					// category.primary, trust it instead of running the
+					// keyword regex. The keyword regex over-promotes
+					// "ukraine-krieg" mentions and flipped Moscow parade
+					// stories to ukraine despite Story Card saying welt.
+					$payload_for_detect = is_array($existing_payload) && $existing_payload !== []
+						? $existing_payload
+						: ((array) (json_decode((string) ($source_item->ai_payload ?? ''), true) ?: []));
+					$category = EPV2_Categorizer::detect_with_payload(
+						(string) $source_item->original_title,
+						(string) ($source_item->original_content ?? ''),
+						(string) $source_item->category_proposed,
+						$payload_for_detect
+					);
 				}
 				self::log_process_item_step('after_category_detect', (int) $item->id, [
 					'run_id' => $run,

@@ -546,7 +546,6 @@ final class EPV2_AI_Processor {
 							'error_message' => '',
 						]);
 						self::log_process_item_step('after_worker_mark_state', (int) $item->id, ['run_id' => $run, 'next_state' => $next_state, 'duration_ms' => self::duration_ms_since($item_started_at)]);
-						EPV2_Stats::record_payload_ai_usage($payload);
 						$count++;
 						$run_payload['processed_item_id'] = (int) $item->id;
 						$run_payload['result'] = (string) ($worker_response['stage_result'] ?? 'worker_translation_stage_success');
@@ -632,7 +631,6 @@ final class EPV2_AI_Processor {
 							'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
 							'error_message' => '',
 						]);
-						EPV2_Stats::record_payload_ai_usage($payload);
 						$count++;
 						$run_payload['processed_item_id'] = (int) $item->id;
 						$run_payload['result'] = 'translated_' . $lang_to_repair . '_successfully';
@@ -751,7 +749,6 @@ final class EPV2_AI_Processor {
 						'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
 						'error_message' => '',
 					]);
-					EPV2_Stats::record_payload_ai_usage($payload);
 					$count++;
 					$run_payload['processed_item_id'] = (int) $item->id;
 					$run_payload['result'] = 'translated_and_finished_successfully';
@@ -1157,7 +1154,6 @@ final class EPV2_AI_Processor {
 										),
 									'admin_notes' => wp_json_encode($terminal_notes_global, JSON_UNESCAPED_UNICODE),
 								]);
-								EPV2_Stats::record_payload_ai_usage($payload);
 								self::log_process_item_step('after_worker_terminal_outcome_global', (int) $item->id, [
 									'run_id' => $run,
 									'state' => $terminal_state_global,
@@ -1210,7 +1206,6 @@ final class EPV2_AI_Processor {
 										: 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($terminal_gate['selection_decision'] ?? 'unknown') . '".',
 									'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
 								]);
-								EPV2_Stats::record_payload_ai_usage($payload);
 								self::log_process_item_step('after_worker_terminal_outcome', (int) $item->id, [
 									'run_id' => $run,
 									'state' => $terminal_state,
@@ -1269,7 +1264,6 @@ final class EPV2_AI_Processor {
 								'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
 								'error_message' => '',
 							]);
-							EPV2_Stats::record_payload_ai_usage($payload);
 							self::log_process_item_step('after_worker_rebuild_mark_state', (int) $item->id, [
 								'run_id' => $run,
 								'next_state' => $next_state,
@@ -1352,7 +1346,6 @@ final class EPV2_AI_Processor {
 									'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
 									'error_message' => '',
 								]);
-								EPV2_Stats::record_payload_ai_usage($payload);
 								self::log_process_item_step('after_worker_publish_finish_mark_state', (int) $item->id, [
 									'run_id' => $run,
 									'next_state' => $next_state,
@@ -1515,7 +1508,6 @@ final class EPV2_AI_Processor {
 							break;
 						}
 					}
-					EPV2_Stats::record_payload_ai_usage($payload);
 					$count++;
 					$run_payload['processed_item_id'] = (int) $item->id;
 					$run_payload['result'] = 'processed_successfully';

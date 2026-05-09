@@ -1240,7 +1240,68 @@ if (! defined('ABSPATH')) {
 		if ($left_family !== '' && $left_family === $right_family) {
 			return true;
 		}
+		// CDN-to-publisher aliases. Top-tier outlets serve hero images
+		// from a separate CDN whose registered domain does not share a
+		// family name with the article host. Without this, the publish
+		// gate's "media must come from the source host" check fires
+		// even when the image is unambiguously the article's own photo
+		// (e.g., theguardian.com article → i.guim.co.uk image).
+		$left_alias = self::cdn_publisher_alias($left);
+		$right_alias = self::cdn_publisher_alias($right);
+		if ($left_alias !== '' && ($left_alias === $right_family || $left_alias === $right_alias)) {
+			return true;
+		}
+		if ($right_alias !== '' && ($right_alias === $left_family || $right_alias === $left_alias)) {
+			return true;
+		}
 		return str_ends_with($left, '.' . $right) || str_ends_with($right, '.' . $left);
+	}
+
+	/**
+	 * Map known publisher CDN hosts to the same family as their editorial
+	 * domain so `same_source_host()` accepts CDN-served hero images.
+	 * Returns '' for unknown hosts (caller falls back to publisher_family).
+	 */
+	private static function cdn_publisher_alias(string $host): string {
+		$host = preg_replace('/^www\./i', '', trim(strtolower($host)));
+		if ($host === '') {
+			return '';
+		}
+		$aliases = [
+			'guim.co.uk'         => 'theguardian',
+			'guimcode.co.uk'     => 'theguardian',
+			'static.guim.co.uk'  => 'theguardian',
+			'images.handelsblatt.com' => 'handelsblatt',
+			'spiegel.de'         => 'spiegel',
+			'a1.spiegel.media'   => 'spiegel',
+			'a2.spiegel.media'   => 'spiegel',
+			'spiegel.media'      => 'spiegel',
+			'cdn.faz.net'        => 'faz',
+			'media.faz.net'      => 'faz',
+			'static.zeit.de'     => 'zeit',
+			'images.zeit.de'     => 'zeit',
+			'img.zeit.de'        => 'zeit',
+			'cdn.tagesschau.de'  => 'tagesschau',
+			'images.tagesschau.de' => 'tagesschau',
+			'image.tagesschau.de' => 'tagesschau',
+			'reutersmedia.net'   => 'reuters',
+			'cloudfront-eu-central-1.images.arcpublishing.com' => 'reuters',
+			'media.zenfs.com'    => 'yahoo',
+			's.yimg.com'         => 'yahoo',
+			'img.welt.de'        => 'welt',
+			'cdn.welt.de'        => 'welt',
+			'static.dw.com'      => 'dw',
+			'static.euronews.com' => 'euronews',
+			'cdn.euronews.com'   => 'euronews',
+			'kyivindependent.com' => 'kyivindependent',
+			'cdn.kyivindependent.com' => 'kyivindependent',
+		];
+		foreach ($aliases as $suffix => $family) {
+			if ($host === $suffix || str_ends_with($host, '.' . $suffix)) {
+				return $family;
+			}
+		}
+		return '';
 	}
 
 	private static function entry_allows_recent_reuse(array $entry, string $image_url = ''): bool {

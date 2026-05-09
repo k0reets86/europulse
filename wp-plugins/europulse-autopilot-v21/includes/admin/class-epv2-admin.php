@@ -480,6 +480,7 @@ final class EPV2_Admin {
 		$active_items = $active_id > 0 ? self::queue_light_rows_by_ids([$active_id]) : [];
 		$new_items = self::queue_light_rows_by_states(['new', 'retry_process', 'ready_review', 'reserve', 'processing_de'], 30, [$active_id]);
 		$publish_items = self::queue_light_rows_by_states(['ready_publish', 'retry_publish', 'publishing'], 30);
+		$manual_review_items = self::queue_light_rows_by_states(['manual_review'], 30);
 		$rejected_items = self::queue_light_rows_by_states(['rejected', 'error', 'duplicate'], 30);
 		$published_items = self::queue_light_rows_by_states(['published'], 30);
 		$next_publish = self::queue_next_publish_timestamp($publish_items);
@@ -490,7 +491,8 @@ final class EPV2_Admin {
 			$rejected_items,
 			$published_items,
 			$automation_paused,
-			$next_publish
+			$next_publish,
+			$manual_review_items
 		);
 		return [
 			'html' => implode('', $sections),
@@ -523,7 +525,20 @@ final class EPV2_Admin {
 		$active_work_items = array_values(array_filter($items, static fn($item) => self::is_active_work_item($item, $active_item_id)));
 		$ready_publish_items = array_values(array_filter($items, static fn($item) => self::is_ready_publish_item($item, $active_item_id)));
 		$new_queue_items = array_values(array_filter($items, static fn($item) => self::is_new_queue_item($item, $active_item_id)));
-		$rejected_items = array_values(array_filter($items, static fn($item) => in_array(EPV2_Queue::user_facing_state_for_row($item), ['rejected', 'error', 'duplicate'], true)));
+		// Manual-review items use raw `state` rather than user_facing_state
+		// because workflow_is_terminal_state currently does not include
+		// 'manual_review' (changing that would alter the broader workflow
+		// guards). Pulling by raw state gives the admin its own bucket
+		// without touching workflow logic.
+		$manual_review_items = array_values(array_filter($items, static fn($item) => (string) ($item->state ?? '') === 'manual_review'));
+		$manual_review_ids = array_flip(array_map(static fn($i) => (int) ($i->id ?? 0), $manual_review_items));
+		$rejected_items = array_values(array_filter($items, static function ($item) use ($manual_review_ids) {
+			$id = (int) ($item->id ?? 0);
+			if (isset($manual_review_ids[$id])) {
+				return false;
+			}
+			return in_array(EPV2_Queue::user_facing_state_for_row($item), ['rejected', 'error', 'duplicate'], true);
+		}));
 		$published_items = array_values(array_filter($items, static fn($item) => (string) $item->state === 'published'));
 		$published_recent_items = array_slice($published_items, 0, 12);
 		$published_archive_items = array_slice($published_items, 12);
@@ -540,7 +555,8 @@ final class EPV2_Admin {
 			$rejected_items,
 			$published_recent_items,
 			$automation_paused,
-			self::queue_next_publish_timestamp($ready_publish_items)
+			self::queue_next_publish_timestamp($ready_publish_items),
+			$manual_review_items
 		);
 
 		return [
@@ -644,7 +660,7 @@ final class EPV2_Admin {
 		return (string) ob_get_clean();
 	}
 
-	private static function queue_lightweight_sections_payload(array $active_items, array $new_items, array $publish_items, array $rejected_items, array $published_items, bool $automation_paused, int $next_publish): array {
+	private static function queue_lightweight_sections_payload(array $active_items, array $new_items, array $publish_items, array $rejected_items, array $published_items, bool $automation_paused, int $next_publish, array $manual_review_items = []): array {
 		$sections = [];
 
 		ob_start();
@@ -661,6 +677,10 @@ final class EPV2_Admin {
 			'next_publish' => $next_publish,
 		]);
 		$sections['publish'] = (string) ob_get_clean();
+
+		ob_start();
+		self::render_light_queue_section('Ручная проверка', $manual_review_items, 'manual_review');
+		$sections['manual_review'] = (string) ob_get_clean();
 
 		ob_start();
 		self::render_light_queue_section('Отклонённые', $rejected_items, 'rejected');
@@ -1239,6 +1259,13 @@ final class EPV2_Admin {
 	}
 
 	private static function is_new_queue_item(object $item, int $active_item_id): bool {
+		// Manual-review rows currently fall through to user_facing='new'
+		// (workflow_is_terminal_state does not include 'manual_review').
+		// Without this exclusion they would appear in both the "Новые" and
+		// the new "Ручная проверка" buckets simultaneously.
+		if ((string) ($item->state ?? '') === 'manual_review') {
+			return false;
+		}
 		return EPV2_Queue::user_facing_state_for_row($item) === 'new';
 	}
 

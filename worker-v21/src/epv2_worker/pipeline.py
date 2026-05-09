@@ -556,6 +556,26 @@ async def _search_supporting_sources(key_phrases: list[str], primary_url: str) -
     return [entry["url"] for entry in rich]
 
 
+def _extract_bing_redirect_target(redirect_url: str) -> str:
+    """Bing News RSS wraps each item link as
+    ``http://www.bing.com/news/apiclick.aspx?...&url=ENCODED_PUBLISHER_URL``.
+    Pull the URL-encoded publisher URL out of the ``url=`` parameter.
+    Returns the resolved URL or '' if it cannot be parsed.
+    """
+    try:
+        from urllib.parse import urlparse, parse_qs, unquote
+        parts = urlparse(redirect_url)
+        params = parse_qs(parts.query)
+        candidates = params.get("url") or []
+        if candidates:
+            target = unquote(candidates[0])
+            if target.startswith("http://") or target.startswith("https://"):
+                return target
+    except Exception:
+        pass
+    return ""
+
+
 async def _search_supporting_sources_rich(
     key_phrases: list[str],
     primary_url: str,
@@ -568,24 +588,26 @@ async def _search_supporting_sources_rich(
     consumes these via dossier_block so it can write multi-source
     synthesis with named attribution per fact.
 
-    Implementation: parses Google News RSS items rather than just <link>
-    tags. We extract title, source name (the publisher), and primary URL.
-    Domain is derived from the URL host. Same-domain duplicates and the
-    primary URL itself are filtered out so the rewriter sees only items
-    that actually add something.
+    Source: Bing News RSS. We previously used Google News RSS but its
+    item links are redirect URLs to ``news.google.com/rss/articles/CBMi…``
+    that cannot be dereferenced without solving Google's consent banner
+    plus decoding an opaque encrypted protobuf. Bing News RSS, by
+    contrast, exposes the publisher URL plainly in the ``url=`` query
+    parameter of its ``apiclick.aspx`` redirect, so we get real outlet
+    URLs the rewriter can cite and the publish gate can count.
     """
     if not key_phrases:
         return []
     try:
         import httpx
-        query = " ".join(key_phrases[:3])
-        url = f"https://news.google.com/rss/search?q={query}&hl=de&gl=DE&ceid=DE:de"
+        from urllib.parse import quote_plus
+        query = quote_plus(" ".join(key_phrases[:3]))
+        url = f"https://www.bing.com/news/search?q={query}&format=RSS"
         async with httpx.AsyncClient(timeout=12) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code != 200:
             return []
         import re
-        # Each <item>...</item> block has <title>, <link>, <source url="...">.
         items = re.findall(r"<item>(.*?)</item>", resp.text, flags=re.S)
         primary_host = ""
         try:
@@ -601,10 +623,16 @@ async def _search_supporting_sources_rich(
         for block in items:
             link_match = re.search(r"<link>([^<]+)</link>", block)
             title_match = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", block, flags=re.S)
-            source_match = re.search(r"<source[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</source>", block, flags=re.S)
+            # Bing's RSS uses a custom <News:Source> element for the
+            # publisher name; fall back to legacy <source> if absent.
+            source_match = re.search(r"<News:Source>([^<]+)</News:Source>", block)
+            if source_match is None:
+                source_match = re.search(r"<source[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</source>", block, flags=re.S)
             if not link_match:
                 continue
-            link = html.unescape(link_match.group(1).strip())
+            redirect_link = html.unescape(link_match.group(1).strip())
+            # Bing wraps the publisher URL in ?url=... — extract.
+            link = _extract_bing_redirect_target(redirect_link) or redirect_link
             if link == primary_url or not _usable_supporting_url(link):
                 continue
             try:
@@ -612,6 +640,10 @@ async def _search_supporting_sources_rich(
             except Exception:
                 continue
             if not host or host in seen_hosts:
+                continue
+            # Skip aggregator hosts that are not real publishers; the
+            # rewriter cannot honestly attribute facts to them.
+            if "bing.com" in host or "news.google.com" in host:
                 continue
             seen_hosts.add(host)
             title = html.unescape((title_match.group(1) if title_match else "").strip())

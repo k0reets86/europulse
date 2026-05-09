@@ -6,8 +6,8 @@ if (! defined('ABSPATH')) {
 
 final class EPV2_Admin {
 	private const QUEUE_PAGE_FETCH_LIMIT = 80;
-	private const QUEUE_SNAPSHOT_CACHE_TTL = 2;
-	private const QUEUE_SNAPSHOT_REFRESH_MS = 5000;
+	private const QUEUE_SNAPSHOT_CACHE_TTL = 1;
+	private const QUEUE_SNAPSHOT_REFRESH_MS = 2500;
 	private const QUEUE_SNAPSHOT_REQUEST_COOLDOWN = 2;
 
 	private static function require_manage_capability(): void {
@@ -421,6 +421,7 @@ final class EPV2_Admin {
 		}
 
 		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_clear_queue'), 'epv2_clear_queue')) . '" onclick="return confirm(\'Очистить всю очередь?\')">Очистить очередь</a>';
+		echo '<span id="epv2-snapshot-stamp" style="margin-left:14px;font-size:12px;color:#646970">ожидаю обновление…</span>';
 		echo '<div id="epv2-queue-blocks">';
 		echo self::queue_lightweight_blocks_html();
 		echo '</div>';
@@ -3867,6 +3868,23 @@ jQuery(function($){
             applySnapshotTargets(response);
             renderCollectCountdown();
             renderPublishCountdown();
+            const stamp = document.getElementById('epv2-snapshot-stamp');
+            if (stamp) {
+              const t = new Date();
+              const hh = String(t.getHours()).padStart(2,'0');
+              const mm = String(t.getMinutes()).padStart(2,'0');
+              const ss = String(t.getSeconds()).padStart(2,'0');
+              stamp.textContent = 'обновлено в ' + hh + ':' + mm + ':' + ss;
+              stamp.style.color = '#646970';
+            }
+          }
+        })
+        .fail(function(xhr){
+          const stamp = document.getElementById('epv2-snapshot-stamp');
+          if (stamp) {
+            const code = xhr && xhr.status ? xhr.status : 'нет ответа';
+            stamp.textContent = 'обновление прервано (' + code + ') — обнови страницу';
+            stamp.style.color = '#b32d2e';
           }
         })
         .always(function(){

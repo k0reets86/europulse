@@ -1045,6 +1045,25 @@ final class EPV2_Admin {
 			?? $item->_epv2_de_media_url
 			?? ''
 		));
+		// Until the item is actually published, post_id is NULL and the
+		// postmeta-derived virtual props above are empty — so look inside
+		// the worker payload too. Without this, every ready_publish row
+		// shows "медиа: нет featured image" even when a real publisher
+		// photo is fully resolved and ready to attach.
+		if ($url === '') {
+			$payload = self::queue_cached_payload($item);
+			$candidates = [
+				(string) ($payload['featured_media_url'] ?? ''),
+				(string) ($payload['media_url'] ?? ''),
+				(string) ($payload['_meta']['featured_media_url'] ?? ''),
+			];
+			foreach ($candidates as $candidate) {
+				if ($candidate !== '') {
+					$url = esc_url_raw($candidate);
+					break;
+				}
+			}
+		}
 		$source_image_url = esc_url_raw((string) ($item->source_image_url ?? ''));
 		if ($url === '' && $source_image_url !== '') {
 			$url = $source_image_url;

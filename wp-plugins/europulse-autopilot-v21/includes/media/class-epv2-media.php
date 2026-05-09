@@ -120,6 +120,12 @@ if (! defined('ABSPATH')) {
 	}
 
 	public static function generated_story_cover(string $title, string $excerpt = '', array $categories = [], array $source_dossier = []): string {
+		// Disabled per editorial decision: synthetic title-baked covers were
+		// rendered in DE only and reused on UK/EN translations, producing
+		// language-mismatch on /uk/ and /en/ archives. Items without a real
+		// photo now fall through to the publisher throw → manual_review,
+		// where the operator either attaches a real image or rejects.
+		return '';
 		$title = trim(wp_strip_all_tags($title));
 		$excerpt = trim(wp_strip_all_tags($excerpt));
 		if ($title === '' || ! extension_loaded('gd')) {

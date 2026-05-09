@@ -2766,16 +2766,11 @@ final class EPV2_AI_Processor {
 			&& EPV2_Media::is_source_host_media($featured_media_url, $dossier)) {
 			return true;
 		}
-		// Last-resort acceptance: if the row carries a generated_story_cover
-		// (Fix E2 fallback when neither source-host nor Wikimedia/Pexels
-		// produced a usable image), allow it through. Otherwise the article
-		// gets stuck in ready_publish indefinitely waiting for media that
-		// will never appear, even though the rest of the contract is fine.
-		// The generated cover is category-aware and editorially honest —
-		// not an SEO-stuffing stock placeholder.
-		if (EPV2_Media::is_generated_story_cover_url($featured_media_url)) {
-			return true;
-		}
+		// Generated story covers are no longer accepted at the publish gate:
+		// they were DE-baked and re-rendered as DE text on UK/EN archives.
+		// Items lacking a real image now fail this gate and land in
+		// manual_review via the existing stage-attempt → quarantine path,
+		// where the operator can attach a real photo or reject.
 		return false;
 	}
 

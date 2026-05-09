@@ -51,6 +51,7 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
 - Für Ukrainisch: „Ticker" im Nachrichtenkontext nicht als holprige „стрічка" übersetzen. Nutze „хроніка", „оновлення" oder „онлайн-оновлення"; „Nahost-Ticker" → „Хроніка подій на Близькому Сході" oder „Оновлення щодо Близького Сходу".
 - Für Ukrainisch: „gesetzliche Krankenkassen" immer als „каси обов’язкового медичного страхування" übersetzen. Niemals „законодавчі фонди", „державні страхові фонди", „фармацевтичний сектор" oder ähnliche Kalques.
 - Für Ukrainisch: keine Kanzleisprache und keine deutschen Kalques. Vermeide Formeln wie „вбачає потребу", „з огляду на", „у повідомленні не деталізовано", „подальші парламентські консультації", „органи, відповідальні за законодавство". Schreibe stattdessen lebendig und präzise: „вважає, що пакет треба змінити", „під час розгляду в парламенті", „деталей поки немає".
+- Für Ukrainisch — Genus-Übereinstimmung Pflicht: deutsche Substantive übernehmen ihr Geschlecht NICHT auf das ukrainische Wort. „die Parade" (DE: feminin) → „парад" (UK: maskulin). Adjektive, Verben und Pronomen müssen sich nach dem ukrainischen Geschlecht richten, nicht nach dem deutschen. Korrekt: „військовий парад", „пройшов парад", „цей парад"; FALSCH: „військова парад", „пройшла парад", „ця парад". Das Gleiche gilt für: „der Bericht" → „звіт" (m, nicht f), „der Saldo" → „баланс" (m), „der Abend" → „вечір" (m), „die Krise" → „криза" (f, übereinstimmt), „das Unternehmen" → „підприємство" (n, übereinstimmt), „der Beschluss" → „рішення" (n, NICHT m), „die Sitzung" → „засідання" (n, NICHT f).
 - Titel, Lead und erster Absatz müssen unterschiedliche Aufgaben erfüllen: Titel meldet die Nachricht, Lead erklärt die Relevanz in 1–2 Sätzen, der erste Absatz führt mit neuen Details weiter. Nicht alle drei mit derselben Quellenformel oder denselben ersten Wörtern beginnen.
 - Der erste Absatz darf den Lead nicht nacherzählen. Er muss konkretisieren: wer betroffen ist, was sich ändert, welche offenen Punkte es gibt oder was als Nächstes passiert.
 
@@ -163,13 +164,13 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             body = _normalize_ukrainian_names(body)
         title, lead, body = _strip_translation_added_first_names(title, lead, body, source_text, target_lang)
         if target_lang.lower().startswith("ukrain"):
-            title = _normalize_ukrainian_style(_normalize_ukrainian_title(title))
-            lead = _move_ukrainian_source_attribution(_normalize_ukrainian_style(lead))
-            body = _move_ukrainian_source_attribution(_normalize_ukrainian_style(body))
+            title = _fix_ukrainian_gender_agreement(_normalize_ukrainian_style(_normalize_ukrainian_title(title)))
+            lead = _fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(lead)))
+            body = _fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(body)))
             title, lead, body = _strip_translation_added_first_names(title, lead, body, source_text, target_lang)
-            title = _normalize_ukrainian_style(_normalize_ukrainian_title(_normalize_ukrainian_names(title)))
-            lead = _move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(lead)))
-            body = _move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(body)))
+            title = _fix_ukrainian_gender_agreement(_normalize_ukrainian_style(_normalize_ukrainian_title(_normalize_ukrainian_names(title))))
+            lead = _fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(lead))))
+            body = _fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(body))))
             title, lead, body = _repair_ukrainian_structure(title, lead, body)
             warnings = _ukrainian_style_warnings(title, lead, body)
             if warnings:
@@ -246,6 +247,94 @@ def _normalize_non_ukrainian_source_names(text: str) -> str:
 
 def _english_contains_cyrillic(*parts: str) -> bool:
     return re.search(r"[А-Яа-яІіЇїЄєҐґ]", "\n".join(parts), re.U) is not None
+
+
+def _fix_ukrainian_gender_agreement(text: str) -> str:
+    """Catch common gender-agreement slips where the AI translator copied
+    the German noun's gender onto a Ukrainian noun whose actual gender
+    differs. The pattern: feminine/neuter adjective directly followed by
+    a masculine UK noun (or vice versa). We only patch unambiguous cases.
+
+    Examples (DE → wrong UK → corrected UK):
+      die Parade → "військова парад" → "військовий парад"
+      die Sitzung → "наступна засідання" → "наступне засідання"
+      der Beschluss → "новий рішення" → "нове рішення"
+    """
+    if not text:
+        return text
+    # Maps: noun → correct gender ("m" / "f" / "n").
+    # Only nouns where the AI commonly drifts away from real UK gender
+    # because the German equivalent has a different gender.
+    masc_nouns = [
+        "парад", "звіт", "саміт", "баланс", "вечір", "конгрес",
+        "процес", "форум", "проєкт", "проект", "комітет", "уряд",
+        "вибір", "закон", "референдум", "удар", "наступ", "виступ",
+        "доступ", "момент", "захід", "знак", "опис", "обмін",
+    ]
+    fem_nouns = [
+        "сесія", "криза", "фракція", "гілка", "коаліція", "столиця",
+        "промова", "заява", "пропозиція", "поправка",
+    ]
+    neut_nouns = [
+        "засідання", "рішення", "повідомлення", "питання", "завдання",
+        "ставлення", "становлення", "обладнання", "звернення", "обговорення",
+        "підприємство", "міністерство", "посольство", "відомство",
+    ]
+    # adjective ending pairs (m, f, n) for nominative AND accusative
+    # (Ukrainian: feminine accusative ends in -у/-ю, distinct from nominative -а/-я;
+    # masculine accusative for inanimate = nominative; neuter same as nominative).
+    adj_endings = [
+        # (m, f, n) — nominative
+        ("ий", "а", "е"),
+        ("ій", "я", "є"),
+        # accusative-feminine forms for the same adjective stems
+        ("ий", "у", "е"),
+        ("ій", "ю", "є"),
+    ]
+
+    def fix_pair(noun: str, target_gender: str) -> str:
+        nonlocal text
+        # Build regex: one or more adjectives followed by the noun.
+        # We patch only when at least one adjective is in WRONG gender.
+        for m_end, f_end, n_end in adj_endings:
+            wrong_endings: list[str] = []
+            right_end = ""
+            if target_gender == "m":
+                wrong_endings = [f_end, n_end]
+                right_end = m_end
+            elif target_gender == "f":
+                wrong_endings = [m_end, n_end]
+                right_end = f_end
+            elif target_gender == "n":
+                wrong_endings = [m_end, f_end]
+                right_end = n_end
+            for wrong_end in wrong_endings:
+                # \b<root><wrong_end>\s+<noun>\b → <root><right_end> <noun>
+                pattern = re.compile(
+                    rf"\b([А-ЯҐЄІЇа-яґєії]{{2,}}){re.escape(wrong_end)}(\s+){re.escape(noun)}\b",
+                    re.UNICODE,
+                )
+                text = pattern.sub(rf"\1{right_end}\2{noun}", text)
+        return text
+
+    for noun in masc_nouns:
+        fix_pair(noun, "m")
+    for noun in fem_nouns:
+        fix_pair(noun, "f")
+    for noun in neut_nouns:
+        fix_pair(noun, "n")
+
+    # Past-tense verb agreement: "пройшла парад" / "пройшло парад" → "пройшов парад"
+    # Limit to a small known verb set to avoid false positives.
+    verbs_past_root = ["пройш", "відбу", "розпоч", "заверш", "стартува", "трива"]
+    for root in verbs_past_root:
+        for noun in masc_nouns:
+            text = re.sub(
+                rf"\b({root})(?:ла|ло)(\s+(?:[А-ЯҐЄІЇа-яґєії]+\s+)?){re.escape(noun)}\b",
+                rf"\1ов\2{noun}",
+                text,
+            )
+    return text
 
 
 def _normalize_ukrainian_style(text: str) -> str:

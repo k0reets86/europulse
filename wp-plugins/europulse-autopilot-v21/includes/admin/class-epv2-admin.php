@@ -869,26 +869,44 @@ final class EPV2_Admin {
 		$exclude_ids = array_values(array_filter(array_map('intval', $exclude_ids), static fn($id) => $id > 0));
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
+		$posts_table = $wpdb->posts;
 		$state_placeholders = implode(',', array_fill(0, count($states), '%s'));
-		$sql = "SELECT id, state, original_title, category_proposed, category_final, original_url, source_image_url, created_at, updated_at, admin_notes, error_message, publish_payload, post_id,
-			CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$.selection.score')) AS UNSIGNED) AS _epv2_selection_score,
-			JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$.selection.tier')) AS _epv2_selection_tier,
-			CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.quality.score')) AS UNSIGNED) AS _epv2_quality_score,
-			CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.seo_quality.score')) AS UNSIGNED) AS _epv2_seo_score,
-			CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.release_quality.score')) AS UNSIGNED) AS _epv2_release_score,
-			CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.google_quality.score')) AS UNSIGNED) AS _epv2_google_score,
-			JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$.featured_media_url')) AS _epv2_featured_media_url,
-			JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$.media_url')) AS _epv2_media_url,
-			JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$.languages.de.media_url')) AS _epv2_de_media_url
-			FROM {$table}
-			WHERE state IN ({$state_placeholders})";
+		// For the Published block we want the operator to always see the
+		// most recently published article on top, regardless of any
+		// stuck `orderby` URL param. JOIN with wp_posts and sort by
+		// post_date_gmt DESC for that block specifically. For every
+		// other state we keep the global queue_light_sql_order_clause
+		// (default updated_at DESC) so column-header sorting still
+		// works when the operator actively chooses a different sort.
+		$is_published_block = count($states) === 1 && $states[0] === 'published';
+		$sql = "SELECT q.id, q.state, q.original_title, q.category_proposed, q.category_final, q.original_url, q.source_image_url, q.created_at, q.updated_at, q.admin_notes, q.error_message, q.publish_payload, q.post_id,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(q.admin_notes, '$.selection.score')) AS UNSIGNED) AS _epv2_selection_score,
+			JSON_UNQUOTE(JSON_EXTRACT(q.admin_notes, '$.selection.tier')) AS _epv2_selection_tier,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(q.ai_payload, '$._meta.quality.score')) AS UNSIGNED) AS _epv2_quality_score,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(q.ai_payload, '$._meta.seo_quality.score')) AS UNSIGNED) AS _epv2_seo_score,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(q.ai_payload, '$._meta.release_quality.score')) AS UNSIGNED) AS _epv2_release_score,
+			CAST(JSON_UNQUOTE(JSON_EXTRACT(q.ai_payload, '$._meta.google_quality.score')) AS UNSIGNED) AS _epv2_google_score,
+			JSON_UNQUOTE(JSON_EXTRACT(q.ai_payload, '$.featured_media_url')) AS _epv2_featured_media_url,
+			JSON_UNQUOTE(JSON_EXTRACT(q.ai_payload, '$.media_url')) AS _epv2_media_url,
+			JSON_UNQUOTE(JSON_EXTRACT(q.ai_payload, '$.languages.de.media_url')) AS _epv2_de_media_url
+			FROM {$table} q";
+		if ($is_published_block) {
+			$sql .= " LEFT JOIN {$posts_table} p ON p.ID = q.post_id";
+		}
+		$sql .= " WHERE q.state IN ({$state_placeholders})";
 		$args = $states;
 		if ($exclude_ids !== []) {
 			$id_placeholders = implode(',', array_fill(0, count($exclude_ids), '%d'));
-			$sql .= " AND id NOT IN ({$id_placeholders})";
+			$sql .= " AND q.id NOT IN ({$id_placeholders})";
 			$args = array_merge($args, $exclude_ids);
 		}
-		$sql .= ' ORDER BY ' . self::queue_light_sql_order_clause() . ' LIMIT %d';
+		if ($is_published_block) {
+			// COALESCE so rows whose post_id has no matching post (rare —
+			// dangling pointer) still sort on the queue's own updated_at.
+			$sql .= ' ORDER BY COALESCE(p.post_date_gmt, q.updated_at) DESC, q.id DESC LIMIT %d';
+		} else {
+			$sql .= ' ORDER BY ' . self::queue_light_sql_order_clause() . ' LIMIT %d';
+		}
 		$args[] = $limit;
 		return $wpdb->get_results($wpdb->prepare($sql, ...$args));
 	}
@@ -1161,18 +1179,20 @@ final class EPV2_Admin {
 		// the same thing in plain Russian. Only show error_message for
 		// non-terminal states (where it's actually informative about
 		// the in-progress run).
-		if ($error !== '' && ! in_array($state, ['rejected', 'manual_review', 'error', 'published'], true)) {
+		if ($error !== '' && ! in_array($state, ['rejected', 'manual_review', 'error'], true)) {
 			$issues[] = $error;
 		}
 		$quality_score = self::queue_light_quality_score($item);
 		$seo_score = self::queue_light_seo_score($item);
 		$release_score = self::queue_light_release_score($item);
 		$google_score = self::queue_light_google_score($item);
-		// Suppress soft quality warnings on terminal rows: rejected/
-		// manual_review (the operator either accepts or rejects, not
-		// "tunes" the score) AND published (the article is live, those
-		// warnings are after-the-fact SEO advice, not actionable).
-		if (in_array($state, ['rejected', 'manual_review', 'error', 'published'], true)) {
+		// Suppress soft quality warnings on rows where the operator can't
+		// act on them: rejected (already excluded), manual_review (operator
+		// accepts or rejects, doesn't tune scores), error (technical
+		// terminal). On published rows we KEEP warnings — they tell the
+		// operator what was suboptimal about the shipped article so
+		// patterns can be spotted ("everything ships at release=88, why?").
+		if (in_array($state, ['rejected', 'manual_review', 'error'], true)) {
 			$quality_score = 0;
 			$seo_score = 0;
 			$release_score = 0;

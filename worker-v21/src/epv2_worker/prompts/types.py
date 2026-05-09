@@ -37,18 +37,23 @@ NEWS_BRIEF = """TYP: news_brief — Kurzmeldung.
 Aufbau:
 - Title: 50–80 Zeichen.
 - Lead: 1–2 Sätze. Kern der Meldung. Quelle namentlich.
-- Body: 300–600 Zeichen. 2–3 kurze Absätze.
+- Body: 700–1100 Zeichen (Pflicht-Mindestmass: 700). Drei bis vier kurze Absätze.
 
 Struktur des Body:
-- Absatz 1: Erweiterung des Leads — was/wo/wann mit zusätzlichem Detail.
-- Absatz 2: ein zusätzlicher Faktenpunkt — Reaktion, Zahl, Vergleich, oder kurzer Hintergrund.
-- Absatz 3 (optional): Echo-Block „Europulse berichtete zuvor …" — nur wenn passend.
+- Absatz 1: Erweiterung des Leads — was/wo/wann mit zusätzlichem Detail aus dem Dossier (eine konkrete Zahl, eine Akteurs-Funktion oder eine Ortsangabe, die im Lead noch nicht steht).
+- Absatz 2: ein weiteres Faktum aus der Primärquelle — Reaktion, Zahl, Vergleich oder kurzer Hintergrund.
+- Absatz 3: Sekundärquelle namentlich — was diese hinzufügt (anderer Winkel, ergänzende Zahl, eigenständige Stimme).
+- Absatz 4 (optional): Echo-Block „Europulse berichtete zuvor …" — nur wenn passendes Material vorhanden ist.
 
-Quellen: 1 ist erlaubt (eine top-tier Primärquelle reicht). Wenn 2+ vorhanden — auch nutzen.
+Quellen: 1 reicht editorisch, aber wenn ≥ 2 vorhanden, IMMER beide nennen — die zweite ist die strukturelle Berechtigung für Absatz 3.
+
+Längen-Disziplin (wichtig):
+- Unter 700 Zeichen ist der Body NICHT akzeptabel — er fällt aus Discover/Top-Stories und wird sichtbar dünn.
+- Nicht künstlich aufblähen: KEINE Floskeln, KEINE Wiederholung des Leads, KEINE Spekulation. Wenn das Dossier die 700 Zeichen nicht hergibt, FÜGE ein konkretes Detail aus den Sekundärquellen hinzu (Reaktion, Zahl, Zitat-Splitter < 15 Wörter).
 
 Was zu vermeiden:
-- Tiefer Kontext, Analyse, mehrere Reaktionen — das ist news_article.
-- Zitate länger als 15 Wörter.
+- Tiefer Kontext, Analyse, mehrere ausgebaute Reaktionen — das ist news_article.
+- Zitate länger als 15 Wörter (sonst news_article).
 - Aufbau zur Geschichte ausweiten („Es begann vor Jahren …").
 """
 

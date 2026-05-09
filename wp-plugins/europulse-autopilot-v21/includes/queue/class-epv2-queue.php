@@ -1550,22 +1550,27 @@ final class EPV2_Queue {
 		if (! $current) {
 			return;
 		}
-		// Central per-provider AI usage accounting. Every mark_state call that
-		// persists a fresh ai_payload + ai_tokens > 0 represents a real AI
-		// round-trip whose tokens belong on the daily counter and the per-
-		// provider Settings widget. Doing this at the gateway covers all the
-		// downstream branches (rewrite, regen, rebuild, publish_finish,
-		// terminal-block, retry) without scattering the bump call across 16+
-		// mark_state sites.
-		if (
-			class_exists('EPV2_Stats')
-			&& isset($extra['ai_payload'])
-			&& isset($extra['ai_tokens'])
-			&& (int) $extra['ai_tokens'] > 0
-		) {
+		// Central per-provider AI usage accounting. Any mark_state call that
+		// persists a fresh ai_payload counts as a worker round-trip — read
+		// the token total from _meta.ai_runtime[]/_meta.tokens directly so
+		// callers that omit the ai_tokens column field (e.g.
+		// transition_item_to_ready_publish) still feed the daily counter
+		// and the per-provider Settings widget.
+		if (class_exists('EPV2_Stats') && isset($extra['ai_payload'])) {
 			$bump_payload = json_decode((string) $extra['ai_payload'], true);
 			if (is_array($bump_payload)) {
-				EPV2_Stats::record_payload_ai_usage($bump_payload);
+				$_meta = is_array($bump_payload['_meta'] ?? null) ? $bump_payload['_meta'] : [];
+				$_runtime = is_array($_meta['ai_runtime'] ?? null) ? $_meta['ai_runtime'] : [];
+				$_runtime_tokens = 0;
+				foreach ($_runtime as $entry) {
+					if (is_array($entry)) {
+						$_runtime_tokens += max(0, (int) ($entry['tokens'] ?? 0));
+					}
+				}
+				$_meta_total = (int) ($_meta['tokens'] ?? 0);
+				if ($_runtime_tokens > 0 || $_meta_total > 0) {
+					EPV2_Stats::record_payload_ai_usage($bump_payload);
+				}
 			}
 		}
 		// Central terminal-state guard. Eight independent code paths used to
@@ -2214,6 +2219,26 @@ final class EPV2_Queue {
 			return;
 		}
 		self::guard_payload_field_sizes($id, $fields);
+		// Mirror the per-provider AI usage bump from mark_state so updates
+		// that bypass mark_state (fast_transition_item_to_ready_publish,
+		// regen flows) still feed the daily counter when they persist a
+		// fresh ai_payload with token-bearing ai_runtime entries.
+		if (class_exists('EPV2_Stats') && isset($fields['ai_payload'])) {
+			$bump_payload = json_decode((string) $fields['ai_payload'], true);
+			if (is_array($bump_payload)) {
+				$bm = is_array($bump_payload['_meta'] ?? null) ? $bump_payload['_meta'] : [];
+				$br = is_array($bm['ai_runtime'] ?? null) ? $bm['ai_runtime'] : [];
+				$br_total = 0;
+				foreach ($br as $entry) {
+					if (is_array($entry)) {
+						$br_total += max(0, (int) ($entry['tokens'] ?? 0));
+					}
+				}
+				if ($br_total > 0 || (int) ($bm['tokens'] ?? 0) > 0) {
+					EPV2_Stats::record_payload_ai_usage($bump_payload);
+				}
+			}
+		}
 		global $wpdb;
 		$wpdb->update($wpdb->prefix . 'epv2_queue', $fields, ['id' => $id]);
 	}

@@ -3305,6 +3305,11 @@ final class EPV2_Admin {
 
 	private static function queue_action_hint(string $state, ?object $item = null): string {
 		$user_state = $item ? EPV2_Queue::user_facing_state_for_row($item) : $state;
+		// Raw manual_review state — operator must see at a glance why the
+		// item stopped and what action is required without opening it.
+		if ($item && (string) ($item->state ?? '') === 'manual_review') {
+			return self::manual_review_action_hint($item);
+		}
 		$classification = $item ? EPV2_Queue::workflow_classification_for_row($item) : [
 			'class' => '',
 			'reason' => '',
@@ -3347,6 +3352,51 @@ final class EPV2_Admin {
 			'error' => 'Есть ошибка обработки; сначала открой и проверь материал.',
 			default => 'Сначала открой материал и проверь пакет.',
 		};
+	}
+
+	/**
+	 * Operator-facing one-liner explaining why a manual_review row stopped
+	 * and what to do. Reads structured `_system.last_stage_blocker` +
+	 * `_system.quarantine_reason` so the operator can decide the action
+	 * (replace photo / dismiss / promote / wait for next pass) without
+	 * opening the row.
+	 */
+	private static function manual_review_action_hint(object $item): string {
+		$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+		$notes = is_array($notes) ? $notes : [];
+		$sys = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$blockers_str = (string) ($sys['last_stage_blocker'] ?? '');
+		$blockers = $blockers_str === '' ? [] : array_map('trim', explode(',', $blockers_str));
+		$reason = (string) ($sys['quarantine_reason'] ?? '');
+		$payload = self::queue_cached_payload($item);
+		$selection_decision = sanitize_key((string) ($payload['_meta']['selection']['decision'] ?? ''));
+
+		if (in_array('media_contract', $blockers, true)) {
+			return 'Не подобралось пригодное фото от источника. Действие: открой материал и привяжи реальное изображение публикатора, либо отклони, если новость без визуала не нужна.';
+		}
+		if (in_array('sources_below_kind_minimum', $blockers, true) || in_array('enrichment_required', $blockers, true)) {
+			return 'Недостаточно сторонних источников для формата материала. Действие: либо нажми "Регенерировать", чтобы перепрогнать через свежий поиск Bing, либо подтверди публикацию вручную, если источник один и достаточен.';
+		}
+		if (in_array('payload_contract', $blockers, true) || in_array('stage_contract', $blockers, true)) {
+			return 'Тексты ещё не сложились до публикабельного контракта (пустые поля, не сошлись стадии). Действие: открой материал, проверь немецкий мастер и переводы, либо отклони.';
+		}
+		if (in_array('quality_contract', $blockers, true)) {
+			return 'Качество текста ниже редакционного порога. Действие: открой и оцени, отправь на регенерацию или отклони.';
+		}
+		if (in_array('selection_reject', $blockers, true) || $selection_decision === 'reject') {
+			return 'Селектор отбраковал материал по редакционному фильтру (community-promo / hub-страница / paywall и т.п.). Действие: проверь — если отбраковка ошибочна, нажми "Опубликовать"; если корректная — "Удалить".';
+		}
+		if ($reason === 'stage_attempt_limit_unknown') {
+			return 'Worker крашнулся в середине обработки и watchdog освободил слот. Действие: нажми "Регенерировать" — все стадии перезапустятся с нуля. Если ошибка повторится трижды — открой и проверь источник.';
+		}
+		if (str_starts_with($reason, 'stage_attempt_limit_')) {
+			$stage_name = substr($reason, strlen('stage_attempt_limit_'));
+			return sprintf(
+				'Стадия "%s" не сошлась за две попытки. Действие: открой и посмотри последний blocker; если технический — нажми "Регенерировать", если содержательный — отклони.',
+				$stage_name
+			);
+		}
+		return 'Материал требует ручной проверки. Открой, чтобы увидеть детали и принять решение (опубликовать / отклонить / регенерировать).';
 	}
 
 	private static function queue_progress_percent(object $item): int {

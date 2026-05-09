@@ -15,6 +15,16 @@ final class EPV2_Collector {
 		if (EPV2_Runs::has_recent_started('collect', 300)) {
 			return;
 		}
+		// Backpressure: if the queue already holds more pending items than
+		// the worker can plausibly drain in the next hour, defer this
+		// collect by 10 minutes so we don't pile fresh raw RSS on top of
+		// a backlog the worker still hasn't chewed through. Hard ceiling
+		// of 30 minutes total cumulative defer keeps us from skipping
+		// collects forever if the queue is stuck for a non-throughput
+		// reason (a stale lock, a bad story_card key, etc).
+		if (! $force && self::should_defer_for_backpressure()) {
+			return;
+		}
 		EPV2_Lock_Manager::cleanup();
 		EPV2_Queue::normalize_non_active_recoverable_items();
 		$collect_lock_ttl = max(300, (int) EPV2_Settings::get('job_lock_ttl_seconds', 900));
@@ -191,6 +201,68 @@ final class EPV2_Collector {
 		return [];
 	}
 
+	/**
+	 * Backpressure: skip this collect if the queue's pending pool is
+	 * larger than the worker's effective hourly throughput. We keep a
+	 * cumulative-defer counter in the wp_options so the collector
+	 * doesn't loop indefinitely — after 30 minutes of total deferral
+	 * we collect anyway and reset the counter (the operator probably
+	 * has a stuck row to investigate; new freshness shouldn't suffer
+	 * forever just because one row got jammed).
+	 */
+	private static function should_defer_for_backpressure(): bool {
+		global $wpdb;
+		$pending = (int) $wpdb->get_var(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue
+			 WHERE state IN ('new', 'retry_process', 'processing_de')"
+		);
+		// Effective hourly capacity — measured from real publishing
+		// throughput in the last hour, with a floor based on the
+		// configured publish slot interval (default 5 min → 12/hr).
+		$published_last_hour = (int) $wpdb->get_var($wpdb->prepare(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue
+			 WHERE state = 'published' AND updated_at >= %s",
+			gmdate('Y-m-d H:i:s', time() - HOUR_IN_SECONDS)
+		));
+		$publish_interval = max(3, (int) EPV2_Settings::get('publish_interval_minutes', 5));
+		$capacity_floor = max(6, (int) floor(60 / $publish_interval));
+		$capacity = max($capacity_floor, $published_last_hour);
+		// Pending pool > capacity × 1.5 means even if we publish at
+		// max rate every slot for the next 60 min we still won't
+		// drain. Defer.
+		$threshold = (int) ceil($capacity * 1.5);
+		if ($pending <= $threshold) {
+			delete_option('epv2_collect_backpressure_total_seconds');
+			return false;
+		}
+		$deferred_total = (int) get_option('epv2_collect_backpressure_total_seconds', 0);
+		if ($deferred_total >= 30 * MINUTE_IN_SECONDS) {
+			// We've already deferred 30 minutes cumulatively. Force this
+			// collect to run, reset the counter so the next over-capacity
+			// situation gets its own deferral budget.
+			delete_option('epv2_collect_backpressure_total_seconds');
+			return false;
+		}
+		// Defer 10 minutes — push next attempt forward.
+		update_option(
+			'epv2_collect_backpressure_total_seconds',
+			$deferred_total + (10 * MINUTE_IN_SECONDS),
+			false
+		);
+		update_option(
+			'epv2_collect_backpressure_last',
+			[
+				'pending' => $pending,
+				'capacity' => $capacity,
+				'threshold' => $threshold,
+				'deferred_total_seconds' => $deferred_total + (10 * MINUTE_IN_SECONDS),
+				'at' => current_time('mysql'),
+			],
+			false
+		);
+		return true;
+	}
+
 	private static function automation_requires_publish_grade(): bool {
 		$mode = (string) EPV2_Settings::get('mode', 'semi');
 		$default_status = (string) EPV2_Settings::get('default_post_status', 'draft');
@@ -289,21 +361,41 @@ final class EPV2_Collector {
 				continue;
 			}
 			usort($candidates, static fn(array $a, array $b): int => (int) $b['score'] <=> (int) $a['score']);
+			// Per-source-per-rubric cap with priority gradation. One source
+			// can dominate a rubric otherwise (Reuters-like firehose pushes
+			// 5 politics in a single ingest, Welt-like specialists fill
+			// politics with 5 own pieces). Cap by source.priority:
+			//   top-tier  (priority >= 9): 3 per rubric
+			//   high      (priority >= 7): 2 per rubric
+			//   regular   (priority <  7): 2 per rubric
+			// breaking_candidate / top_story_candidate / decision=priority
+			// items bypass the cap — we never throttle the genuinely-top news.
+			$per_source_count = [];
 			foreach ($candidates as $candidate) {
 				$by_category[$category] = $by_category[$category] ?? 0;
 				if ((int) $by_category[$category] >= $collect_limit) {
 					break;
 				}
-				// Previously this branch broke out of the inner loop after the
-				// first successful ingest, hard-capping every collect pulse to
-				// at most one new row per category regardless of
-				// max_collect_per_category. With max=99 we observed 246 staged
-				// candidates collapsing to only 11 queued. `continue` lets
-				// $collect_limit do its real job; ingest_candidate still runs
-				// dedup / planner / queue gates per item and increments
-				// $by_category[$category] when it accepts.
-				if (self::ingest_candidate((array) $candidate['item'], (object) $candidate['source'], $by_category)) {
+				$source_obj = (object) ($candidate['source'] ?? new stdClass());
+				$source_id = (int) ($source_obj->id ?? 0);
+				$analysis = (array) ($candidate['analysis'] ?? []);
+				$is_top_news = ! empty($analysis['breaking_candidate'])
+					|| ! empty($analysis['top_story_candidate'])
+					|| (string) ($analysis['decision'] ?? '') === 'priority';
+				if (! $is_top_news && $source_id > 0) {
+					$priority = (int) ($source_obj->priority ?? 5);
+					$per_rubric_cap = $priority >= 9 ? 3 : 2;
+					$key = $source_id;
+					$per_source_count[$key] = $per_source_count[$key] ?? 0;
+					if ($per_source_count[$key] >= $per_rubric_cap) {
+						continue;
+					}
+				}
+				if (self::ingest_candidate((array) $candidate['item'], $source_obj, $by_category)) {
 					$count++;
+					if (! $is_top_news && $source_id > 0) {
+						$per_source_count[$source_id] = ($per_source_count[$source_id] ?? 0) + 1;
+					}
 					continue;
 				}
 			}
@@ -665,8 +757,12 @@ final class EPV2_Collector {
 			$cap = 2;
 		}
 
+		// Freshness window — operator request: cap at 80 min globally so
+		// even sources with a 60-min fetch_interval don't pull stories
+		// older than 80 minutes. Per-source intervals shorter than 40 min
+		// keep their own 2× cutoff (e.g., 30-min interval → 60-min window).
 		$fetch_interval_seconds = max(900, (int) ($source->fetch_interval ?? 1800));
-		$cutoff_ts = time() - ($fetch_interval_seconds * 2);
+		$cutoff_ts = time() - min(80 * MINUTE_IN_SECONDS, $fetch_interval_seconds * 2);
 
 		$indexed = [];
 		foreach ($items as $idx => $item) {

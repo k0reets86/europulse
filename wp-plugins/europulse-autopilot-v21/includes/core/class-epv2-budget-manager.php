@@ -502,11 +502,18 @@ final class EPV2_Budget_Manager {
 		];
 		$cards = [
 			'politik' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'source_confidence', 'timeliness', 'informativeness']],
-			'welt' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'international_relevance', 'source_confidence', 'timeliness']],
+			// publish_c raised 40→45: Welt = world news, only the genuinely
+			// resonant stories belong here. Niche-American / military-incident
+			// items now slip from C-review into C-low and never make it past
+			// Story-Card without being top_story_candidate.
+			'welt' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 45, 'dimensions' => ['public_impact', 'international_relevance', 'source_confidence', 'timeliness']],
 			'ukraine' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['war_relevance', 'human_impact', 'source_confidence', 'timeliness']],
 			'europa' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'policy_relevance', 'source_confidence']],
 			'deutschland' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'reader_relevance', 'informativeness']],
-			'wirtschaft' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'ai_delta' => -2, 'queue_delta' => -2, 'dimensions' => ['economic_impact', 'reader_relevance', 'informativeness']],
+			// publish_c raised 40→44: Wirtschaft = business news, mid-grade
+			// economic stories without real public-impact are noise. Boundary
+			// stays B (52); the change pushes weak C-review into C-low.
+			'wirtschaft' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 44, 'ai_delta' => -2, 'queue_delta' => -2, 'dimensions' => ['economic_impact', 'reader_relevance', 'informativeness']],
 			'leben-in-deutschland' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -6, 'queue_delta' => -6, 'dimensions' => ['practical_value', 'reader_relevance', 'source_confidence', 'service_life']],
 			'community' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -6, 'queue_delta' => -6, 'dimensions' => ['community_value', 'reader_relevance', 'practical_value', 'local_fit']],
 			'muenchen' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -4, 'queue_delta' => -4, 'dimensions' => ['local_relevance', 'reader_relevance', 'informativeness', 'freshness']],

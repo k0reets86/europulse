@@ -1120,6 +1120,29 @@ final class EPV2_Queue {
 			if (! $selection_blocked && ! $retry_exhausted && ! $stale_retry) {
 				continue;
 			}
+			// Rescue path: an item that already passes every publish-gate
+			// check should not be quarantined just because its workflow
+			// heartbeat went stale or its retry timer fired. The watchdog
+			// previously treated any expired stale_retry / unknown-stage
+			// row as failed and routed publish-ready items to manual_review,
+			// where they sat invisible and burned tokens on every reset.
+			// If the gate evaluation is `allowed`, promote to ready_publish
+			// so the publisher picks it up on the next slot.
+			if (! $selection_blocked && ! empty($gate['allowed'])) {
+				EPV2_AI_Processor::transition_item_to_ready_publish((int) $item->id, $payload, [
+					'error_message' => '',
+				]);
+				self::clear_active_automation_item((int) $item->id);
+				$result['changed']++;
+				$result['items'][] = [
+					'id' => (int) $item->id,
+					'state' => 'ready_publish',
+					'stage' => $stage,
+					'attempts' => $attempts,
+					'reason' => 'gate_passes_after_stale_or_retry',
+				];
+				continue;
+			}
 			$notes = self::row_notes($item);
 			$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
 			$notes['_system']['workflow_terminal_reason'] = $selection_blocked ? 'selection_publish_blocked' : 'workflow_quarantine';

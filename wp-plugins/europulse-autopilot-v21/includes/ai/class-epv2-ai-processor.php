@@ -266,6 +266,41 @@ final class EPV2_AI_Processor {
 				// pulse can move past the stuck row instead of burning AI on
 				// the next 100 rebuilds. Operator can salvage from review.
 				$existing_attempts = (int) (json_decode((string) ($item->admin_notes ?? ''), true)['_system']['workflow_step_attempts'] ?? 0);
+				// Short-circuit on selection-rejected items. The earlier
+				// rebuild loop kept calling the worker (~5K tokens per run)
+				// even when every prior attempt had _meta.selection.decision
+				// set to "reject" or "low" — selection does not change with
+				// rebuild, so all six-plus retries were guaranteed to fail
+				// at the publish gate. Terminate immediately to rejected
+				// instead of burning AI on a foregone outcome.
+				$existing_selection_decision = sanitize_key((string) ($payload_for_stage['_meta']['selection']['decision'] ?? ''));
+				if (
+					$pipeline_stage === 'rebuild_bundle'
+					&& in_array($existing_selection_decision, ['reject', 'low'], true)
+				) {
+					$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
+					$notes_for_terminal = is_array(json_decode((string) $fresh_item->admin_notes, true)) ? json_decode((string) $fresh_item->admin_notes, true) : [];
+					$notes_for_terminal['_system'] = is_array($notes_for_terminal['_system'] ?? null) ? $notes_for_terminal['_system'] : [];
+					$notes_for_terminal['_system']['workflow_terminal_reason'] = 'selection_publish_blocked';
+					$notes_for_terminal['_system']['workflow_step_status'] = 'terminal';
+					$notes_for_terminal['_system']['workflow_owner_token'] = '';
+					EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+						'admin_notes' => wp_json_encode($notes_for_terminal, JSON_UNESCAPED_UNICODE),
+						'error_message' => sprintf(
+							'Материал снят на rebuild_bundle: предварительный selection decision "%s" не пересматривается перезапуском.',
+							$existing_selection_decision
+						),
+					]);
+					self::log_process_item_step('rebuild_bundle_short_circuit_selection_reject', (int) $item->id, [
+						'run_id' => $run,
+						'selection_decision' => $existing_selection_decision,
+						'attempts_saved' => max(0, 6 - $existing_attempts),
+					]);
+					$count++;
+					$run_payload['processed_item_id'] = (int) $item->id;
+					$run_payload['result'] = 'rebuild_bundle_short_circuit_selection_reject';
+					break;
+				}
 				if (
 					$pipeline_stage === 'rebuild_bundle'
 					&& (string) $workflow_step === 'build_de_master'

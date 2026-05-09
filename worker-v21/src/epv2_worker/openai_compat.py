@@ -25,6 +25,23 @@ def reasoning_extra_body(model: str, max_completion_tokens: int) -> dict[str, An
     return extra
 
 
+def completion_total_tokens(response: Any) -> int:
+    """Return total tokens reported by the OpenAI/DeepSeek response, or 0."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0
+    total = getattr(usage, "total_tokens", None)
+    if total is None:
+        # Some providers omit total_tokens — fall back to prompt+completion.
+        prompt = getattr(usage, "prompt_tokens", 0) or 0
+        completion = getattr(usage, "completion_tokens", 0) or 0
+        total = (prompt or 0) + (completion or 0)
+    try:
+        return max(0, int(total))
+    except (TypeError, ValueError):
+        return 0
+
+
 def completion_text(response: Any) -> str:
     try:
         content = response.choices[0].message.content

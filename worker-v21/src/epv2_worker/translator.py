@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 
-from .openai_compat import completion_debug, completion_text, reasoning_extra_body
+from .openai_compat import completion_debug, completion_text, completion_total_tokens, reasoning_extra_body
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class TranslationResult:
     error: str = ""
     provider: str = ""
     model: str = ""
+    tokens: int = 0
     # Anti-plagiarism gate (architecture phase 3) — translation is also
     # checked against the primary-source text in its source language.
     uniqueness_pct: float = 100.0
@@ -184,6 +185,7 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             lead=lead,
             body=body,
             success=True,
+            tokens=completion_total_tokens(resp),
         )
     except Exception as exc:
         logger.warning("Translation via %s failed: %s", provider, exc)

@@ -78,6 +78,43 @@ final class EPV2_Stats {
 		return is_array($data) ? $data : [];
 	}
 
+	/**
+	 * Pull per-stage AI runtime entries from a worker payload and write them
+	 * to both daily aggregates (ai_tokens column) and per-provider counters
+	 * (epv2_ai_usage_${date} option that the admin Settings page reads).
+	 *
+	 * Worker now emits `_meta.ai_runtime = [{stage, provider, model, tokens}]`
+	 * and `_meta.tokens` total. Each WP-side stage transition that persists
+	 * a worker payload should call this helper once.
+	 */
+	public static function record_payload_ai_usage(array $payload): void {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$runtime = is_array($meta['ai_runtime'] ?? null) ? $meta['ai_runtime'] : [];
+		$payload_total = (int) ($meta['tokens'] ?? 0);
+		$runtime_total = 0;
+		foreach ($runtime as $entry) {
+			if (! is_array($entry)) {
+				continue;
+			}
+			$provider = (string) ($entry['provider'] ?? '');
+			$model = (string) ($entry['model'] ?? '');
+			$stage_tokens = (int) ($entry['tokens'] ?? 0);
+			if ($provider === '' && $model === '') {
+				continue;
+			}
+			if ($stage_tokens > 0) {
+				self::bump_ai_request($provider, $model, $stage_tokens, 0.0);
+				$runtime_total += $stage_tokens;
+			} else {
+				self::bump_ai_request($provider, $model, 0, 0.0);
+			}
+		}
+		$daily_total = $runtime_total > 0 ? $runtime_total : $payload_total;
+		if ($daily_total > 0) {
+			self::bump('ai_tokens', $daily_total);
+		}
+	}
+
 	public static function bump_ai_request(string $provider, string $model, int $tokens = 0, float $cost = 0.0): void {
 		$date = self::today();
 		$key = 'epv2_ai_usage_' . $date;

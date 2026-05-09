@@ -320,7 +320,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     if not rewrite.success:
         ctx.blockers.append(f"Rewrite failed: {rewrite.error}")
         return
-    _record_ai_runtime(ctx, "rewrite_de", rewrite.provider, rewrite.model)
+    _record_ai_runtime(ctx, "rewrite_de", rewrite.provider, rewrite.model, getattr(rewrite, "tokens", 0))
 
     # Anti-plagiarism gate (architecture phase 3) — surface the score.
     # Failure does not block the pipeline yet; the WP-side gate uses the
@@ -375,7 +375,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     if not uk_result.success:
         ctx.blockers.append(f"UK translation failed: {uk_result.error}")
     else:
-        _record_ai_runtime(ctx, "translate_uk", uk_result.provider, uk_result.model)
+        _record_ai_runtime(ctx, "translate_uk", uk_result.provider, uk_result.model, getattr(uk_result, "tokens", 0))
         if not uk_result.uniqueness_passed:
             ctx.warnings.append(
                 f"plagiarism_gate_uk: uniqueness {uk_result.uniqueness_pct:.1f}% < 80%"
@@ -383,7 +383,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     if not en_result.success:
         ctx.blockers.append(f"EN translation failed: {en_result.error}")
     else:
-        _record_ai_runtime(ctx, "translate_en", en_result.provider, en_result.model)
+        _record_ai_runtime(ctx, "translate_en", en_result.provider, en_result.model, getattr(en_result, "tokens", 0))
         if not en_result.uniqueness_passed:
             ctx.warnings.append(
                 f"plagiarism_gate_en: uniqueness {en_result.uniqueness_pct:.1f}% < 80%"
@@ -418,7 +418,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     ctx.german_master.slug = seo.slug
     ctx.german_master.focus_keywords = seo.keywords
     if seo.success:
-        _record_ai_runtime(ctx, "seo_de", seo.provider, seo.model)
+        _record_ai_runtime(ctx, "seo_de", seo.provider, seo.model, getattr(seo, "tokens", 0))
 
 
 # ---------------------------------------------------------------------------
@@ -738,10 +738,18 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
         (str(item.get("provider", "")) for item in runtime if item.get("provider") and item.get("provider") != primary_provider),
         "",
     )
+    total_tokens = 0
+    for entry in runtime:
+        if isinstance(entry, dict):
+            try:
+                total_tokens += max(0, int(entry.get("tokens", 0) or 0))
+            except (TypeError, ValueError):
+                pass
     meta = {
         "provider": primary_provider,
         "model": str(primary_runtime.get("model", "")),
         "ai_runtime": runtime,
+        "tokens": total_tokens,
         "fallback_provider_used": fallback_provider,
         "source_dossier": response.source_dossier or {},
         "source_count": 1 + len((response.source_dossier or {}).get("supporting", []) or []),
@@ -767,9 +775,16 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
     }
 
 
-def _record_ai_runtime(ctx: PipelineContext, stage: str, provider: str, model: str) -> None:
+def _record_ai_runtime(ctx: PipelineContext, stage: str, provider: str, model: str, tokens: int = 0) -> None:
     provider = (provider or "").strip()
     model = (model or "").strip()
     if not provider and not model:
         return
-    ctx.ai_runtime.append({"stage": stage, "provider": provider, "model": model})
+    entry = {"stage": stage, "provider": provider, "model": model}
+    try:
+        tokens_int = max(0, int(tokens))
+    except (TypeError, ValueError):
+        tokens_int = 0
+    if tokens_int:
+        entry["tokens"] = tokens_int
+    ctx.ai_runtime.append(entry)

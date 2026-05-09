@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
-from .openai_compat import completion_debug, completion_text, reasoning_extra_body
+from .openai_compat import completion_debug, completion_text, completion_total_tokens, reasoning_extra_body
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ class RewriteResult:
     error: str = ""
     provider: str = ""
     model: str = ""
+    tokens: int = 0
     # Anti-plagiarism gate (architecture phase 3). Surface the score so
     # callers can log it / decide on regeneration. Default leaves the
     # gate inactive when not computed.
@@ -464,7 +465,9 @@ async def _call_openai(user_prompt: str, api_key: str, source_text: str, max_tok
         raw = completion_text(response)
         if not raw.strip():
             raise ValueError(f"empty OpenAI response ({completion_debug(response)})")
-        return _parse_json_result(raw, source_text)
+        result = _parse_json_result(raw, source_text)
+        result.tokens = completion_total_tokens(response)
+        return result
     except Exception as exc:
         logger.warning("OpenAI rewrite failed: %s", exc)
         return RewriteResult(error=str(exc))
@@ -487,7 +490,9 @@ async def _call_deepseek(user_prompt: str, api_key: str, source_text: str, max_t
             max_tokens=max_tokens,
         )
         raw = response.choices[0].message.content or ""
-        return _parse_json_result(raw, source_text)
+        result = _parse_json_result(raw, source_text)
+        result.tokens = completion_total_tokens(response)
+        return result
     except Exception as exc:
         logger.warning("DeepSeek rewrite failed: %s", exc)
         return RewriteResult(error=str(exc))

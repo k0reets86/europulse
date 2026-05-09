@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from openai import AsyncOpenAI
 
-from .openai_compat import completion_debug, completion_text, reasoning_extra_body
+from .openai_compat import completion_debug, completion_text, completion_total_tokens, reasoning_extra_body
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class SEOResult:
     success: bool = False
     provider: str = ""
     model: str = ""
+    tokens: int = 0
 
 
 _SYSTEM = """Du bist ein SEO-Experte für die Nachrichtenplattform EuroPulse.today.
@@ -138,6 +139,7 @@ async def _call(user_prompt: str, api_key: str, provider: str, model: str) -> SE
             slug=_slugify(str(data.get("slug", ""))),
             keywords=[str(k) for k in data.get("keywords", [])[:10]],
             success=True,
+            tokens=completion_total_tokens(resp),
         )
     except Exception as exc:
         logger.warning("SEO generation via %s failed: %s", provider, exc)

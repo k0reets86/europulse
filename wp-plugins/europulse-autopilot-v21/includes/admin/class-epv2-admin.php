@@ -758,7 +758,12 @@ final class EPV2_Admin {
 			//    (operator decision / archive). Blank them so the row
 			//    is dominated by the action_hint and the actual
 			//    operator buttons.
-			$show_metrics = ! in_array($row_state, ['manual_review', 'rejected', 'error', 'duplicate', 'published'], true);
+			// Published rows KEEP metric badges so the operator can scan
+			// for outliers ("did all 5 published items get release=88?").
+			// Warning text in "Что не ок" stays suppressed for published
+			// (the per-row queue_light_issue_list already takes care of
+			// that) since after-the-fact warnings aren't actionable.
+			$show_metrics = ! in_array($row_state, ['manual_review', 'rejected', 'error', 'duplicate'], true);
 			$show_state_label = ! in_array($row_state, ['manual_review', 'rejected', 'error', 'duplicate', 'published'], true);
 			$dash = '<span style="color:#8c8f94">—</span>';
 			echo '<tr>';

@@ -576,89 +576,133 @@ def _extract_bing_redirect_target(redirect_url: str) -> str:
     return ""
 
 
-async def _search_supporting_sources_rich(
-    key_phrases: list[str],
-    primary_url: str,
-    limit: int = 5,
+async def _bing_news_query(
+    client: "httpx.AsyncClient",
+    query: str,
 ) -> list[dict[str, str]]:
-    """Phase 2.7 — return structured supporting-source entries for the
-    rewriter dossier.
-
-    Each entry has ``url``, ``title`` and ``domain``. The rewriter prompt
-    consumes these via dossier_block so it can write multi-source
-    synthesis with named attribution per fact.
-
-    Source: Bing News RSS. We previously used Google News RSS but its
-    item links are redirect URLs to ``news.google.com/rss/articles/CBMi…``
-    that cannot be dereferenced without solving Google's consent banner
-    plus decoding an opaque encrypted protobuf. Bing News RSS, by
-    contrast, exposes the publisher URL plainly in the ``url=`` query
-    parameter of its ``apiclick.aspx`` redirect, so we get real outlet
-    URLs the rewriter can cite and the publish gate can count.
+    """Run one Bing News RSS query and return raw item dicts:
+    ``[{redirect_url, title, source_name}, ...]`` for the caller to
+    dedupe + dereference. Returns [] on any failure so callers can
+    keep stacking queries.
     """
-    if not key_phrases:
+    if not query.strip():
         return []
     try:
-        import httpx
         from urllib.parse import quote_plus
-        query = quote_plus(" ".join(key_phrases[:3]))
-        url = f"https://www.bing.com/news/search?q={query}&format=RSS"
-        async with httpx.AsyncClient(timeout=12) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        url = f"https://www.bing.com/news/search?q={quote_plus(query)}&format=RSS"
+        resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code != 200:
             return []
         import re
         items = re.findall(r"<item>(.*?)</item>", resp.text, flags=re.S)
-        primary_host = ""
-        try:
-            primary_host = urlparse(primary_url).netloc.lower()
-        except Exception:
-            pass
-
-        seen_hosts: set[str] = set()
-        if primary_host:
-            seen_hosts.add(primary_host)
-
-        result: list[dict[str, str]] = []
+        out: list[dict[str, str]] = []
         for block in items:
             link_match = re.search(r"<link>([^<]+)</link>", block)
             title_match = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", block, flags=re.S)
-            # Bing's RSS uses a custom <News:Source> element for the
-            # publisher name; fall back to legacy <source> if absent.
             source_match = re.search(r"<News:Source>([^<]+)</News:Source>", block)
             if source_match is None:
                 source_match = re.search(r"<source[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</source>", block, flags=re.S)
             if not link_match:
                 continue
-            redirect_link = html.unescape(link_match.group(1).strip())
-            # Bing wraps the publisher URL in ?url=... — extract.
-            link = _extract_bing_redirect_target(redirect_link) or redirect_link
-            if link == primary_url or not _usable_supporting_url(link):
-                continue
-            try:
-                host = urlparse(link).netloc.lower()
-            except Exception:
-                continue
-            if not host or host in seen_hosts:
-                continue
-            # Skip aggregator hosts that are not real publishers; the
-            # rewriter cannot honestly attribute facts to them.
-            if "bing.com" in host or "news.google.com" in host:
-                continue
-            seen_hosts.add(host)
+            redirect = html.unescape(link_match.group(1).strip())
             title = html.unescape((title_match.group(1) if title_match else "").strip())
             source_name = html.unescape((source_match.group(1) if source_match else "").strip())
-            domain = source_name or host.replace("www.", "")
-            result.append({
-                "url": link,
-                "title": title,
-                "domain": domain,
-            })
-            if len(result) >= limit:
-                break
-        return result
+            out.append({"redirect": redirect, "title": title, "source_name": source_name})
+        return out
     except Exception:
         return []
+
+
+async def _search_supporting_sources_rich(
+    key_phrases: list[str],
+    primary_url: str,
+    limit: int = 5,
+) -> list[dict[str, str]]:
+    """Return structured supporting-source entries for the rewriter
+    dossier — what a journalist would do by hand: take the headline /
+    key phrases and hunt down the same story on independent outlets,
+    BBC / Al Jazeera / Reuters / et al, reading enough versions to
+    cross-check facts.
+
+    Implementation: progressive Bing News RSS searches with widening
+    keyword breadth until at least ``limit`` distinct publishers are
+    collected (or the strategy list is exhausted). Each Bing item link
+    is the publisher URL hidden inside an ``apiclick.aspx?url=…``
+    redirect — extracted in plain text, no consent gymnastics.
+    Strategies in order of specificity:
+
+      1. Top three key phrases joined.
+      2. Top two key phrases joined.
+      3. The single strongest phrase.
+      4. The strongest phrase plus the second one ("entity action"
+         shape, broader recall).
+
+    A run stops as soon as ``limit`` unique non-aggregator publishers
+    are gathered.
+    """
+    if not key_phrases:
+        return []
+    primary_host = ""
+    try:
+        primary_host = urlparse(primary_url).netloc.lower()
+    except Exception:
+        pass
+
+    seen_hosts: set[str] = set()
+    if primary_host:
+        seen_hosts.add(primary_host)
+
+    strategies: list[str] = []
+    if len(key_phrases) >= 3:
+        strategies.append(" ".join(key_phrases[:3]))
+    if len(key_phrases) >= 2:
+        strategies.append(" ".join(key_phrases[:2]))
+    if key_phrases:
+        strategies.append(key_phrases[0])
+    if len(key_phrases) >= 2:
+        strategies.append(f"{key_phrases[0]} {key_phrases[1]}")
+    # Dedupe strategies preserving order (some may collapse on short phrases).
+    seen_q: set[str] = set()
+    unique_strategies = []
+    for q in strategies:
+        q_clean = q.strip()
+        if q_clean and q_clean not in seen_q:
+            seen_q.add(q_clean)
+            unique_strategies.append(q_clean)
+
+    result: list[dict[str, str]] = []
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=12) as client:
+            for query in unique_strategies:
+                if len(result) >= limit:
+                    break
+                hits = await _bing_news_query(client, query)
+                for hit in hits:
+                    if len(result) >= limit:
+                        break
+                    redirect = hit["redirect"]
+                    link = _extract_bing_redirect_target(redirect) or redirect
+                    if link == primary_url or not _usable_supporting_url(link):
+                        continue
+                    try:
+                        host = urlparse(link).netloc.lower()
+                    except Exception:
+                        continue
+                    if not host or host in seen_hosts:
+                        continue
+                    if "bing.com" in host or "news.google.com" in host:
+                        continue
+                    seen_hosts.add(host)
+                    domain = hit["source_name"] or host.replace("www.", "")
+                    result.append({
+                        "url": link,
+                        "title": hit["title"],
+                        "domain": domain,
+                    })
+    except Exception:
+        pass
+    return result
 
 
 def _clean_original_text(raw: str) -> str:

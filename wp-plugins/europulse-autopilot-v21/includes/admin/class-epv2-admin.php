@@ -745,14 +745,30 @@ final class EPV2_Admin {
 		foreach ($items as $item) {
 			$categories = self::normalize_selected_categories((string) ($item->category_final ?: $item->category_proposed));
 			$category_label = $categories !== [] ? implode(', ', array_map([self::class, 'category_label'], $categories)) : '—';
+			$row_state = sanitize_key((string) ($item->state ?? ''));
+			// Per-block column relevance:
+			//  - В работе / Готово к публикации / ready_review: ALL metrics
+			//    (priority + quality + SEO + готовность + media) are
+			//    actionable signal.
+			//  - Новые: AI hasn't run yet — scores are zero anyway, so
+			//    badges naturally render as "—".
+			//  - Ручная проверка / Отклонённые / Опубликованные: scores
+			//    were computed in some past run but are no longer
+			//    actionable; the block serves a different purpose
+			//    (operator decision / archive). Blank them so the row
+			//    is dominated by the action_hint and the actual
+			//    operator buttons.
+			$show_metrics = ! in_array($row_state, ['manual_review', 'rejected', 'error', 'duplicate', 'published'], true);
+			$show_state_label = ! in_array($row_state, ['manual_review', 'rejected', 'error', 'duplicate', 'published'], true);
+			$dash = '<span style="color:#8c8f94">—</span>';
 			echo '<tr>';
 			echo '<td><input class="epv2-queue-check" data-block="' . esc_attr($table_type) . '" type="checkbox" name="ids[]" value="' . (int) $item->id . '"></td>';
 			echo '<td>' . (int) $item->id . '</td>';
-			echo '<td>' . esc_html(self::queue_light_state_label($item)) . '</td>';
-			echo '<td>' . self::queue_light_priority_badge($item) . '</td>';
-			echo '<td>' . self::queue_light_metric_badge(self::queue_light_quality_score($item), 'quality') . '</td>';
-			echo '<td>' . self::queue_light_metric_badge(self::queue_light_seo_score($item), 'seo') . '</td>';
-			echo '<td>' . self::queue_light_release_badge(self::queue_light_release_score($item), self::queue_light_google_score($item)) . '</td>';
+			echo '<td>' . ($show_state_label ? esc_html(self::queue_light_state_label($item)) : $dash) . '</td>';
+			echo '<td>' . ($show_metrics ? self::queue_light_priority_badge($item) : $dash) . '</td>';
+			echo '<td>' . ($show_metrics ? self::queue_light_metric_badge(self::queue_light_quality_score($item), 'quality') : $dash) . '</td>';
+			echo '<td>' . ($show_metrics ? self::queue_light_metric_badge(self::queue_light_seo_score($item), 'seo') : $dash) . '</td>';
+			echo '<td>' . ($show_metrics ? self::queue_light_release_badge(self::queue_light_release_score($item), self::queue_light_google_score($item)) : $dash) . '</td>';
 			echo '<td>' . self::queue_light_media_summary($item) . '</td>';
 			echo '<td>' . self::queue_light_issue_summary(self::queue_light_issue_list($item)) . '</td>';
 			echo '<td>' . esc_html(wp_trim_words((string) ($item->original_title ?? ''), 12, '')) . '</td>';

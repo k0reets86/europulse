@@ -886,24 +886,45 @@ final class EPV2_AI_Processor {
 					&& empty($analysis['breaking_candidate'])
 					&& empty($analysis['breaking_watch'])
 				) {
-					$deferred_notes = [
+					// Operator-approved A: don't park reject/low items in
+					// 'new' for 2 hours waiting for a maintenance scan to
+					// flip them to rejected. The Story-Card analysis was
+					// already paid for; selection has its verdict; spinning
+					// the row through retry/maintenance only clutters the
+					// queue and confuses the operator. Mark rejected
+					// immediately with a hard-terminal phrasing so the
+					// soft_terminal_state_guard doesn't rescue it.
+					$terminal_notes = [
 						'selection' => $analysis,
 						'gate' => $gate,
 						'_system' => [
-							'workflow_not_before' => gmdate('Y-m-d H:i:s', time() + (2 * HOUR_IN_SECONDS)),
-							'retry_after' => gmdate('Y-m-d H:i:s', time() + (2 * HOUR_IN_SECONDS)),
-							'workflow_step' => '',
-							'workflow_step_status' => '',
+							'workflow_terminal_reason' => 'selection_publish_blocked',
+							'workflow_step_status' => 'terminal',
+							'workflow_owner_token' => '',
+							'workflow_heartbeat_at' => '',
+							'quarantine_reason' => 'selection_' . $fresh_selection_decision,
 						],
 					];
-					EPV2_Queue::mark_state((int) $item->id, 'new', [
-						'error_message' => 'Отложено предварительным отбором: низкий publish-приоритет; не отклонено, ждёт следующего окна или ручного решения.',
-						'admin_notes' => wp_json_encode($deferred_notes, JSON_UNESCAPED_UNICODE),
+					EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+						'error_message' => sprintf(
+							'Материал снят: предварительный publish-priority "%s" не пересматривается перезапуском.',
+							$fresh_selection_decision
+						),
+						'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
 					]);
 					EPV2_Queue::clear_active_automation_item((int) $item->id);
+					if (class_exists('EPV2_Learning_Journal')) {
+						EPV2_Learning_Journal::record('quarantine_rejected', (int) $item->id,
+							'selection_' . $fresh_selection_decision,
+							[
+								'score' => (int) ($analysis['score'] ?? 0),
+								'category' => (string) ($analysis['category'] ?? ''),
+							]
+						);
+					}
 					$count++;
 					$run_payload['processed_item_id'] = (int) $item->id;
-					$run_payload['result'] = 'deferred_by_preselection';
+					$run_payload['result'] = 'rejected_by_preselection';
 					break;
 				}
 				if ($reused_existing_context) {

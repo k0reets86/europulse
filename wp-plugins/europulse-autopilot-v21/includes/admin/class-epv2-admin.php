@@ -1216,6 +1216,12 @@ final class EPV2_Admin {
 		if (in_array($state, ['ready_publish', 'retry_publish'], true)) {
 			return 95;
 		}
+		// Terminal-from-the-pipeline-perspective rows (operator decision
+		// pending) should not show a "running" progress percent. The
+		// hint already explains what to do; the bar would lie.
+		if (in_array($state, ['manual_review', 'rejected', 'error', 'duplicate'], true)) {
+			return 0;
+		}
 		$step = sanitize_key((string) ($system['workflow_step'] ?? ''));
 		$status = sanitize_key((string) ($system['workflow_step_status'] ?? ''));
 		$map = [
@@ -1250,6 +1256,20 @@ final class EPV2_Admin {
 		if (in_array($state, ['ready_publish', 'retry_publish'], true)) {
 			$deferred_label = self::queue_deferred_publish_label($item, $system, false);
 			return $deferred_label !== '' ? mb_strtolower($deferred_label) : 'ждёт слот публикации';
+		}
+		// Match progress_percent: terminal-pending rows stop the running
+		// label too. Stage label aligns with the action_hint below.
+		if ($state === 'manual_review') {
+			return 'ждёт ручного решения';
+		}
+		if ($state === 'rejected') {
+			return 'отклонено';
+		}
+		if ($state === 'duplicate') {
+			return 'дубликат';
+		}
+		if ($state === 'error') {
+			return 'ошибка обработки';
 		}
 		$attempt_label = self::queue_finish_attempt_label($system);
 		$live_status = trim((string) ($system['live_status'] ?? ''));

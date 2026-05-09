@@ -3392,6 +3392,19 @@ final class EPV2_Queue {
 		if (self::workflow_is_terminal_state($state)) {
 			return $state;
 		}
+		// Manual review is a deliberate human-decision state — do NOT
+		// upgrade it to ready_publish based on payload completeness. The
+		// admin queue, action hint, progress bar, and force-publish
+		// button all rely on the row reading as 'manual_review' here so
+		// they show consistent text. Without this branch the row reads
+		// as 'ready_publish' (because payload happens to pass the
+		// publish-ready check) while every other UI element keeps the
+		// raw manual_review semantics — operator sees a "Готов к
+		// публикации" header above a "Не наша тема" hint with a force-
+		// publish button. Pick one truth.
+		if ($state === 'manual_review') {
+			return 'manual_review';
+		}
 		if ($state === 'ready_publish' || $state === 'retry_publish' || $state === 'publishing') {
 			return 'ready_publish';
 		}

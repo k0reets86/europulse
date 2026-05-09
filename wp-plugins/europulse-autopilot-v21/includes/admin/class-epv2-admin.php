@@ -3745,7 +3745,19 @@ final class EPV2_Admin {
 	private static function admin_script(): string {
 		$model_map = wp_json_encode(EPV2_Settings::ai_model_options(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 		$usage_map = wp_json_encode(EPV2_Stats::ai_usage_today(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-		$queue_snapshot_url = wp_json_encode(wp_nonce_url(admin_url('admin-ajax.php?action=epv2_queue_snapshot'), 'epv2_queue_snapshot'), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+		// wp_nonce_url() returns the URL with `&amp;` HTML-escaped between
+		// the existing query params and the appended `_wpnonce`. When the
+		// resulting string is injected into JS and parsed by `new URL()`,
+		// the `&amp;_wpnonce` is read as a parameter named `amp;_wpnonce`
+		// — meaning no `_wpnonce` reaches the server and every snapshot
+		// request returns 403. Decode the entity before serializing.
+		$queue_snapshot_url = wp_json_encode(
+			html_entity_decode(
+				wp_nonce_url(admin_url('admin-ajax.php?action=epv2_queue_snapshot'), 'epv2_queue_snapshot'),
+				ENT_QUOTES | ENT_HTML5
+			),
+			JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+		);
 		$script = <<<'JS'
 jQuery(function($){
   const epv2QueueSnapshotUrl = __EPV2_QUEUE_SNAPSHOT_URL__;

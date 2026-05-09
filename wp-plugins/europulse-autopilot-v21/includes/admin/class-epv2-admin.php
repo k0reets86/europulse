@@ -3517,16 +3517,15 @@ final class EPV2_Admin {
 			'manual_kind' => '',
 			'user_state' => $user_state,
 		];
-		if (self::orchestrator_v2_ui_enabled() && $item && self::is_recoverable_queue_item($item)) {
-			if ((int) ($item->id ?? 0) === self::active_queue_item_id()) {
-				return 'Сейчас это единственный активный материал. Система должна довести его до готовности к публикации, прежде чем взять следующий.';
-			}
-			return 'Материал ждёт своей очереди и останется в списке новых, пока не освободится единственный рабочий слот.';
-		}
+		// Specific states first — otherwise the `is_recoverable_queue_item`
+		// branch eats ready_publish/publishing rows and tells the operator
+		// they "останутся в списке новых" while the row sits in "Готов к
+		// публикации". Specific-to-general ordering keeps the hint
+		// consistent with the column header above the row.
 		if ($item && in_array($user_state, ['ready_publish', 'publishing'], true)) {
 			return 'Материал полностью готов и ждёт ближайшего автоматического цикла публикации.';
 		}
-		if ($item && self::is_recoverable_queue_item($item)) {
+		if ($item && in_array($user_state, ['new', 'active'], true)) {
 			if ((int) ($item->id ?? 0) === self::active_queue_item_id()) {
 				return 'Сейчас это единственный активный материал. Система должна довести его до готовности к публикации, прежде чем взять следующий.';
 			}

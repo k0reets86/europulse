@@ -777,17 +777,6 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
                 total_tokens += max(0, int(entry.get("tokens", 0) or 0))
             except (TypeError, ValueError):
                 pass
-    # Persist content_kind from the request input so PHP gates do not
-    # have to recompute the kind on every queue snapshot. PHP-side
-    # `EPV2_Content_Kinds::detect_kind` already cached this value on
-    # the existing payload before the worker call; we propagate it back
-    # so it stays cached across the worker round-trip.
-    propagated_kind = ""
-    existing_payload = getattr(req, "existing_payload", None) or {}
-    if isinstance(existing_payload, dict):
-        existing_meta = existing_payload.get("_meta") or {}
-        if isinstance(existing_meta, dict):
-            propagated_kind = str(existing_meta.get("content_kind") or "")
     meta = {
         "provider": primary_provider,
         "model": str(primary_runtime.get("model", "")),
@@ -805,8 +794,6 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
         "blockers": list(response.blockers or []),
         "canonical_language": "de",
     }
-    if propagated_kind:
-        meta["content_kind"] = propagated_kind
 
     return {
         "languages": languages,

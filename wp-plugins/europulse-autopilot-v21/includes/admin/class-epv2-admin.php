@@ -643,6 +643,7 @@ final class EPV2_Admin {
 		$active_items = $active_id > 0 ? self::queue_light_rows_by_ids([$active_id]) : [];
 		$new_items = self::queue_light_rows_by_states(['new', 'retry_process', 'ready_review', 'reserve', 'processing_de'], 30, [$active_id]);
 		$publish_items = self::queue_light_rows_by_states(['ready_publish', 'retry_publish', 'publishing'], 30);
+		$manual_review_items = self::queue_light_rows_by_states(['manual_review'], 30);
 		$rejected_items = self::queue_light_rows_by_states(['rejected', 'error', 'duplicate'], 30);
 		$published_items = self::queue_light_rows_by_states(['published'], 30);
 		$automation_paused = EPV2_Jobs::automation_paused();
@@ -655,6 +656,7 @@ final class EPV2_Admin {
 			'automation_paused' => $automation_paused,
 			'next_publish' => $next_publish,
 		]);
+		self::render_light_queue_section('Ручная проверка', $manual_review_items, 'manual_review');
 		self::render_light_queue_section('Отклонённые', $rejected_items, 'rejected');
 		self::render_light_queue_section('Опубликованные материалы', $published_items, 'published');
 		return (string) ob_get_clean();

@@ -139,7 +139,18 @@ async def process(req: ProcessRequest, x_epv2_worker_token: str = Header(default
         )
         result = await run_pipeline(worker_req)
         response = result.to_dict()
-        response["payload"] = build_normalized_payload(result)
+        normalized = build_normalized_payload(result)
+        # Propagate content_kind from the request payload back to the
+        # normalized response so PHP-side EPV2_Content_Kinds::detect_kind
+        # hits its cache on subsequent gate evaluations and the kind
+        # does not silently drift between worker round-trips.
+        existing_meta = (req.existing_payload or {}).get("_meta") if isinstance(req.existing_payload, dict) else {}
+        propagated_kind = ""
+        if isinstance(existing_meta, dict):
+            propagated_kind = str(existing_meta.get("content_kind") or "")
+        if propagated_kind and isinstance(normalized.get("_meta"), dict):
+            normalized["_meta"]["content_kind"] = propagated_kind
+        response["payload"] = normalized
         return JSONResponse(content=response)
     except Exception as exc:
         logger.exception("Pipeline error for item_id=%s", req.queue_id or req.item_id)

@@ -3311,6 +3311,12 @@ final class EPV2_Admin {
 		if ($item && (string) ($item->state ?? '') === 'manual_review') {
 			return self::manual_review_action_hint($item);
 		}
+		// Rejected — same one-glance principle: explain what the editorial
+		// filter said in plain Russian so the operator can spot mistakes
+		// and override before deletion.
+		if ($item && (string) ($item->state ?? '') === 'rejected') {
+			return self::rejected_action_hint($item);
+		}
 		$classification = $item ? EPV2_Queue::workflow_classification_for_row($item) : [
 			'class' => '',
 			'reason' => '',
@@ -3398,6 +3404,72 @@ final class EPV2_Admin {
 			);
 		}
 		return 'Материал требует ручной проверки. Открой, чтобы увидеть детали и принять решение (опубликовать / отклонить / регенерировать).';
+	}
+
+	/**
+	 * Plain-Russian explanation for a rejected row, focused on what the
+	 * editorial filter actually objected to + whether the operator can
+	 * override (most rejections are reversible by promoting manually).
+	 */
+	private static function rejected_action_hint(object $item): string {
+		$err = (string) ($item->error_message ?? '');
+		$err_lc = mb_strtolower($err);
+		$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+		$notes = is_array($notes) ? $notes : [];
+		$sys = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$reason = (string) ($sys['quarantine_reason'] ?? '');
+		$payload = self::queue_cached_payload($item);
+		$selection_decision = sanitize_key((string) ($payload['_meta']['selection']['decision'] ?? ''));
+		$selection_reasons = (array) ($payload['_meta']['selection']['reasons'] ?? []);
+
+		// Hard editorial / shape rejections — these don't make sense to override.
+		if (mb_stripos($err_lc, 'duplicate') !== false || mb_stripos($err_lc, 'дублик') !== false) {
+			return 'Дубликат уже опубликованного материала. Оставь как есть — публикация второго экземпляра вредит SEO.';
+		}
+		if (mb_stripos($err_lc, 'hub_page') !== false || mb_stripos($err_lc, 'meta_index_page') !== false) {
+			return 'Это страница-каталог / рубрика-агрегатор источника, а не отдельная новость. Удали — публиковать нечего.';
+		}
+		if (mb_stripos($err_lc, 'paywall_only') !== false) {
+			return 'Источник вернул только заглушку платного доступа. Полного текста нет — публиковать нечего.';
+		}
+		if (mb_stripos($err_lc, 'stale_time_sensitive') !== false) {
+			return 'Привязанная ко времени новость устарела пока стояла в очереди (live-ticker / breaking, который уже неактуален). Удали.';
+		}
+		if (mb_stripos($err_lc, 'sport_fixture') !== false) {
+			return 'Спортивный календарь / расписание матчей — нерелевантный шум. Удали.';
+		}
+		if (mb_stripos($err_lc, 'community_promo') !== false) {
+			return 'Самопромо коммьюнити-объявление, не редакционная новость. Удали.';
+		}
+		if (mb_stripos($err_lc, 'routine_official') !== false) {
+			return 'Рутинный пресс-релиз ведомства без новостной ценности. Удали.';
+		}
+		if (mb_stripos($err_lc, 'context_reject') !== false) {
+			return 'Контекстный фильтр зарезал — тема дублирует свежеопубликованные материалы или не соответствует региональной повестке. Если считаешь нужным — нажми "Опубликовать", иначе удали.';
+		}
+
+		// Selection algorithm verdicts — reversible by operator click.
+		if ($selection_decision === 'reject' || mb_stripos($err_lc, 'selection decision "reject"') !== false) {
+			$why = $selection_reasons !== []
+				? implode('; ', array_slice(array_filter(array_map('strval', $selection_reasons)), 0, 2))
+				: '';
+			$why_part = $why !== '' ? ' Селектор написал: "' . $why . '".' : '';
+			return 'Редакционный селектор счёл тему слабой для нашей аудитории (не европейская повестка / нишевый американский сюжет / однотипный новостной шум).' . $why_part . ' Если ошибся — нажми "Опубликовать".';
+		}
+		if ($selection_decision === 'low' || mb_stripos($err_lc, 'selection decision "low"') !== false) {
+			return 'Селектор оценил материал как маловажный (рутина без европейской привязки). Если важно — нажми "Опубликовать", иначе удали.';
+		}
+
+		// Importance-score floor.
+		if (mb_stripos($err_lc, 'ниже порога') !== false) {
+			return 'Importance score ниже порога (30/100). Это редкие или нишевые темы; обычно правильно отклонять, но если узнал ценность — "Опубликовать".';
+		}
+
+		if (str_starts_with($reason, 'stage_attempt_limit_')) {
+			return 'Технические повторы стадии не сошлись и importance оказалось низким. Открой и реши вручную, либо удали.';
+		}
+
+		return 'Материал отбракован автоматическим фильтром. Открой, чтобы увидеть, что именно не подошло — и при необходимости опубликовать вручную.';
 	}
 
 	private static function queue_progress_percent(object $item): int {

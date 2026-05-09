@@ -56,6 +56,7 @@ final class EPV2_Admin {
 		add_action('admin_post_epv2_prune_queue', [self::class, 'prune_queue']);
 		add_action('admin_post_epv2_queue_to_publish', [self::class, 'queue_to_publish']);
 		add_action('admin_post_epv2_publish_now', [self::class, 'publish_now']);
+		add_action('admin_post_epv2_force_publish', [self::class, 'force_publish']);
 		add_action('admin_post_epv2_review_ready_publish', [self::class, 'review_ready_publish']);
 		add_action('admin_post_epv2_save_review', [self::class, 'save_review']);
 		add_action('admin_post_epv2_regenerate_field', [self::class, 'regenerate_field']);
@@ -767,6 +768,19 @@ final class EPV2_Admin {
 			if (in_array((string) ($item->state ?? ''), ['ready_publish', 'retry_publish', 'ready_review'], true)) {
 				echo '<a class="button button-small" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_publish_now&id=' . (int) $item->id), 'epv2_publish_now_' . (int) $item->id)) . '">Опубликовать</a> ';
 			}
+			// Force-publish override for rejected / manual_review rows.
+			// Sets _meta.manual_mode=true so the publish gate accepts the
+			// row regardless of selection_decision = low/reject and pushes
+			// it to the next ready_publish slot. If real content blockers
+			// remain (no media, broken language), it routes to manual_review
+			// with a clear note instead of silently failing.
+			if (in_array((string) ($item->state ?? ''), ['rejected', 'manual_review'], true)) {
+				$force_url = wp_nonce_url(
+					admin_url('admin-post.php?action=epv2_force_publish&id=' . (int) $item->id),
+					'epv2_force_publish_' . (int) $item->id
+				);
+				echo '<a class="button button-small button-primary" href="' . esc_url($force_url) . '" onclick="return confirm(\'Опубликовать материал в обход редакторского фильтра?\')" style="background:#a04400;border-color:#7a3300;color:#fff;margin-right:4px">⚡ Опубликовать всё равно</a> ';
+			}
 			if ((string) ($item->state ?? '') === 'published') {
 				$edit_url = self::queue_post_edit_url($item);
 				if ($edit_url !== '') {
@@ -1117,14 +1131,31 @@ final class EPV2_Admin {
 
 	private static function queue_light_issue_list(object $item): array {
 		$issues = [];
+		$state = (string) ($item->state ?? '');
 		$error = trim((string) ($item->error_message ?? ''));
-		if ($error !== '') {
+		// For rejected and manual_review rows we DON'T want the raw
+		// technical error string ("Материал снят на rebuild_bundle:
+		// предварительный selection decision...") cluttering the issue
+		// list — the action_hint rendered below the row already says
+		// the same thing in plain Russian. Only show error_message for
+		// non-terminal states (where it's actually informative about
+		// the in-progress run).
+		if ($error !== '' && ! in_array($state, ['rejected', 'manual_review', 'error'], true)) {
 			$issues[] = $error;
 		}
 		$quality_score = self::queue_light_quality_score($item);
 		$seo_score = self::queue_light_seo_score($item);
 		$release_score = self::queue_light_release_score($item);
 		$google_score = self::queue_light_google_score($item);
+		// Same suppression for the soft quality warnings on terminal rows:
+		// they're noise once the row is done; the operator either accepts
+		// or rejects, not "tunes" the score.
+		if (in_array($state, ['rejected', 'manual_review', 'error'], true)) {
+			$quality_score = 0;
+			$seo_score = 0;
+			$release_score = 0;
+			$google_score = 0;
+		}
 		if ($quality_score > 0 && $quality_score < 90) {
 			$issues[] = 'редакционное качество ниже нормы';
 		}
@@ -1862,6 +1893,88 @@ final class EPV2_Admin {
 			}
 		}
 		wp_safe_redirect(admin_url('admin.php?page=epv2-queue'));
+		exit;
+	}
+
+	/**
+	 * Force-publish a row that the editorial selector or workflow gates
+	 * had blocked. Stamps `_meta.manual_mode = true` so the publish gate
+	 * accepts the row regardless of selection_decision = low/reject, and
+	 * pushes it straight into ready_publish for the next slot. If the
+	 * row genuinely lacks publish-grade content (no media, missing
+	 * languages), we route to manual_review with a clear note so the
+	 * operator can finish it by hand. No silent failures.
+	 */
+	public static function force_publish(): void {
+		$id = (int) ($_GET['id'] ?? 0);
+		check_admin_referer('epv2_force_publish_' . $id);
+		self::require_manage_capability();
+		$item = EPV2_Queue::get_item($id);
+		if (! $item) {
+			wp_safe_redirect(admin_url('admin.php?page=epv2-queue&queue_notice=force_publish_missing'));
+			exit;
+		}
+		$payload = EPV2_Review::decode_payload((string) ($item->ai_payload ?? ''));
+		if (! is_array($payload)) {
+			$payload = [];
+		}
+		$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$payload['_meta']['manual_mode'] = true;
+		$payload['_meta']['manual_override_reason'] = 'operator_force_publish';
+		$payload['_meta']['manual_override_at'] = gmdate('Y-m-d H:i:s');
+		// Re-evaluate the publish gate WITH manual_mode flag now set.
+		$gate = EPV2_Publish_Gate::evaluate($item, $payload, [
+			'context' => 'publish',
+			'force' => true,
+		]);
+		// Persist the manual_mode flag regardless of outcome so any
+		// later automatic re-eval also sees the override.
+		$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+		$notes = is_array($notes) ? $notes : [];
+		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$notes['_system']['manual_override'] = 'force_publish';
+		$notes['_system']['manual_override_at'] = gmdate('Y-m-d H:i:s');
+		// Selection blockers are bypassed by manual_mode. Other blockers
+		// (media_contract, payload_contract, missing language) are real
+		// content issues — don't push items with no body or no photo
+		// onto the live site.
+		$blockers = (array) ($gate['blockers'] ?? []);
+		$selection_only = $blockers !== [] && array_values(array_filter($blockers, static function ($b) {
+			return ! in_array($b, [
+				'selection_reject',
+				'selection_low',
+				'selection_blocked',
+				'enrichment_required',
+				'sources_below_kind_minimum',
+				'publish_not_due',
+				'context_reject',
+				'stale_context',
+			], true);
+		})) === [];
+		if ($blockers === [] || $selection_only) {
+			// Reset publish_not_before so the row is immediately due.
+			$notes['_system']['publish_not_before'] = time() - 1;
+			$notes['_system']['ready_publish_at'] = gmdate('Y-m-d H:i:s');
+			EPV2_Queue::mark_state($id, 'ready_publish', [
+				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+				'error_message' => '',
+			]);
+			wp_safe_redirect(admin_url('admin.php?page=epv2-queue&queue_notice=force_published'));
+			exit;
+		}
+		// Real publishability blocker — route to manual_review so the
+		// operator gets a clear instruction and the existing fix-up
+		// hooks (regenerate / attach media) become available.
+		EPV2_Queue::mark_state($id, 'manual_review', [
+			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+			'error_message' => sprintf(
+				'Принудительная публикация невозможна: остались блокеры контента (%s). Открой материал и доделай руками либо отклони.',
+				implode(', ', array_slice($blockers, 0, 3))
+			),
+		]);
+		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&queue_notice=force_publish_pending'));
 		exit;
 	}
 

@@ -2134,6 +2134,17 @@ final class EPV2_Queue {
 		'meta_index_page',
 		'hub_page',
 		'paywall_only',
+		// Selection algorithm verdicts: an item the worker scored as
+		// `reject` or `low` should not be salvaged into ready_review by
+		// the soft-terminal guard. Selection does not change with a
+		// rebuild — recycling these only burns AI tokens and clogs the
+		// admin manual-review bucket.
+		'selection decision "reject"',
+		'selection decision "low"',
+		'selection_publish_blocked',
+		'selection_reject',
+		'selection_low',
+		'не пересматривается перезапуском',
 	];
 
 	/**

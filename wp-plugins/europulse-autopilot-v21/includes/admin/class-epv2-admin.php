@@ -1140,17 +1140,18 @@ final class EPV2_Admin {
 		// the same thing in plain Russian. Only show error_message for
 		// non-terminal states (where it's actually informative about
 		// the in-progress run).
-		if ($error !== '' && ! in_array($state, ['rejected', 'manual_review', 'error'], true)) {
+		if ($error !== '' && ! in_array($state, ['rejected', 'manual_review', 'error', 'published'], true)) {
 			$issues[] = $error;
 		}
 		$quality_score = self::queue_light_quality_score($item);
 		$seo_score = self::queue_light_seo_score($item);
 		$release_score = self::queue_light_release_score($item);
 		$google_score = self::queue_light_google_score($item);
-		// Same suppression for the soft quality warnings on terminal rows:
-		// they're noise once the row is done; the operator either accepts
-		// or rejects, not "tunes" the score.
-		if (in_array($state, ['rejected', 'manual_review', 'error'], true)) {
+		// Suppress soft quality warnings on terminal rows: rejected/
+		// manual_review (the operator either accepts or rejects, not
+		// "tunes" the score) AND published (the article is live, those
+		// warnings are after-the-fact SEO advice, not actionable).
+		if (in_array($state, ['rejected', 'manual_review', 'error', 'published'], true)) {
 			$quality_score = 0;
 			$seo_score = 0;
 			$release_score = 0;

@@ -1585,6 +1585,20 @@ final class EPV2_Admin {
 
 	private static function queue_next_publish_timestamp(array $items): int {
 		$next_publish = (int) (self::fallback_next_publish_from_items($items, false) ?: 0);
+		// Header timer cap (operator-feedback 2026-05-11): publisher fires
+		// every publish_interval_minutes (default 5). Если items staggered
+		// (item1 slot+0, item2 slot+5, item3 slot+10), fallback возвращает
+		// earliest items' publish_not_before — может быть >5 min away.
+		// Это для UX странно: "interval=5 → timer 10 min".
+		// Cap header timer к next_publish_slot_after(now). Реальное
+		// staggering сохраняется per-item labels; header показывает
+		// «когда publisher next fire'нет».
+		if ($next_publish > 0) {
+			$next_slot = (int) EPV2_Jobs::next_publish_slot_after(time());
+			if ($next_slot > 0 && $next_slot < $next_publish) {
+				$next_publish = $next_slot;
+			}
+		}
 		return max(0, $next_publish);
 	}
 

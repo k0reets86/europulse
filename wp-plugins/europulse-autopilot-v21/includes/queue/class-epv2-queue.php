@@ -1515,10 +1515,26 @@ final class EPV2_Queue {
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 		$capped_limit = max(1, min(500, $limit));
+		// 2026-05-11 short-circuit (operator-feedback): items с AI verdict
+		// `selection.decision='low'` или 'reject' включаются в quarantine
+		// candidates уже на attempts>=1. AI editorial verdict стабилен
+		// между worker calls на тех же исходниках — повторные retries не
+		// меняют решение, а только сжигают tokens (наблюдали 18 items в
+		// manual_review с attempts=3-4, каждый burnt 2-3 worker calls).
+		// Downstream rescue logic (card.publishable_estimate=high/medium
+		// или ingest_score>=40) сохранит legit items от reject, route'нув
+		// их в manual_review для operator decision. Без rescue → straight
+		// rejected.
 		$items = $wpdb->get_results($wpdb->prepare(
 			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
 			 WHERE state IN ('new', 'retry_process')
-			   AND CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) >= 2
+			   AND (
+			     CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) >= 2
+			     OR (
+			       CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) >= 1
+			       AND LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.selection.decision')), '')) IN ('low','reject')
+			     )
+			   )
 			 ORDER BY CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) DESC,
 			          updated_at DESC
 			 LIMIT %d",
@@ -1558,6 +1574,13 @@ final class EPV2_Queue {
 				self::recent_process_attempt_count((int) $item->id, $stage, 24 * HOUR_IN_SECONDS)
 			);
 			$selection_blocked = empty($gate['selection_publishable']);
+			// Capture initial AI verdict BEFORE card-rescue logic — нужен
+			// для short-circuit short_circuit_selection_low ниже.
+			$ai_selection_low = false;
+			$ai_decision = sanitize_key((string) ($payload['_meta']['selection']['decision'] ?? ''));
+			if (in_array($ai_decision, ['low', 'reject'], true)) {
+				$ai_selection_low = true;
+			}
 			// Don't quarantine items whose ingest score / upfront story
 			// card already cleared the publish bar. The worker's rebuild
 			// drift can briefly relabel `_meta.selection.decision` as low
@@ -1582,7 +1605,14 @@ final class EPV2_Queue {
 			$retry_exhausted = $stage !== '' && $attempts >= $limit_for_stage;
 			$retry_at = self::workflow_not_before_timestamp($item);
 			$stale_retry = $retry_at > 0 && $retry_at < (time() - 15 * MINUTE_IN_SECONDS);
-			if (! $selection_blocked && ! $retry_exhausted && ! $stale_retry) {
+			// Short-circuit (2026-05-11): AI selection=low/reject стабилен
+			// между worker calls на тех же исходниках. После attempts>=1
+			// нет смысла ждать retry_exhausted (limit=2-3) — сразу force
+			// terminal. Rescue logic выше уже решил selection_blocked vs
+			// not, downstream logic правильно route'нет (manual_review для
+			// rescued / rejected для non-rescued).
+			$short_circuit_selection_low = $ai_selection_low && $attempts >= 1;
+			if (! $selection_blocked && ! $retry_exhausted && ! $stale_retry && ! $short_circuit_selection_low) {
 				continue;
 			}
 			// Rescue path: an item that already passes every publish-gate

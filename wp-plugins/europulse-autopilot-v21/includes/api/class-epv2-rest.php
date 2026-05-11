@@ -357,6 +357,21 @@ final class EPV2_REST {
 		// каждым maintenance тиком — admin (heavy path лимитирован 80 items по
 		// created_at) больше не вытесняет manual_review/ready_publish из видимости.
 		$cleanup['trimmed_terminal_rows'] = EPV2_Queue::trim_old_terminal_items(80);
+		// Stale 'new' items prune (operator-feedback 2026-05-11): run в
+		// maintenance loop тоже, не только в collect cycle. Когда hard cap
+		// блокирует collect, stale items не pruned → backlog растёт. Now
+		// pruned regardless of collect status.
+		$ttl_hours = max(1, (int) EPV2_Settings::get('queue_new_ttl_hours', 12));
+		$cleanup['pruned_new_stale'] = EPV2_Queue::prune_new_stale($ttl_hours);
+		// trim_new_queue (operator-feedback 2026-05-11): run в maintenance loop
+		// тоже, чтобы queue cap (queue_new_max_per_category / per_source)
+		// держал steady-state. Раньше trim вызывался только из collect cycle
+		// → при hard-cap-blocked collect, items накапливались выше cap'ов
+		// без trim. Now trim в каждом maintenance tick.
+		$cleanup['trimmed_new_queue'] = EPV2_Queue::trim_new_queue(
+			max(1, (int) EPV2_Settings::get('queue_new_max_per_category', 8)),
+			max(1, (int) EPV2_Settings::get('queue_new_max_per_source', 6))
+		);
 		// Phase 3 watchdogs (architecture audit section 3): three background
 		// safety nets — stuck-item release, Polylang link repair, dedup of
 		// published posts. All idempotent, all return small status arrays.

@@ -2836,11 +2836,15 @@ final class EPV2_Queue {
 		// 50+ hours in 'new' forever.
 		global $wpdb;
 		$hours = max(1, min(168, $hours));
+		// GREATEST(created_at, updated_at) — items returning к 'new' через
+		// retry_process keep original created_at, но updated_at refreshes.
+		// Без GREATEST recently-retried items pruned «as stale» сразу. Items
+		// действительно неактивные имеют оба timestamp старые.
 		$ids = $wpdb->get_col($wpdb->prepare(
 			"SELECT id FROM {$wpdb->prefix}epv2_queue
 			 WHERE state = 'new'
-			   AND created_at < DATE_SUB(NOW(), INTERVAL %d HOUR)
-			 ORDER BY created_at ASC
+			   AND GREATEST(created_at, updated_at) < DATE_SUB(NOW(), INTERVAL %d HOUR)
+			 ORDER BY GREATEST(created_at, updated_at) ASC
 			 LIMIT 100",
 			$hours
 		));
@@ -2913,7 +2917,28 @@ final class EPV2_Queue {
 			}
 		}
 
-		return 0;
+		// CRITICAL bug fix 2026-05-11: function только строила $delete_ids,
+		// никогда не executed DELETE → caps queue_new_max_per_category и
+		// queue_new_max_per_source были декоративными. Items копились
+		// freely до hard cap (200).
+		// Actual delete now performed. Items NOT хороших качества (low score
+		// per should_keep_in_queue OR exceeding cap) → DELETE из state='new'.
+		// Items в других states (already processing, published, manual_review)
+		// не trim'нутся — выборка на state='new' выше.
+		$deleted_count = 0;
+		if ($delete_ids !== []) {
+			$delete_ids = array_values(array_unique(array_map('intval', $delete_ids)));
+			$placeholders = implode(',', array_fill(0, count($delete_ids), '%d'));
+			$deleted_count = (int) $wpdb->query($wpdb->prepare(
+				"DELETE FROM {$wpdb->prefix}epv2_queue
+				 WHERE state = 'new' AND id IN ({$placeholders})",
+				...$delete_ids
+			));
+			if ($deleted_count > 0 && class_exists('EPV2_Logger')) {
+				EPV2_Logger::info('queue', "trim_new_queue: deleted $deleted_count items (caps {$max_per_category}/{$max_per_source})");
+			}
+		}
+		return $deleted_count;
 	}
 
 	private static function score_from_row(array $row): int {

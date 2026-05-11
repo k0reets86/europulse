@@ -2646,6 +2646,13 @@ final class EPV2_Queue {
 		// иначе soft-terminal guard конвертирует rejection в ready_review,
 		// и item возвращается в processing цикл через ai_publish_finish_resume.
 		'предварительный publish-priority',
+		// Promotional / sponsored / paid content — operator preference 2026-05-11:
+		// "Anzeige:", sponsored sections, paid promotional не должны попадать
+		// в pipeline. Без hard-terminal, soft guard салвейджит technically-built
+		// payload в ready_publish и публикует рекламу.
+		'promotional',
+		'sponsored content',
+		'sponsored/paid',
 	];
 
 	/**

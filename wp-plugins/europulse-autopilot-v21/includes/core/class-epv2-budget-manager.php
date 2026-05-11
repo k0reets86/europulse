@@ -1449,6 +1449,16 @@ final class EPV2_Budget_Manager {
 			'/^\p{Lu}[\p{L}\p{N}\säöüß-]{2,30}\s*[-–]\s*\p{Lu}[\p{L}\p{N}\säöüß-]{2,30}\s*[:—]\s*(?:tor\b|spielbericht|liveticker|live-blog|kicker|highlights)/iu',
 			// Tourism/lifestyle puff: «Wunder von X», «Mode-Metropole», «Reise-Tipps».
 			'/\b(?:das\s+wunder\s+von|mode-metropole|reise[-\s]?tipps?|wochenend[-\s]?tipps?|sehenswürdigkeit\w*|gastro-?tipp\w*)\b/iu',
+			// Photo gallery markers (operator feedback 2026-05-11): photo
+			// galleries без news-substance. Strict tightening — only exact
+			// phrases that are unambiguously photo gallery headers, not just
+			// "bilder" in random context.
+			'/\b(?:die\s+welt\s+in\s+bildern|bildersafari|bilder\s+des\s+tages|fotostrecke|bildergalerie|bildgeschichte\s+der\s+woche)\b/iu',
+			// Celebrity Familienfotos pattern — specific (Sandra Bullock
+			// 2026-05-11 case): «X teilt Familienfotos» / «Familienfotos
+			// von X». Very narrow — only fires when "teilt Familienfotos"
+			// or "Familienfotos von" — won't false-positive on legit news.
+			'/\bteilt\s+familienfotos?\b|\bfamilienfotos?\s+(?:auf\s+instagram|von\s+[A-ZÄÖÜ])/iu',
 			// Glossen/Kolumnen/Kommentare — opinion, не news.
 			'/^(?:kommentar|kolumne|glosse|leitartikel|editorial|meinung)\s*[:—-]/iu',
 			// Lottery / numerical-only pages: «Zu den aktuellen Lottozahlen»,

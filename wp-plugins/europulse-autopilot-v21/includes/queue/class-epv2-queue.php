@@ -2818,7 +2818,41 @@ final class EPV2_Queue {
 	}
 
 	public static function prune_new_stale(int $hours = 18): int {
-		return 0;
+		// Stale 'new' items: collected but never processed by orchestrator
+		// внутри TTL window — usually because heuristic skipped them
+		// (decision='low'), worker was unavailable when their turn came,
+		// or backpressure deferred collect long enough that they aged out.
+		// Mark as rejected с hard-terminal reason так что soft_terminal_guard
+		// не resurrect'нет их в ready_review. Bug fix 2026-05-11:
+		// function was a no-op (return 0), allowing items to accumulate
+		// 50+ hours in 'new' forever.
+		global $wpdb;
+		$hours = max(1, min(168, $hours));
+		$ids = $wpdb->get_col($wpdb->prepare(
+			"SELECT id FROM {$wpdb->prefix}epv2_queue
+			 WHERE state = 'new'
+			   AND created_at < DATE_SUB(NOW(), INTERVAL %d HOUR)
+			 ORDER BY created_at ASC
+			 LIMIT 100",
+			$hours
+		));
+		if (! is_array($ids) || $ids === []) {
+			return 0;
+		}
+		$pruned = 0;
+		foreach ($ids as $id) {
+			$id = (int) $id;
+			if ($id <= 0) continue;
+			// hard_editorial token блокирует soft_terminal_state_guard salvage
+			self::mark_state($id, 'rejected', [
+				'error_message' => 'hard_editorial — TTL exceeded: item collected but never processed within ' . $hours . 'h window',
+			]);
+			$pruned++;
+		}
+		if ($pruned > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "prune_new_stale: $pruned items rejected (>={$hours}h in 'new')");
+		}
+		return $pruned;
 	}
 
 	public static function trim_new_queue(int $max_per_category = 8, int $max_per_source = 10): int {

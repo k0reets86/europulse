@@ -82,6 +82,11 @@ class RewriteResult:
     title_de: str = ""
     lead_de: str = ""
     body_de: str = ""
+    # Carded lead-magnet — eine einzelne, geschlossene Schlagzeilenzeile
+    # für Karten auf der Startseite. 110–130 Zeichen, keine Abkürzungen,
+    # keine offenen Sätze. Wird vom Rewriter zusätzlich zum Lead generiert
+    # und durch den Übersetzer in UK/EN überführt.
+    card_lead_de: str = ""
     success: bool = False
     error: str = ""
     provider: str = ""
@@ -122,6 +127,78 @@ FAKTENREGELN (gegen Halluzinationen):
 - Tiefer faktischer Rewrite — kein Nacherzählen, keine Erfindungen.
 - Alle harten Fakten (Datum, Uhrzeit, Ort, Zahlen, Namen, Funktionen, Zitate, Kausalitäten)
   stammen ausschließlich aus dem Original, der Story-Card oder den Schlüsselbegriffen.
+
+ZAHLEN UND EINHEITEN — KRITISCH (gegen Pattern «17,8 Euro» вместо «17,8 Mrd Euro»):
+- Wenn Original eine Zahl mit Einheit nennt («3,5 Milliarden Euro», «17,8 Mrd»,
+  «41 Prozent», «100 Tausend», «5 Mio Dollar», «800 km»), übertrage SOWOHL
+  Zahl als auch Einheit. NIE Einheit weglassen. «17,8» ohne «Milliarden» —
+  абсурд (получается 17 Euro вместо миллиардов).
+- Bei Verlustzahlen Krieg / Statistiken: год/период обязательно («350.000
+  bis Ende 2025», не просто «350.000»). Иначе данные кажутся свежими, но
+  отражают исторический период.
+- Wenn Original gibt einen Zeitraum («bis Mai 2023», «in den letzten 12
+  Monaten»), übertrage этот Zeitraum в текст. Nicht einfach «aktuell»
+  schreiben.
+
+AKTEUR-KOHÄRENZ — KRITISCH (gegen Pattern «новый PM описан как часть старой
+системы»):
+- Wenn die Story über Machtwechsel, Sturz, Umsturz oder Reformbewegung
+  ist: der NEUE Akteur ist OPPONENT alter Strukturen, NICHT Teil davon.
+- Beispiel: «Magyar löst Orbán ab» bedeutet Magyar GEGEN Orbán-System,
+  nicht «Magyar in der Tradition der Orbán-Loyalisten».
+- Wenn Original und Story-Card von «Systemwechsel», «Abwahl», «Umbruch»
+  sprechen — der neue Akteur trägt diese Veränderung, ist nicht ihr Teil.
+- Lies Story-Card.entities_people[*].role и .editorial_match сорок раз
+  чтобы понять кто протагонист, кто антагонист.
+
+NAMEN UND FUNKTIONEN — KEINE ERFINDUNGEN:
+- NIEMALS Namen einer Person erfinden, die im Original nicht steht. Wenn
+  «der designierte Ministerpräsident» — schreibe «der designierte
+  Ministerpräsident» (allgemein), NICHT «Cem Özdemir» из общего знания.
+- NIEMALS Rollen / Funktionen erfinden («Bundeskanzler X» wenn Original
+  nur «X» sagt — und X ist eigentlich nur Abgeordneter).
+- NIEMALS Politiker mit Aktivitäten verbinden, die Original nicht erwähnt
+  («Brown wird in die Regierung geholt» — wenn Original nur sagt «Starmer
+  sucht Erfahrung», ohne konkrete Person).
+
+RUSSLAND-UKRAINE — verbindliche redaktionelle Linie (KEINE Ausnahmen):
+EuroPulse berichtet über Russlands vollumfänglichen Angriffskrieg gegen die Ukraine
+seit Februar 2022. Russland ist der Aggressor. Das ist kein Standpunkt, sondern Fakt.
+- PFLICHT-Vokabular: „Russlands Angriffskrieg", „russische Aggression", „russische Besatzer",
+  „Kriegsverbrechen", „Russlands Raketenangriffe", „Wladimir Putin / Kremlchef Putin".
+- VERBOTEN: „Spannungen zwischen den beiden Ländern", „Konflikt" allein ohne Aggressor,
+  „Streit", „bilaterale Krise", „Eskalation" als Zustand, „beide Seiten" als gleichwertig,
+  „mutmaßlich" wenn Russland selbst zugibt.
+- Spekulationen wie „dies könnte zeigen, dass die Beziehungen angespannt sind", „möglicherweise…",
+  „dies deutet auf Annäherung hin" sind in jedem militärischen / kriegsbezogenen Kontext
+  STRENG VERBOTEN — nur konkrete Fakten ohne weichspülende Interpretation.
+- Wenn die Quelle eine neutralisierende Formulierung verwendet — KORRIGIEREN, nicht übernehmen.
+- VERBOTEN: framing einer Putin-Einladung an Selenskyj nach Moskau als
+  «Möglichkeit, in die russische Hauptstadt zu reisen» oder «Selenskyj hat
+  die Möglichkeit». Это war-time peace overture от агрессора. Korrekte
+  Formulierung: «Putin hat Selenskyj nach Moskau eingeladen — eine
+  Provokation, da russische Truppen weiter ukrainisches Territorium
+  besetzen» oder ähnlich. Никогда не описывать поездку лидера-жертвы в
+  столицу агрессора als nüchterne Optionsfrage.
+
+ABLEHNUNG / ZURÜCKWEISUNG BEWAHREN — KRITISCH (gegen Pattern «softening»):
+- Wenn Quelle prägnante Ablehnung enthält («Kyiv rejected», «impossible»,
+  «Moscow = capital of aggressor state», «not acceptable»), übertrage diese
+  Ablehnung in voller Stärke. NIE softeneть в «X считает Optionen» /
+  «keine weiteren Details bekannt» / «mögliche Reise» / «Reaktionen
+  gemischt».
+- Wenn Quelle Aggressor-Status explizit nennt («aggressor state», «country
+  of aggressor», «Россия — страна-агрессор»), эту атрибуцию ОБЯЗАТЕЛЬНО
+  переносить в текст. Дропать её для «нейтрального тона» — undermined
+  editorial position EuroPulse.
+- Beispiele правильного перевода:
+  ✓ «Київ отверг встречу в Москве, столице государства-агрессора» →
+    «Kyiv lehnt Treffen in Moskau ab — der Hauptstadt des Aggressorstaats»
+  ✗ «Zelensky hat die Möglichkeit, in die russische Hauptstadt zu reisen»
+  ✗ «keine weiteren Details zu seiner möglichen Reise»
+- Если у источника conflict / war involves clear aggressor-victim, в нашем
+  тексте это distinction ОБЯЗАТЕЛЬНО видно. «Beide Seiten» / «Konflikt» /
+  «Streit» — VERBOTEN.
 - Relative Zeitangaben („gestern", „morgen", „am Abend") nicht in konkrete Kalenderdaten
   umrechnen, außer das Original nennt ein genaues Datum.
 - Keine erfundenen Jahreszahlen, Hintergründe, Organisationen, Teilnehmer, Zitate,
@@ -134,6 +211,9 @@ FAKTENREGELN (gegen Halluzinationen):
 
 STRUKTUR DES BODY:
 - Kurze Absätze (40–90 Wörter). Maschinen lesen Absatzanfänge zuerst.
+- JEDER Absatz braucht mindestens 3 vollständige Sätze und mindestens
+  1 KONKRETEN Fakt (Name, Datum, Zahl, Ort, Funktion, wörtliches Zitat).
+  Absatz mit nur 1 Satz oder ohne harte Fakten ist VERBOTEN.
 - Wenn der Stoff es trägt: 2–3 H2-Zwischenüberschriften zur Gliederung längerer Texte
   (Format: <h2>Untertitel</h2>). Eine H2 reicht aber nie als reines Keyword-Stuffing —
   sie soll inhaltlich den nächsten Absatz beschreiben.
@@ -141,12 +221,78 @@ STRUKTUR DES BODY:
   Such-Indexierung und Entitäts-Erkennung.
 - Letzten Absatz für Einordnung / Kontext / Folgen, falls die Quelle das hergibt.
 
+ANTI-FÜLLTEXT-REGELN (gegen leeren, "weichen" Text):
+- VERBOTEN, weil sie nichts sagen:
+  * „Diese Entscheidung könnte … beeinflussen / hat Folgen für …" ohne konkrete
+    benannte Folge mit Zahl/Datum/Akteur.
+  * „Mögliche Konsequenzen / mögliche Auswirkungen / könnte sich auswirken auf"
+    als Spekulation ohne Quelle.
+  * „Eine offizielle Bestätigung / weitere Informationen liegen noch nicht vor"
+    als Absatz-Inhalt — solche Meta-Sätze gehören NICHT in den Body. Wenn die
+    Quelle dünn ist: körzer schreiben, nicht Lücken mit „noch nicht bekannt"
+    füllen.
+  * „Diese Entwicklung wirft Fragen auf", „Es bleibt abzuwarten", „Die Lage
+    bleibt angespannt", „Beobachter sehen darin …" — alles raus.
+  * Wiederholungen des Titels in anderen Worten („Der Bundestag plant den
+    Ausstieg" → später „Der Plan zum Ausstieg des Bundestags …"). Jeder
+    Absatz muss NEUE Information bringen.
+- ERLAUBT (und gewünscht), wenn die Quelle es hergibt:
+  * Hintergrund: warum diese Entscheidung jetzt — vorhergehende Beschlüsse,
+    Haushaltslage mit konkreten Zahlen, frühere Kostenexplosionen.
+  * Beteiligte Akteure mit Funktion: „Bundestags-Bauausschuss-Vorsitzender
+    [Name] (CDU)", „Haushaltsausschuss unter [Name] (Grüne)" — nicht nur
+    „der Ausschuss".
+  * Konkrete Zahlen aus der Quelle: Gesamtkosten, Kostensteigerung in %,
+    bisher ausgegebene Summen, Termine.
+  * Reaktionen mit Quellen-Attribution: „[Person], [Funktion], [Quelle]:
+    ‚wörtliches Zitat'."
+  * Nächster Schritt mit Datum, falls genannt: „Die Entscheidung soll bis
+    [Datum] fallen."
+
+WENN DIE QUELLE DÜNN IST (kurze Pressemitteilung, knapper Bericht):
+- Schreibe lieber 150 dichte Wörter als 400 verwässerte. Brief = brief.
+- KEINE Spekulationen, KEINE allgemeinen Zusammenhänge ohne Quellenbeleg,
+  KEINE „könnte / möglicherweise / dürfte"-Sätze.
+- Wenn die Story nur 3 harte Fakten hat, schreibe genau diese 3 Fakten —
+  nicht 8 Sätze um sie herum.
+
 OUTPUT-FORMAT:
-Ausgabe ausschließlich als gültiges JSON mit den Feldern: title, lead, body.
+Ausgabe ausschließlich als gültiges JSON mit den Feldern: title, lead, card_lead, body.
 - title: 50–80 Zeichen, faktisch, kein Clickbait, Hauptkeyword möglichst weit vorn.
 - lead: 1–2 Sätze, beantwortet Wer/Was/Wann/Wo, ohne Wiederholung des Titels.
+- card_lead: GENAU EIN vollständiger, geschlossener Satz, 110–130 Zeichen.
+  Karten-Lead-Magnet für die Startseite — er muss ohne weiteres Lesen Sinn
+  ergeben und Lust auf den Artikel machen. NICHT identisch zum Lead, NICHT
+  identisch zum Titel. KEINE Abkürzungen mit Punkt im Inneren („8. Mai",
+  „z. B.", „St. Petersburg", „10. Juli" — bitte ausschreiben oder umformulieren).
+  KEIN Satz, der mit Präposition / Konjunktion / Artikel / Hilfsverb endet.
+  KEINE drei Punkte am Ende — der Satz schließt mit einem klassischen Punkt,
+  Frage- oder Ausrufezeichen ab. Eigennamen vollständig (Vor- und Nachname,
+  oder Funktion + Nachname), niemals abgeschnitten.
+  KEINE QUELLENANGABE im card_lead — keine Phrasen wie „Wie X berichtet",
+  „nach Angaben von X", „X zufolge", „laut X", „X mitteilt". Die Quelle
+  gehört in den Body-Text, nicht in den Karten-Hook. Der card_lead muss
+  die Nachricht selbst tragen, nicht die Tatsache dass sie irgendwo gemeldet
+  wurde.
 - body: HTML-Absätze (<p>...</p>) plus optionale <h2>Zwischenüberschrift</h2>;
-  keine Markdown-Sterne, keine Listen außer wenn die Quelle eine echte Liste enthält."""
+  keine Markdown-Sterne, keine Listen außer wenn die Quelle eine echte Liste enthält.
+
+ABSOLUT VERBOTEN — der erste Satz des body darf NICHT eine umformulierte
+Variante des Titels sein. Konkret:
+- Wenn Titel mit "Bundestag plant Ausstieg aus …" beginnt, darf body NICHT
+  mit "Der Bundestag plant, sich aus … zurückzuziehen" anfangen.
+- Wenn Titel mit "X kritisiert Y" beginnt, darf body NICHT mit "X äußerte
+  Kritik an Y" oder "X hat Y kritisiert" anfangen.
+Der erste Satz body MUSS einen anderen Aufhänger setzen — ein konkretes
+Detail, eine Reaktion, ein Hintergrundfakt, ein Datum, ein Ort, ein Zitat,
+oder eine Folge der Nachricht. Titel sagt WAS, body-Anfang setzt KONTEXT.
+Der lead-Satz steht zwischen Titel und body-Anfang — er muss alle drei
+Ebenen unterscheiden: Titel (kurze Schlagzeile) → lead (1-2 Sätze
+Wer/Was/Wann/Wo) → body-Anfang (konkretes Detail, KEIN Echo des Titels).
+
+Lead darf NICHT leer sein. Lead ist ein vollständiger, abgeschlossener
+Satz (oder zwei kurze) der die Nachricht zusammenfasst, ohne Titel-Worte
+zu wiederholen."""
 
 
 def _format_story_card_block(card: dict | None) -> str:
@@ -225,6 +371,29 @@ def _format_story_card_block(card: dict | None) -> str:
             hint_bits.append(f"Länge={length_profile_hint}")
         if hint_bits:
             parts.append("Rewrite-Hinweise: " + ", ".join(hint_bits))
+    editorial_match = str(card.get("editorial_match") or "").strip().lower()
+    if editorial_match:
+        editorial_reason = str(card.get("editorial_reason") or "").strip()
+        ed_line = f"Redaktionelle Einordnung: {editorial_match}"
+        if editorial_reason:
+            ed_line += f" — {editorial_reason}"
+        if editorial_match == "match":
+            ed_line += ". Tonfall: konfident, klar, journalistisch — Story passt redaktionell ohne Hedging."
+        elif editorial_match == "borderline":
+            ed_line += ". Tonfall: nüchterner, weniger Eigeninterpretation — Story ist redaktionell grenzwertig, lieber zurückhaltend."
+        elif editorial_match == "reject_low_value":
+            ed_line += ". WARNUNG: Story passt redaktionell nicht — wenn dennoch geschrieben wird, knapp halten und keinen Mehrwert vortäuschen."
+        parts.append(ed_line)
+    estimate = str(card.get("publishable_estimate") or "").strip().lower()
+    if estimate:
+        estimate_line = f"Publish-Erwartung: {estimate}"
+        if estimate in ("high", "medium"):
+            estimate_line += " — Story trägt selbständig; ausreichend Substanz für vollständigen Artikel."
+        elif estimate == "low":
+            estimate_line += " — Substanz dünn; lieber kompakt halten, keine Padding-Sätze."
+        elif estimate == "reject":
+            estimate_line += " — Substanz unzureichend; nur knapp das Faktische, keine Auslegung."
+        parts.append(estimate_line)
     if not parts:
         return ""
     return (
@@ -335,7 +504,7 @@ Faktenregeln:
 - Bei dünner Quelle keine allgemeine Bedeutung aufblasen. Keine Sätze wie „Die Geschichte ist wichtig, weil ...".
 - Unbekannte Details weglassen, nicht auffüllen.
 - Primärquelle (oben angegeben) bei erster Erwähnung mit Formel nennen: „Wie [Quelle] berichtet, …" o. ä.
-Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "body": "vollständiger Artikel"}}"""
+Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "card_lead": "ein einziger geschlossener Satz, 110–130 Zeichen, ohne Abkürzungen, für die Startseiten-Karte", "body": "vollständiger Artikel"}}"""
 
     source_text = f"{original_title}\n{original_content}"
 
@@ -423,10 +592,83 @@ def _safe_ultrathin_rewrite(original_title: str, original_content: str, source_u
         title_de=title_core or title,
         lead_de=lead,
         body_de="\n\n".join(paragraphs),
+        # Ultrathin-Quellen haben keinen separaten Karten-Lead — der Mu-Plugin-
+        # Fallback rendert weiterhin aus dem post_excerpt.
+        card_lead_de="",
         success=True,
         provider="deterministic",
         model="ultrathin-source-guard",
     )
+
+
+_CARD_LEAD_MIN_LEN = 60
+_CARD_LEAD_MAX_LEN = 200
+
+# Source-attribution patterns — verboten im card_lead. Atributtion gehört
+# in den Body, der Karten-Hook trägt die Nachricht selbst.
+_CARD_LEAD_SOURCE_ATTRIBUTION_RE = re.compile(
+    r"(?ix)"  # case-insensitive, verbose
+    r"(?:^|[\s,;—–-])("
+    # German
+    r"wie\s+[A-ZÄÖÜ][\w\.\-]+\s+(?:berichtet|meldet|mitteilt|schreibt|erkl[äa]rt)"
+    r"|nach\s+angaben\s+(?:von|der|des)\s+[A-ZÄÖÜ]"
+    r"|nach\s+informationen\s+(?:von|der|des)\s+[A-ZÄÖÜ]"
+    r"|laut\s+[A-ZÄÖÜ][\w\.\-]+"
+    r"|[A-ZÄÖÜ][\w\.\-]+\s+zufolge"
+    r"|wie\s+(?:die|der|das)\s+[A-ZÄÖÜ][\w\.\-]+\s+(?:berichtet|meldet|mitteilt|schreibt)"
+    # English
+    r"|according\s+to\s+[A-Z]"
+    r"|as\s+(?:[A-Z][\w\.\-]+\s+)?reports?"
+    r"|[A-Z][\w\.\-]+\s+reports?"
+    r"|sources?\s+say"
+    r"|per\s+[A-Z][\w\.\-]+"
+    # Ukrainian / Russian
+    r"|за\s+повідомленням(?:и)?\s+[А-ЯЇІЄҐA-Z]"
+    r"|як\s+повідомля[єют][а-яїієґ]*\s+[А-ЯЇІЄҐA-Z]"
+    r"|повідомля[єют][а-яїієґ]*\s+[А-ЯЇІЄҐA-Z]"
+    r"|за\s+даними\s+[А-ЯЇІЄҐA-Z]"
+    r"|за\s+словами\s+[А-ЯЇІЄҐA-Z]"
+    r"|пише\s+[А-ЯЇІЄҐA-Z]"
+    r"|інформує\s+[А-ЯЇІЄҐA-Z]"
+    r"|по\s+(?:сообщению|данным|информации)\s+[А-ЯA-Z]"
+    r"|сообщает\s+[А-ЯA-Z]"
+    r")"
+)
+
+
+def _sanitize_card_lead(text: str) -> str:
+    """Validate the AI-generated card_lead. Return "" if it fails the contract,
+    so the mu-plugin renderer falls back to the legacy excerpt path."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<[^>]+>", " ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned.strip("\"'`«»“”„")
+    if not cleaned:
+        return ""
+    length = len(cleaned)
+    if length < _CARD_LEAD_MIN_LEN or length > _CARD_LEAD_MAX_LEN:
+        return ""
+    if cleaned.endswith("…") or cleaned.endswith("..."):
+        return ""
+    if cleaned[-1] not in ".!?":
+        return ""
+    inner = cleaned[:-1]
+    # Truncation guards: число-точка ИЛИ abbrev-точка В КОНЦЕ (без следующего
+    # слова) → trunc'нуло, reject. В середине дата/abbrev допустимы — это
+    # валидный текст («8. Mai 2025», «St. Petersburg», «z. B. dort»). Раньше
+    # любое \b\d+\.\s в середине лида роняло 30-60% AI-output'ов в "".
+    if re.search(r"\b\d+\.\s*$", inner):
+        return ""
+    if re.search(r"\b[A-Za-zÄÖÜäöüß]\.\s*$", inner):
+        return ""
+    # Multi-sentence guard — card_lead должен быть одним предложением.
+    # Pattern: terminal punct + space + uppercase letter = новое sentence.
+    if re.search(r"[.!?]\s+[A-ZÄÖÜА-ЯЇІЄҐ]", inner):
+        return ""
+    if _CARD_LEAD_SOURCE_ATTRIBUTION_RE.search(cleaned):
+        return ""
+    return cleaned
 
 
 def _title_without_section_prefix(title: str) -> str:
@@ -506,6 +748,7 @@ def _parse_json_result(raw: str, source_text: str) -> RewriteResult:
             title_de=str(data.get("title", "")).strip(),
             lead_de=str(data.get("lead", "")).strip(),
             body_de=str(data.get("body", "")).strip(),
+            card_lead_de=_sanitize_card_lead(str(data.get("card_lead", "")).strip()),
             success=True,
         )
         result = _strip_unsupported_first_names(result, source_text)
@@ -595,30 +838,19 @@ _NAME_SKIP_FIRST_WORDS = {
 
 def _strip_unsupported_first_names(result: RewriteResult, source_text: str) -> RewriteResult:
     """Remove model-added first names when the source only gives a surname."""
-    title = _strip_unsupported_first_names_from_text(result.title_de, source_text)
-    lead = _strip_unsupported_first_names_from_text(result.lead_de, source_text)
-    body = _strip_unsupported_first_names_from_text(result.body_de, source_text)
-    return RewriteResult(
-        title_de=title,
-        lead_de=lead,
-        body_de=body,
-        success=result.success,
-        error=result.error,
-        provider=result.provider,
-        model=result.model,
-    )
+    result.title_de = _strip_unsupported_first_names_from_text(result.title_de, source_text)
+    result.lead_de = _strip_unsupported_first_names_from_text(result.lead_de, source_text)
+    result.body_de = _strip_unsupported_first_names_from_text(result.body_de, source_text)
+    result.card_lead_de = _strip_unsupported_first_names_from_text(result.card_lead_de, source_text)
+    return result
 
 
 def _normalize_german_style(result: RewriteResult) -> RewriteResult:
-    return RewriteResult(
-        title_de=_normalize_german_text(result.title_de),
-        lead_de=_normalize_german_text(result.lead_de),
-        body_de=_normalize_german_text(result.body_de),
-        success=result.success,
-        error=result.error,
-        provider=result.provider,
-        model=result.model,
-    )
+    result.title_de = _normalize_german_text(result.title_de)
+    result.lead_de = _normalize_german_text(result.lead_de)
+    result.body_de = _normalize_german_text(result.body_de)
+    result.card_lead_de = _normalize_german_text(result.card_lead_de)
+    return result
 
 
 def _normalize_german_text(text: str) -> str:
@@ -651,15 +883,9 @@ def _strip_unsupported_first_names_from_text(text: str, source_text: str) -> str
 
 
 def _polish_german_source_attribution(result: RewriteResult) -> RewriteResult:
-    return RewriteResult(
-        title_de=result.title_de,
-        lead_de=_move_german_source_attribution(result.lead_de),
-        body_de=_move_german_source_attribution(result.body_de),
-        success=result.success,
-        error=result.error,
-        provider=result.provider,
-        model=result.model,
-    )
+    result.lead_de = _move_german_source_attribution(result.lead_de)
+    result.body_de = _move_german_source_attribution(result.body_de)
+    return result
 
 
 def _move_german_source_attribution(text: str) -> str:

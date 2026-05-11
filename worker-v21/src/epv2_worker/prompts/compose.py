@@ -56,7 +56,14 @@ def compose_rewrite_prompt(
         (
             "AUFGABE: Erstelle einen deutschen Artikel gemäß ALLEN Regeln oben.\n"
             "Antworte NUR mit dem JSON-Objekt — keine Markdown-Codefences, kein Vorwort, kein Nachwort.\n"
-            'Schema: {"title": "...", "lead": "1–2 Sätze Teaser", "body": "vollständiger Artikel"}'
+            "ZUSÄTZLICHES PFLICHTFELD card_lead: GENAU EIN vollständiger geschlossener Satz mit 110–130 Zeichen, "
+            "geschrieben als Karten-Lead-Magnet für die Startseite. Er muss eigenständig Sinn ergeben und Lust auf den Artikel machen. "
+            "KEINE Abkürzungen mit Punkt im Inneren (\"8. Mai\", \"z. B.\", \"St. Petersburg\" verboten — bitte ausschreiben oder umformulieren). "
+            "KEINE drei Punkte am Ende, KEINE offenen Sätze, KEIN Ende auf Präposition / Konjunktion / Artikel / Hilfsverb. "
+            "Der Satz endet mit einem klassischen Punkt, Frage- oder Ausrufezeichen. NICHT identisch zum lead, NICHT identisch zum title. "
+            "KEINE QUELLENANGABE im card_lead — verboten sind \"Wie X berichtet\", \"nach Angaben von X\", \"X zufolge\", \"laut X\", \"X mitteilt\". "
+            "Die Quelle gehört in den Body, nicht in den Karten-Hook. Der card_lead muss die Nachricht selbst tragen, nicht die Tatsache der Meldung.\n"
+            'Schema: {"title": "...", "lead": "1–2 Sätze Teaser", "card_lead": "ein geschlossener Satz, 110–130 Zeichen", "body": "vollständiger Artikel"}'
         ),
     ]
 

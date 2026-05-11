@@ -12,6 +12,7 @@ class LanguagePackage:
     lang: str
     title: str = ""
     excerpt: str = ""
+    card_lead: str = ""
     content: str = ""
     seo_title: str = ""
     meta_description: str = ""

@@ -43,7 +43,7 @@ final class EPV2_Budget_Manager {
 			];
 		}
 
-		if (self::looks_like_hard_reject($title, $excerpt, $content, $category)) {
+		if (self::looks_like_hard_reject($title, $excerpt, $content, $category, $url)) {
 			return [
 				'score' => 0,
 				'tier' => 'D',
@@ -510,15 +510,20 @@ final class EPV2_Budget_Manager {
 			'ukraine' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['war_relevance', 'human_impact', 'source_confidence', 'timeliness']],
 			'europa' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'policy_relevance', 'source_confidence']],
 			'deutschland' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'reader_relevance', 'informativeness']],
-			// publish_c raised 40→44: Wirtschaft = business news, mid-grade
-			// economic stories without real public-impact are noise. Boundary
-			// stays B (52); the change pushes weak C-review into C-low.
-			'wirtschaft' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 44, 'ai_delta' => -2, 'queue_delta' => -2, 'dimensions' => ['economic_impact', 'reader_relevance', 'informativeness']],
+			// publish_c reverted 44→40 (2026-05-09 evening): за 24h было
+			// 0 published wirtschaft (8 rejected). Effective threshold с
+			// ai_delta -2 + queue_delta -2 был ~48 raw score — рубил даже
+			// vital news (E-Auto-Prämie, Riester-Nachfolge, Paketboten
+			// Arbeitszeit). Возвращаемся к baseline 40 без penalty.
+			'wirtschaft' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['economic_impact', 'reader_relevance', 'informativeness']],
 			'leben-in-deutschland' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -6, 'queue_delta' => -6, 'dimensions' => ['practical_value', 'reader_relevance', 'source_confidence', 'service_life']],
 			'community' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -6, 'queue_delta' => -6, 'dimensions' => ['community_value', 'reader_relevance', 'practical_value', 'local_fit']],
 			'muenchen' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -4, 'queue_delta' => -4, 'dimensions' => ['local_relevance', 'reader_relevance', 'informativeness', 'freshness']],
 			'bayern' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -4, 'queue_delta' => -4, 'dimensions' => ['regional_relevance', 'reader_relevance', 'informativeness', 'freshness']],
-			'kultur' => ['a' => 66, 'b' => 48, 'c' => 34, 'publish_c' => 40, 'ai_delta' => -4, 'queue_delta' => -4, 'dimensions' => ['editorial_interest', 'cultural_relevance', 'informativeness', 'freshness']],
+			// kultur ослабили ai_delta -4 → -2, queue_delta -4 → -2 (2026-05-09):
+			// 0 published kultur за 24h, 12 rejected. Эффективный threshold
+			// был ~48, теперь ~44 — пропускаем больше науки/искусства/медиа.
+			'kultur' => ['a' => 66, 'b' => 48, 'c' => 34, 'publish_c' => 40, 'ai_delta' => -2, 'queue_delta' => -2, 'dimensions' => ['editorial_interest', 'cultural_relevance', 'informativeness', 'freshness']],
 			'sport' => ['a' => 66, 'b' => 50, 'c' => 34, 'publish_c' => 41, 'ai_delta' => -3, 'queue_delta' => -3, 'dimensions' => ['editorial_interest', 'event_relevance', 'diversity', 'freshness']],
 		];
 		return array_merge($base, is_array($cards[$category] ?? null) ? $cards[$category] : []);
@@ -1369,9 +1374,13 @@ final class EPV2_Budget_Manager {
 		return false;
 	}
 
-	private static function looks_like_hard_reject(string $title, string $excerpt, string $content, string $category): bool {
+	private static function looks_like_hard_reject(string $title, string $excerpt, string $content, string $category, string $url = ''): bool {
 		$category = self::canonical_category($category);
-		$headline = trim($title . ' ' . $excerpt . ' ' . mb_substr($content, 0, 300));
+		// 2026-05-10: URL включается в headline для матчинга URL-based patterns
+		// (BR.de `im-news-ticker-vom-...`, FAZ `liveticker-...` и т.п.).
+		// Title мог быть нейтральным («Ukraine-Ticker: ...»), но URL явно
+		// помечал контент как live-update — это нужно ловить.
+		$headline = trim($title . ' ' . $excerpt . ' ' . mb_substr($content, 0, 300) . ' ' . $url);
 		$normalized_title = trim(mb_strtolower(wp_strip_all_tags($title)));
 		$body_plain = trim(mb_strtolower(wp_strip_all_tags($excerpt . ' ' . $content)));
 		if ($normalized_title === '') {
@@ -1410,6 +1419,72 @@ final class EPV2_Budget_Manager {
 			'/\bdiplom- oder masterabschluss\b|\bpsychologischen psychotherapeuten\b/u',
 			'/\bteilprojektverantwortung\b|\barbeitgeber:\b|\bveröffentlichungsende:\b/u',
 			'/\bsport\s*-\s*[a-z0-9.-]+$/u',
+			// Liveblog/Liveticker формат — независимо от рубрики. Это
+			// running update-stream без самостоятельной news-substance,
+			// AI rewrite таких всегда даёт rejected как low importance.
+			// Бережём AI-cost: режем на pre-AI стадии.
+			// 2026-05-10: extended — `news-ticker`, `nachrichten-ticker`,
+			// `im-news-ticker-vom`, `live-blog`, `aktuelle news vom`
+			// (BR.de Ukraine-Ticker passing через эти patterns каждый раз
+			// проходил, AI hallucinated смешивая ticker context с другими
+			// articles).
+			'/\bliveblog\b|\bliveticker\b|\blive[-\s]?ticker\b|\blivereportage\b|\blive[-\s]update\b|\blive[-\s]news[-\s]blog\b|\bnews[-\s]?ticker\b|\bnachrichten[-\s]?ticker\b|\b(?:im[-\s])?news[-\s]ticker[-\s]vom\b|\baktuelle[-\s]news[-\s]vom\b|\bukraine[-\s]ticker\b|\bnahost[-\s]ticker\b|\bnews[-\s]ticker[-\s]vom[-\s]\d/iu',
+			// Banal incidents без имени персоны и места значения:
+			// «Leiche aus der Spree», «Mensch von Flugzeug erfasst».
+			// AI rewrite это всё равно отвергнет как low.
+			'/\b(leiche|tote\w*\s+gefunden|leichnam)\s+(aus|in|im|auf|bei)\b/iu',
+			'/^notfälle?\s*[:—-]/iu',
+			// Sports match recap / fixtures — без news-impact:
+			// «X gewinnt Y», «Stuttgart nach Sieg gegen Z», «Magnier gewinnt Giro»,
+			// «Lazio - Inter: Tor zum 0:2 durch Sucic in der 39. Minute».
+			// Эти регулярно отвергаются на selection — переносим на pre-AI.
+			'/^[\p{L}][\p{L}\p{N}\säöüß-]+\s+(gewinnt|gewann|besiegt|verliert|verlor|schlägt|unterliegt|trumpft|bezwingt)\s+/iu',
+			'/^\d+:\d+\s+gegen\s+/iu',
+			'/\bspieltag\s+(?:der\s+)?(?:bundesliga|2\.\s*liga|3\.\s*liga|champions league|europa league)\b/iu',
+			'/\b(?:etappensieg|matchday|matchwinner|abstiegs[-\s]?abgrund|tabellenführer|pole position)\b/iu',
+			// Match-event reports: «Tor zum X:Y», «Tor durch [Spieler]», «X-Y in der N. Minute».
+			'/\btor\s+(?:zum\s+\d+\s*:\s*\d+|durch\s+\p{Lu})/iu',
+			'/\b(?:in\s+der\s+\d{1,2}\.\s+minute|nachspielzeit|elfmeter|freistoß|eigentor|gelb-rote\s+karte|rote\s+karte\s+für)\b/iu',
+			// Match-card titles: «Lazio - Inter: …» (two team names with dash, plus goal/sport context after).
+			'/^\p{Lu}[\p{L}\p{N}\säöüß-]{2,30}\s*[-–]\s*\p{Lu}[\p{L}\p{N}\säöüß-]{2,30}\s*[:—]\s*(?:tor\b|spielbericht|liveticker|live-blog|kicker|highlights)/iu',
+			// Tourism/lifestyle puff: «Wunder von X», «Mode-Metropole», «Reise-Tipps».
+			'/\b(?:das\s+wunder\s+von|mode-metropole|reise[-\s]?tipps?|wochenend[-\s]?tipps?|sehenswürdigkeit\w*|gastro-?tipp\w*)\b/iu',
+			// Glossen/Kolumnen/Kommentare — opinion, не news.
+			'/^(?:kommentar|kolumne|glosse|leitartikel|editorial|meinung)\s*[:—-]/iu',
+			// Lottery / numerical-only pages: «Zu den aktuellen Lottozahlen»,
+			// «Eurojackpot Gewinnzahlen», etc. Это просто таблица чисел,
+			// AI rewrite на нём всегда даёт «too thin for autopublish».
+			'/\b(?:lottozahl\w*|gewinnzahl\w*|eurojackpot|gluecksspirale|glücksspirale|spiel\s*77|super\s*6|klassenlotterie)\b/iu',
+			'/^zu\s+den\s+(?:aktuellen|heutigen|neuen)\s+/iu',
+			// Weather forecast pages — без news-substance.
+			'/\b(?:wetterbericht|wetter[-\s]?vorhersage|wetter[-\s]?prognose|aktuelles\s+wetter)\b/iu',
+			// Stock-ticker / market-numbers stubs: «DAX schliesst bei …», «S&P 500».
+			'/^(?:dax|mdax|sdax|tecdax|euro\s+stoxx|nikkei|s&p\s*500|dow\s*jones|nasdaq)\s+(?:schl(?:ie|o)ss|er(?:ö|oe)ffnet|steigt|fällt|fallt|notiert)/iu',
+			// Pure horoscope / TV programme listings.
+			'/\b(?:horoskop|fernsehprogramm|tv-programm|sendetermine?)\b/iu',
+			// Daily TV news bulletins (ZDF heute, Tagesschau vom DD.MM): это
+			// transcript ежедневного выпуска, AI rewrite на нём бесполезен.
+			'/\b(?:zdf\s+heute\s+sendung|heute[\s-]+sendung\s+vom|tagesschau\s+vom\s+\d|sendung\s+vom\s+\d{1,2}\.\s*(?:januar|februar|m(?:ä|ae)rz|april|mai|juni|juli|august|september|oktober|november|dezember))\b/iu',
+			// LIVE!-prefix sport / news ticker: «LIVE! Wolfsburg schnuppert…».
+			'/^live[!\:\s]/iu',
+			// Sport recap verbs пропущенные раньше (wahrt, holt, fixiert,
+			// kassiert, sichert, schießt, knackt, dreht, dominiert, dreht
+			// auf, kommt zurück) — без team-first структуры. Между verb и
+			// контекстом допускается до 3 слов наречий (glanzlos, knapp,
+			// souverän, mühelos, mühsam):
+			'/\b(?:wahrt|holt|fixiert|kassiert|sichert\s+sich|sich\s+sichert|sch(?:ie|ie)(?:ß|ss)t|knackt|dreht|dominiert|patzt|stolpert|dreht\s+auf|kommt\s+zurück)(?:\s+\p{L}+){0,3}\s+(?:seine?\s+)?(?:cl|el|champions|europa|bundesliga|liga|sieg|tabellenf(?:ü|ue)hrung|tor|chancen|punkt|spieltag|tr(?:ä|ae)ume?)/iu',
+			// Sport-context vocabulary (CL-Träume, EL-Träume, Liga-Träume,
+			// Bundesliga-Träume) сама по себе — sport recap.
+			'/\b(?:cl|el|champions[-\s]?league|europa[-\s]?league|bundesliga|liga)[-\s]?tr(?:ä|ae)um(?:e|en)\b/iu',
+			// Sport-recap fallback — match-result в любом месте title:
+			'/\b(?:besiegt|bezwingt|schlägt|trumpft|erringt|unterliegt|verliert\s+gegen)\s+(?:den\s+|die\s+|das\s+)?\p{Lu}/iu',
+			// Match-fixture preview/recap: «Spielbericht», «Spielanalyse»,
+			// «Halbzeit-Analyse».
+			'/\b(?:spielbericht|spielanalyse|halbzeit[\s-]?analyse|nachholspiel|abstiegskampf)\b/iu',
+			// Cross-lang weather (UA/RU): «Циклони насуваються», «Погода»,
+			// «Похолодання», «Потеплення».
+			'/\b(?:погода|циклон\w*|похолодан\w*|потеплін\w*|опадк\w*|опади|зливи|сніго\w+|снігопад\w*|туман\w+|туманно|штормове\s+попередження|загроза\s+негоди)\b/iu',
+			// Lottery/Eurojackpot ZDF/landing pages — URL-based fallback handled separately.
 		];
 		foreach ($patterns as $pattern) {
 			if (preg_match($pattern, $headline)) {

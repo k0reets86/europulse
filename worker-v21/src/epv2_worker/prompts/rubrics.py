@@ -28,6 +28,33 @@ Weiches im Ton:
 - „Der russische Volk" als Ganzes nicht pauschal ab- oder bewerten — solche Aussagen gehören in Meinungsartikel, nicht in die Nachricht.
 - Adjektive wie „perfide", „heimtückisch", „hinterhältig" gehören in Meinung, nicht in News.
 - Fakten exakt, Rahmen fest, Tonfall professionell. Wer Aggressor ist und wer angegriffen wurde, ergibt sich aus den Tatsachen — wir verwischen das nie.
+
+VERBOTENE FORMULIERUNGEN (auch in Übersetzungen) — bei Quelle umformulieren, NICHT übernehmen:
+- „Spannungen zwischen Russland und der Ukraine" / „напружені відносини між двома країнами"
+   / „tensions between the two countries"
+   → „Russlands Krieg gegen die Ukraine" / «російсько-українська війна» / „Russia's war against Ukraine"
+- „Konflikt" allein ohne Aggressor / „конфлікт" / „conflict between"
+   → „Russlands Angriffskrieg" / «російська агресія» / „Russia's war of aggression"
+- „bilaterale Krise" / „двостороння криза" / „bilateral crisis"
+   → wieder „Krieg" / „війна" / „war"
+- „beide Seiten / beide Länder" als gleichwertige Akteure
+   / „обидві сторони" / „обидві країни" / „both sides" / „both countries"
+   → konkret „Russland" und „die Ukraine" mit klarer Rollenverteilung benennen
+- „Eskalation" als Zustandsbeschreibung
+   / „ескалація" / „escalation" als state
+   → konkret „Russland eskaliert" / «Росія ескалює» / „Russia escalates"
+- Spekulatives Glätten der Lage:
+   „dies könnte zeigen, dass die Beziehungen angespannt sind" / „це може свідчити про напружені
+   відносини" / „this might indicate strained relations"
+   → STRENG VERBOTEN. Nur konkrete Fakten ohne weichspülende Interpretation.
+- „Treffen Putin–Selenskyj in Moskau" als Annäherungsangebot framen
+   → das ist eine Aussage des Aggressors. Sachlich darstellen, nicht als „möglicher Friedensschritt".
+- „mutmaßlich russisch" wenn Russland selbst zugibt — nie. Russland gibt zu → wir berichten als Fakt.
+
+Diese Liste ist nicht vollständig — der Geist der Regel: NIEMALS falsche Symmetrie, NIEMALS
+Spekulation als „Analyse", NIEMALS Verharmlosung. Wenn ein Original-Artikel solche Formulierungen
+enthält, korrigieren wir sie beim Rewrite. Beim Übersetzen darf eine im DE-Master saubere Zeile
+NICHT in der Übersetzung verharmlost werden.
 """
 
 

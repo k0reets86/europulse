@@ -5,6 +5,15 @@ if (! defined('ABSPATH')) {
 }
 
 final class EPV2_AI_Processor {
+	/**
+	 * Editorial prompt version stamp. Поднимаем при существенных изменениях
+	 * worker prompt'ов (Russia-Ukraine line, anti-filler rules,
+	 * anti-repetition в body и т.п.). Saved AI payload помечается этой
+	 * версией; при resume проверяется mismatch и устаревшие payload'ы
+	 * принудительно пересгенерируются вместо silent reuse'а.
+	 */
+	public const EDITORIAL_PROMPT_VERSION = '2026-05-11-v10';
+
 		public static function process_scheduled(bool $force = false, bool $ignore_retry_after = false): void {
 			$started_at = microtime(true);
 			self::log_process_entry_step('enter', ['force' => $force ? 1 : 0, 'ignore_retry_after' => $ignore_retry_after ? 1 : 0]);
@@ -181,6 +190,7 @@ final class EPV2_AI_Processor {
 							if ($editorial_match === 'match' && $source_id_for_health > 0 && class_exists('EPV2_Resilience_Manager')) {
 								EPV2_Resilience_Manager::register_source_quality_success($source_id_for_health);
 							}
+
 							// Variant-D event-signature dedup: with Story Card
 							// in hand, look up existing items in the same
 							// event cluster (top entity + event keyword +
@@ -246,8 +256,121 @@ final class EPV2_AI_Processor {
 								'error' => (string) ($story_card['error'] ?? 'unknown'),
 								'duration_ms' => self::duration_ms_since($item_started_at),
 							]);
+							// 2026-05-10 (refined): block rewrite ТОЛЬКО при двойном
+							// риск-сигнале: (a) story_card пустой И (b) primary URL
+							// — высокорискованный (liveblog/ticker/aggregator). Без
+							// (b) даже без grounding rewriter обычно справляется
+							// если source — normal news article. Жёсткий блок на
+							// ВСЕ empty-story_card items останавливал 30% pipeline,
+							// что противоречит «правила не должны становиться
+							// проблемами». Keep flagging но не block по default.
+							$prev_card = is_array($existing_payload['_meta']['story_card'] ?? null) ? $existing_payload['_meta']['story_card'] : [];
+							$has_entities = ! empty($prev_card['entities_people'])
+								|| ! empty($prev_card['entities_organizations'])
+								|| ! empty($prev_card['entities_places']);
+							$primary_url = (string) ($source_item->original_url ?? '');
+							$is_high_risk_primary = preg_match(
+								'/(ticker|liveblog|live-blog|news-ticker|im-news|aktuelle-news-vom|nahost-ticker)/iu',
+								$primary_url
+							) === 1;
+							if (! $has_entities && $is_high_risk_primary) {
+								EPV2_Queue::mark_state((int) $item->id, 'manual_review', [
+									'error_message' => 'Story Card empty + primary URL = liveblog/ticker (двойной риск hallucination). AI rewrite без grounding на ticker-source даст спутанный контекст. Требует ручной проверки источника.',
+								]);
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = 'story_card_empty_liveblog_primary';
+								break;
+							}
+							// Иначе — flag, but continue (item probably OK).
+							self::log_process_item_step('story_card_empty_continuing', (int) $item->id, [
+								'has_entities' => $has_entities ? 1 : 0,
+								'is_high_risk_primary' => $is_high_risk_primary ? 1 : 0,
+								'primary_url' => $primary_url,
+							]);
 						}
 					}
+					// Post-story-card selection gate — срабатывает ВСЕГДА когда
+					// story_card в payload, не зависит от того был ли он только
+					// что построен или существовал ранее (retry/resume пути).
+					// Re-run analyze_item с обогащённой категорией от story-card
+					// + расширенными heuristic паттернами; если low/reject —
+					// режем здесь, до rewriter/translator/SEO (~3-4 AI calls
+					// саэкономлено per item). Это корневой fix waste-cycle:
+					// 12+ items сегодня имели story_card.publishable_estimate=high
+					// (worker AI разрешил), но PHP heuristic после AI давал
+					// hard_pattern reject. Теперь heuristic применяется ДО AI.
+					if (! empty($existing_payload['_meta']['story_card']) && ! self::payload_is_publish_ready_fast($existing_payload)) {
+						$_card = (array) ($existing_payload['_meta']['story_card'] ?? []);
+						$_card_category = (string) ($_card['category']['primary'] ?? '');
+						$_active_category = $_card_category !== ''
+							? $_card_category
+							: ((string) ($source_item->category_final ?? $source_item->category_proposed ?? ''));
+						// Story Card primacy guard (2026-05-11): если AI в
+						// Story Card явно сказал editorial_match=match
+						// AND publishable_estimate ∈ {high, medium} —
+						// НЕ делать post-card heuristic re-analyze который
+						// reject'ит. AI verdict trumps heuristic. Раньше
+						// items с initial score=46 'review' после category
+						// override от story_card → re-analyze давал score=39
+						// 'low' → reject. Pipeline терял valid items из-за
+						// per-rubric score thresholds.
+						$_ed_match = strtolower(trim((string) ($_card['editorial_match'] ?? '')));
+						$_est = strtolower(trim((string) ($_card['publishable_estimate'] ?? '')));
+						$_card_ai_endorsed = ($_ed_match === 'match' && in_array($_est, ['high', 'medium'], true));
+						$_post_card_analysis = $_card_ai_endorsed ? [] : EPV2_Budget_Manager::analyze_item([
+							'title' => (string) $source_item->original_title,
+							'content' => (string) ($source_item->original_content ?? ''),
+							'excerpt' => (string) $source_item->original_excerpt,
+							'url' => (string) $source_item->original_url,
+							'date' => (string) ($source_item->original_date ?? ''),
+							'image' => (string) ($source_item->source_image_url ?? ''),
+							'category' => $_active_category,
+						]);
+						$_post_decision = (string) ($_post_card_analysis['decision'] ?? '');
+						if (
+							! $_card_ai_endorsed
+							&& in_array($_post_decision, ['low', 'reject'], true)
+							&& empty($_post_card_analysis['top_story_candidate'])
+							&& empty($_post_card_analysis['breaking_candidate'])
+							&& empty($_post_card_analysis['breaking_watch'])
+						) {
+							$_reject_class = (string) ($_post_card_analysis['reject_class'] ?? '');
+							$_reject_score = (int) ($_post_card_analysis['score'] ?? 0);
+							$_reason_msg = sprintf(
+								'Снят после story-card: pre-AI verdict "%s" (score=%d%s). AI-rewrite не запускается.',
+								$_post_decision,
+								$_reject_score,
+								$_reject_class !== '' ? ', class=' . $_reject_class : ''
+							);
+							$existing_payload['_meta']['selection'] = $_post_card_analysis;
+							EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+								'error_message' => $_reason_msg,
+								'ai_payload' => wp_json_encode($existing_payload, JSON_UNESCAPED_UNICODE),
+							]);
+							EPV2_Queue::clear_active_automation_item((int) $item->id);
+							if (class_exists('EPV2_Learning_Journal')) {
+								EPV2_Learning_Journal::record('post_story_card_reject', (int) $item->id, $_reason_msg, [
+									'decision' => $_post_decision,
+									'reject_class' => $_reject_class,
+									'score' => $_reject_score,
+									'category' => $_active_category,
+								]);
+							}
+							self::log_process_item_step('post_story_card_reject', (int) $item->id, [
+								'decision' => $_post_decision,
+								'reject_class' => $_reject_class,
+								'score' => $_reject_score,
+								'category' => $_active_category,
+								'duration_ms' => self::duration_ms_since($item_started_at),
+							]);
+							$count++;
+							$run_payload['processed_item_id'] = (int) $item->id;
+							$run_payload['result'] = 'rejected_post_story_card';
+							break;
+						}
+					}
+
 					$stored_pipeline_stage = self::payload_pipeline_stage($existing_payload);
 					$payload_for_stage = $existing_payload !== [] ? self::normalize_existing_payload($existing_payload, false) : [];
 					self::log_process_item_step('after_normalize_existing_payload', (int) $item->id, ['run_id' => $run, 'has_payload_for_stage' => $payload_for_stage !== [] ? 1 : 0]);
@@ -886,6 +1009,32 @@ final class EPV2_AI_Processor {
 					EPV2_Queue::set_live_status((int) $item->id, 'Переписываю текст, добираю контекст, цитаты и теги.', 'rewriting');
 				}
 				$stored_selection = is_array($existing_payload['_meta']['selection'] ?? null) ? $existing_payload['_meta']['selection'] : [];
+				// Anti-resurrect: если sanitize ранее уже отклонил материал
+				// как pre-AI publish-priority reject, не воскрешаем через
+				// сохранённый payload (ai_publish_finish_resume / ai_rebuild_enrichment).
+				// Без этого item циклится: sanitize→reject→resume→retry_process→...
+				$prev_error = (string) ($item->error_message ?? '');
+				if (mb_stripos($prev_error, 'предварительный publish-priority') !== false) {
+					EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+						'error_message' => $prev_error,
+					]);
+					continue;
+				}
+				// Editorial prompt version mismatch: payload сгенерён старой
+				// версией prompt'а (до Russia-Ukraine line / anti-filler /
+				// anti-repetition). Drop payload, force fresh AI run на новом
+				// prompt'е. Без этой проверки stale payload reused as-is через
+				// gate.mode=ai_publish_finish_resume и устаревшие формулировки
+				// проходят на сайт (видели 7 violation постов в production).
+				$payload_prompt_version = (string) ($existing_payload['_meta']['editorial_prompt_version'] ?? '');
+				if ($existing_payload !== [] && $payload_prompt_version !== self::EDITORIAL_PROMPT_VERSION) {
+					self::log_process_item_step('drop_stale_payload_version_mismatch', (int) $item->id, [
+						'stored' => $payload_prompt_version,
+						'current' => self::EDITORIAL_PROMPT_VERSION,
+					]);
+					$existing_payload = [];
+					$stored_selection = [];
+				}
 				$reused_existing_context = $existing_payload !== [];
 				if ($reused_existing_context) {
 					$analysis = $stored_selection !== [] ? $stored_selection : [
@@ -2323,19 +2472,15 @@ final class EPV2_AI_Processor {
 		}
 
 		$categorize_started_at = microtime(true);
-		$detected_primary = EPV2_Categorizer::detect(
+		$tmp_payload_for_categorize = ['_meta' => ['story_card' => $story_card, 'source_dossier' => $dossier]];
+		$resolved_primary = EPV2_Categorizer::resolve_for_payload(
+			$tmp_payload_for_categorize,
 			(string) ($dossier['primary']['title'] ?? $item->original_title ?? ''),
 			(string) ($dossier['primary']['content'] ?? $item->original_content ?? ''),
 			(string) ($categories[0] ?? '')
 		);
-		$refined_primary = EPV2_Categorizer::refine_with_event_context(
-			$detected_primary !== '' ? $detected_primary : (string) ($categories[0] ?? ''),
-			$dossier,
-			(string) ($dossier['primary']['title'] ?? $item->original_title ?? ''),
-			(string) ($dossier['primary']['content'] ?? $item->original_content ?? '')
-		);
-		if ($refined_primary !== '') {
-			$categories = EPV2_Review::normalize_categories($refined_primary);
+		if ($resolved_primary !== '') {
+			$categories = EPV2_Review::normalize_categories($resolved_primary);
 		}
 		// Story-card override: if AI says category with confidence ≥ 0.6,
 		// trust it over the keyword heuristic. This fixes the 'cruise ship
@@ -2876,12 +3021,19 @@ final class EPV2_AI_Processor {
 		if ($featured_media_url === '' || self::payload_media_is_blocked($payload, $featured_media_url)) {
 			return false;
 		}
+		// Hard editorial rule (operator 2026-05-10): Wikimedia / Pexels never
+		// pass the publish gate as featured media — they produce off-topic
+		// stock that hurts brand trust. The resolver may still try them as a
+		// last-resort fallback but the gate refuses regardless of how the
+		// item arrived. Items lacking a real photo land in manual_review.
+		if (self::payload_featured_media_is_generic_stock($payload)) {
+			return false;
+		}
 		if (self::payload_featured_media_is_publishable($payload)) {
 			return true;
 		}
 		$dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? (array) $payload['_meta']['source_dossier'] : [];
-		if (! self::payload_featured_media_is_generic_stock($payload)
-			&& EPV2_Media::is_source_host_media($featured_media_url, $dossier)) {
+		if (EPV2_Media::is_source_host_media($featured_media_url, $dossier)) {
 			return true;
 		}
 		// Generated story covers are no longer accepted at the publish gate:
@@ -4101,6 +4253,16 @@ final class EPV2_AI_Processor {
 		$processRetries = (int) ($notes['_system']['retries']['process'] ?? 0);
 		$maxAttempts = self::configured_review_attempt_limit($payload);
 		$message = (string) ($item->error_message ?? '');
+		// Anti-cycle: если selection окончательно сказал reject (особенно
+		// hard_pattern), не пытаемся rebuild — это бесполезная трата AI-cost,
+		// item всё равно блокируется на publish_finish gate. Сразу выводим
+		// item из rework cycle, дальше maintenance переведёт в rejected.
+		$selection = is_array($payload['_meta']['selection'] ?? null) ? $payload['_meta']['selection'] : [];
+		if ((string) ($selection['decision'] ?? '') === 'reject'
+		    || (string) ($selection['reject_class'] ?? '') === 'hard_pattern'
+		) {
+			return false;
+		}
 		if (
 			self::review_rebuild_exhausted($item, $payload)
 			|| ($processRetries > $maxAttempts && preg_match('/publish threshold|minimum review threshold|heuristic payload|broken multilingual/i', $message) === 1)
@@ -4122,6 +4284,14 @@ final class EPV2_AI_Processor {
 			$payload = self::normalize_existing_payload($payload, false);
 		}
 		if ($payload === [] || self::payload_is_publish_ready_fast($payload) || ! self::payload_is_review_ready_fast($payload)) {
+			return false;
+		}
+		// Same anti-cycle guard как для rework — если selection rejected,
+		// finish-cycle тоже бесполезен.
+		$selection = is_array($payload['_meta']['selection'] ?? null) ? $payload['_meta']['selection'] : [];
+		if ((string) ($selection['decision'] ?? '') === 'reject'
+		    || (string) ($selection['reject_class'] ?? '') === 'hard_pattern'
+		) {
 			return false;
 		}
 		if (self::review_finish_exhausted($item, $payload)) {
@@ -5931,6 +6101,38 @@ final class EPV2_AI_Processor {
 		return $score >= 100 && self::quality_has_no_warnings($quality);
 	}
 
+	/**
+	 * Story Card primacy: when the upfront AI verdict explicitly endorses
+	 * the item as match + publishable_estimate ∈ {high, medium}, downstream
+	 * heuristic thresholds (the 78-score wall on de_master viability and
+	 * quality.pass) relax by a small margin. The AI verdict has primacy —
+	 * heuristic quality scoring is a tie-breaker, not a veto.
+	 *
+	 * Returns the relaxed minimum quality score that should be enforced
+	 * for de_master viability paths. Default 78 stays the wall when no
+	 * trusted card endorsement exists; with endorsement we drop to 70.
+	 */
+	private static function payload_ai_endorsement_minimum_quality(array $payload): int {
+		$default = 78;
+		$card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
+		if ($card === []) {
+			return $default;
+		}
+		$editorial = strtolower(trim((string) ($card['editorial_match'] ?? '')));
+		$estimate = strtolower(trim((string) ($card['publishable_estimate'] ?? '')));
+		if ($editorial !== 'match') {
+			return $default;
+		}
+		if (! in_array($estimate, ['high', 'medium'], true)) {
+			return $default;
+		}
+		$confidence = (float) ($card['category']['confidence'] ?? 0.0);
+		if ($confidence < 0.7) {
+			return $default;
+		}
+		return 70;
+	}
+
 	private static function payload_requires_retry_after_ai(array $payload, array $gate): bool {
 		if (empty($gate['allow'])) {
 			return false;
@@ -6387,7 +6589,8 @@ final class EPV2_AI_Processor {
 			return false;
 		}
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
-		if ((int) ($meta['quality']['score'] ?? 0) < 78) {
+		$min_quality = self::payload_ai_endorsement_minimum_quality($payload);
+		if ((int) ($meta['quality']['score'] ?? 0) < $min_quality) {
 			return false;
 		}
 		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
@@ -6420,7 +6623,8 @@ final class EPV2_AI_Processor {
 			return false;
 		}
 		$quality = is_array($payload['_meta']['quality'] ?? null) ? $payload['_meta']['quality'] : [];
-		if (empty($quality['pass']) || (int) ($quality['score'] ?? 0) < 78) {
+		$min_quality = self::payload_ai_endorsement_minimum_quality($payload);
+		if (empty($quality['pass']) || (int) ($quality['score'] ?? 0) < $min_quality) {
 			return false;
 		}
 		$profile = self::payload_story_budget_profile($payload);
@@ -7025,7 +7229,8 @@ final class EPV2_AI_Processor {
 			return false;
 		}
 		$quality = is_array($payload['_meta']['quality'] ?? null) ? $payload['_meta']['quality'] : [];
-		if (empty($quality['pass']) || (int) ($quality['score'] ?? 0) < 78) {
+		$min_quality = self::payload_ai_endorsement_minimum_quality($payload);
+		if (empty($quality['pass']) || (int) ($quality['score'] ?? 0) < $min_quality) {
 			return false;
 		}
 		$profile = self::payload_story_budget_profile($payload);
@@ -7113,7 +7318,8 @@ final class EPV2_AI_Processor {
 			return false;
 		}
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
-		if ((int) ($meta['quality']['score'] ?? 0) < 78) {
+		$min_quality = self::payload_ai_endorsement_minimum_quality($payload);
+		if ((int) ($meta['quality']['score'] ?? 0) < $min_quality) {
 			return false;
 		}
 		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
@@ -7343,11 +7549,9 @@ final class EPV2_AI_Processor {
 			$seed = 'deutschland';
 		}
 
-		$dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? $payload['_meta']['source_dossier'] : [];
-		$detected = EPV2_Categorizer::detect($title, $content !== '' ? $content : $excerpt, $seed);
-		$refined = EPV2_Categorizer::refine_with_event_context($detected !== '' ? $detected : $seed, $dossier, $title, $content !== '' ? $content : $excerpt);
-		if ($refined !== '') {
-			$payload['categories'] = EPV2_Review::normalize_categories($refined);
+		$resolved = EPV2_Categorizer::resolve_for_payload($payload, $title, $content !== '' ? $content : $excerpt, $seed);
+		if ($resolved !== '') {
+			$payload['categories'] = EPV2_Review::normalize_categories($resolved);
 		}
 
 		return $payload;
@@ -7400,7 +7604,8 @@ final class EPV2_AI_Processor {
 			(string) ($de['title'] ?? $item->original_title ?? '') . ' ' .
 			(string) ($de['excerpt'] ?? $item->original_excerpt ?? '')
 		));
-		$detected_category = EPV2_Categorizer::detect(
+		$detected_category = EPV2_Categorizer::resolve_for_payload(
+			$payload,
 			(string) ($de['title'] ?? $item->original_title ?? ''),
 			(string) ($de['content'] ?? $item->original_content ?? ''),
 			(string) ($item->category_proposed ?? '')
@@ -7581,10 +7786,9 @@ final class EPV2_AI_Processor {
 		$title = (string) ($dossier['primary']['title'] ?? $item->original_title ?? '');
 		$content = (string) ($dossier['primary']['content'] ?? $item->original_content ?? '');
 		$seed = (string) ($categories[0] ?? self::working_category_seed($item, $payload));
-		$detected = EPV2_Categorizer::detect($title, $content, $seed);
-		$refined = EPV2_Categorizer::refine_with_event_context($detected !== '' ? $detected : $seed, $dossier, $title, $content);
-		if ($refined !== '') {
-			$payload['categories'] = EPV2_Review::normalize_categories($refined);
+		$resolved = EPV2_Categorizer::resolve_for_payload($payload, $title, $content, $seed);
+		if ($resolved !== '') {
+			$payload['categories'] = EPV2_Review::normalize_categories($resolved);
 		}
 
 		if (self::payload_featured_media_is_generic_stock($payload)) {
@@ -7695,6 +7899,12 @@ final class EPV2_AI_Processor {
 		if ($host === '') {
 			return false;
 		}
+		// Editorial preference (operator 2026-05-10): Wikimedia and Pexels
+		// produce off-topic / low-relevance images for news stories. They
+		// must NEVER pass the publish gate as featured media — items that
+		// fall through to these hosts go to manual_review for hand-curation
+		// or rejection. The resolver still tries them as last-resort, but
+		// the gate refuses them regardless of story_card.media_required.
 		foreach (['pexels.com', 'images.pexels.com', 'commons.wikimedia.org', 'upload.wikimedia.org'] as $signal) {
 			if (str_contains($host, $signal)) {
 				return true;

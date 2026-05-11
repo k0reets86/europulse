@@ -73,14 +73,20 @@ final class EPV2_Importance_Score {
 			$score += 5;
 		}
 
-		// 6. Editorial-calibration penalty (-15 pts) — borderline matches
-		// from Story Card per docs/editorial-calibration.md indicate the
-		// content is in «условно берём» tier; if it later lands in
-		// quarantine, prefer rejected over manual_review unless other
-		// signals push the score back over the threshold.
+		// 6. Editorial-calibration adjustment — Story Card editorial_match.
+		// Story Card primacy: AI's editorial verdict has direct vote on
+		// quarantine routing.
+		//   match            → +10 bonus (matches editorial scope)
+		//   borderline       → -15 penalty (точно НЕ берём fallback)
+		//   reject_low_value → -30 penalty (operator should not fix this)
 		$story_card = is_array($meta['story_card'] ?? null) ? $meta['story_card'] : [];
-		if (isset($story_card['editorial_match']) && strtolower((string) $story_card['editorial_match']) === 'borderline') {
+		$editorial_match = strtolower((string) ($story_card['editorial_match'] ?? ''));
+		if ($editorial_match === 'match') {
+			$score += 10;
+		} elseif ($editorial_match === 'borderline') {
 			$score -= 15;
+		} elseif ($editorial_match === 'reject_low_value') {
+			$score -= 30;
 		}
 
 		return (int) max(0, min(100, $score));

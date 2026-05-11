@@ -21,6 +21,12 @@ class TranslationResult:
     title: str = ""
     lead: str = ""
     body: str = ""
+    # Carded lead-magnet — übersetzte Variante des deutschen card_lead.
+    # Genau ein vollständig geschlossener Satz, sprachspezifisches Längenziel
+    # (UK: 95–115 Zeichen, EN: 110–130 Zeichen). Wenn die KI das Kontrakt
+    # nicht einhält, bleibt das Feld leer und das Mu-Plugin fällt auf den
+    # bestehenden post_excerpt-Render zurück.
+    card_lead: str = ""
     success: bool = False
     error: str = ""
     provider: str = ""
@@ -54,8 +60,69 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
 - Für Ukrainisch — Genus-Übereinstimmung Pflicht: deutsche Substantive übernehmen ihr Geschlecht NICHT auf das ukrainische Wort. „die Parade" (DE: feminin) → „парад" (UK: maskulin). Adjektive, Verben und Pronomen müssen sich nach dem ukrainischen Geschlecht richten, nicht nach dem deutschen. Korrekt: „військовий парад", „пройшов парад", „цей парад"; FALSCH: „військова парад", „пройшла парад", „ця парад". Das Gleiche gilt für: „der Bericht" → „звіт" (m, nicht f), „der Saldo" → „баланс" (m), „der Abend" → „вечір" (m), „die Krise" → „криза" (f, übereinstimmt), „das Unternehmen" → „підприємство" (n, übereinstimmt), „der Beschluss" → „рішення" (n, NICHT m), „die Sitzung" → „засідання" (n, NICHT f).
 - Titel, Lead und erster Absatz müssen unterschiedliche Aufgaben erfüllen: Titel meldet die Nachricht, Lead erklärt die Relevanz in 1–2 Sätzen, der erste Absatz führt mit neuen Details weiter. Nicht alle drei mit derselben Quellenformel oder denselben ersten Wörtern beginnen.
 - Der erste Absatz darf den Lead nicht nacherzählen. Er muss konkretisieren: wer betroffen ist, was sich ändert, welche offenen Punkte es gibt oder was als Nächstes passiert.
+- ANTI-FÜLLTEXT — diese Phrasen sind in der Übersetzung VERBOTEN, auch wenn das deutsche Original sie enthält (dann beim Übersetzen weglassen, nicht hinzufügen):
+  • UK: «можливі наслідки», «це рішення може вплинути», «офіційне підтвердження поки що відсутнє», «подальші деталі поки не відомі», «це піднімає питання», «залишається спостерігати», «експерти вбачають у цьому», «це свідчить про…», «це підкреслює…», «це відображає…», «це вказує на…», «це демонструє…», «зростаюче занепокоєння», «зростаючу стурбованість», «викликає занепокоєння», «у зв'язку з цим», «з огляду на це».
+  • EN: «possible consequences», «could affect», «official confirmation is still pending», «further details are not yet known», «this raises questions», «it remains to be seen», «observers see this as», «this could indicate…», «this reflects…», «this underscores growing concerns», «growing concerns about», «highlights mounting tensions», «in light of this», «against this backdrop» (если без конкретного факта).
+  Statt solcher leeren Sätze: kürzere Übersetzung. Lieber 150 dichte Wörter als 350 mit Wassertext.
+- Wenn das deutsche Original einen Absatz hat, der nur aus solchen Filler-Sätzen besteht — diesen Absatz in der Übersetzung WEGLASSEN. Lückenhafte Quelle bleibt lückenhafte Quelle, in jeder Sprache.
+- ОСОБОЕ ПРАВИЛО для UK/EN финальных абзацев: VERBOTEN — последний абзац не должен быть meta-комментарием типа «Це свідчить про зростаюче занепокоєння…» / «This reflects growing concerns…». Финальный абзац ДОЛЖЕН содержать конкретный факт: следующий шаг с датой, реакцию с именем-функцией-цитатой, исторический контекст с числами. Если такого факта нет — финальный абзац ОПУСТИТЬ.
+- BEWAHREN ABLEHNUNG / REJECTION — wenn DE master содержит strong refusal
+  («Kyiv lehnt ab», «als Provokation», «Hauptstadt des Aggressorstaats»),
+  переводить эту силу 1:1, не softeneть. Beispiele:
+  ✓ UK: «Київ відкидає зустріч у Москві — столиці держави-агресора»
+  ✓ EN: «Kyiv rejects meeting in Moscow, the capital of the aggressor state»
+  ✗ UK: «Зеленський може поїхати до Москви»
+  ✗ EN: «Zelensky may travel to Moscow».
 
-Ausgabe ausschließlich als JSON: {{"title":"...","lead":"...","body":"..."}}"""
+ВАЖЛИВО — РОСІЯ-УКРАЇНА — обов'язкова редакційна лінія (БЕЗ винятків):
+EuroPulse висвітлює повномасштабну агресивну війну Росії проти України з лютого 2022 року.
+Росія — країна-агресор. Це не точка зору, не одна з версій, а зафіксований факт.
+
+Обов'язкова лексика для перекладу на українську:
+• «російська агресія», «російська збройна агресія», «повномасштабне вторгнення Росії в Україну»
+• «російські окупанти», «окуповані території», «російська окупація»
+• «війна Росії проти України», «російсько-українська війна» (НЕ «конфлікт»)
+• «Володимир Путін», «голова Кремля Путін», «диктатор Путін» — не «лідер Росії» в нейтральному значенні
+• «воєнні злочини», «терористичні удари», «російські обстріли», «російські ракетні удари»
+
+ЗАБОРОНЕНО — ці формулювання НІКОЛИ не використовувати:
+• «напружені відносини між двома країнами» — між Україною та Росією йде війна, а не напружені відносини
+• «конфлікт» без вказівки агресора — це створює хибну симетрію
+• «суперечка», «розбіжності», «двостороння криза», «дипломатична напруга»
+• «ескалація» як описова характеристика — Росія ескалює, не «ситуація ескалує»
+• «обидві сторони», «обидві країни» як рівноцінні актори — це фальшива еквідистанція
+• «нібито», «можливо», «за українськими даними» коли Росія сама визнає
+• Спекулятивне зм'якшення на кшталт «це може свідчити про напруження», «можливо вказує на», «це означає що відносини…» — ЗАБОРОНЕНО
+
+Для перекладу на англійську — те саме:
+• «Russia's war of aggression against Ukraine», «Russian invasion», «Russian occupation»
+• «Russian occupiers», «occupied territories», «war crimes», «Russian missile strikes»
+• Vladimir Putin, NEVER soft references like «Russian leader» in war contexts
+• FORBIDDEN: «tensions between the two countries», «conflict» (without naming aggressor),
+  «both sides», «escalation» (as state, not action), «could indicate strained relations»
+
+Якщо німецький майстер містить нейтралізуючу формулу — ВИПРАВЛЯТИ при перекладі, не копіювати.
+Якщо першоджерело подає «Konflikt» — у перекладі писати «російська війна проти України».
+Спекулятивні фрази «це може означати», «можливо», «імовірно» в будь-якому військовому /
+політичному контексті щодо Росії — заборонено. Тільки конкретні факти з джерела, без
+зм'якшувальної інтерпретації.
+
+PFLICHTFELD card_lead — Karten-Lead-Magnet für die Startseite:
+- GENAU EIN vollständiger geschlossener Satz in der Zielsprache.
+- Längenziel: für Ukrainisch 95–115 Zeichen, für Englisch 110–130 Zeichen.
+- Selbstständige Aussage — der Leser versteht die Geschichte ohne den Artikel zu öffnen, fühlt aber den Drang weiterzulesen.
+- KEINE Abkürzungen mit Punkt im Inneren (kein „8. Mai", kein „z. B.", kein „St. Petersburg" — ausschreiben oder umformulieren).
+- KEINE drei Punkte am Ende, KEINE offenen Halbsätze, KEIN Ende auf Präposition / Konjunktion / Artikel / Hilfsverb.
+- Endet mit klassischem Punkt, Frage- oder Ausrufezeichen.
+- NICHT identisch zum lead, NICHT identisch zum title.
+- Eigennamen vollständig (Vor- und Nachname, oder Funktion + Nachname) — niemals abgeschnitten.
+- KEINE Quellenangabe im card_lead — verboten:
+  • Ukrainisch: „за повідомленням X", „як повідомляє X", „повідомляє X", „за даними X", „пише X", „інформує X", „за словами X", „джерело пише".
+  • Englisch: „according to X", „as X reports", „X reports", „X says", „per X", „sources say".
+  Die Quellenangabe gehört in den Body-Text, nicht in den Karten-Hook.
+  Der card_lead trägt die Nachricht selbst, nicht die Tatsache der Meldung.
+
+Ausgabe ausschließlich als JSON: {{"title":"...","lead":"...","card_lead":"...","body":"..."}}"""
 
 
 async def translate_from_german(
@@ -66,9 +133,21 @@ async def translate_from_german(
     openai_api_key: str,
     deepseek_api_key: str = "",
     provider_order: list[tuple[str, str, str]] | None = None,
+    card_lead_de: str = "",
+    story_card: dict | None = None,
 ) -> TranslationResult:
     system = _SYSTEM_PROMPT_TEMPLATE.format(target_lang=target_lang)
-    user = f"""TITEL (DE):\n{title_de}\n\nTEASER (DE):\n{lead_de}\n\nARTIKEL (DE):\n{body_de[:3000]}"""
+    card_lead_block = (
+        f"\n\nKARTEN-LEAD (DE) — bitte als card_lead in {target_lang} übertragen:\n{card_lead_de}"
+        if card_lead_de else ""
+    )
+    story_block = _format_story_card_for_translator(story_card) if story_card else ""
+    user = (
+        f"TITEL (DE):\n{title_de}\n\n"
+        f"TEASER (DE):\n{lead_de}{card_lead_block}\n\n"
+        f"ARTIKEL (DE):\n{body_de[:3000]}"
+        f"{story_block}"
+    )
     source_text = f"{title_de}\n{lead_de}\n{body_de}"
 
     candidates = provider_order or [
@@ -86,6 +165,81 @@ async def translate_from_german(
             return result
 
     return TranslationResult(error="All providers failed")
+
+
+def _format_story_card_for_translator(card: dict) -> str:
+    """Inject the upfront semantic context (entities, geography, key facts,
+    editorial verdict) into the translator user prompt as INVARIANT
+    constraints. The translator must respect these invariants regardless of
+    how the DE master phrased them — names spelled the same way, geography
+    not invented, refusal/aggressor framing preserved 1:1.
+    """
+    if not isinstance(card, dict) or not card:
+        return ""
+    parts: list[str] = ["\n\n--- SEMANTISCHE INVARIANTEN (Story Card, source-of-truth) ---"]
+    geo = card.get("geography") or {}
+    if isinstance(geo, dict):
+        country = str(geo.get("primary_country") or "").strip()
+        region = str(geo.get("primary_region") or "").strip()
+        if country or region:
+            geo_parts = [p for p in [country, region] if p]
+            parts.append("Geografie: " + " / ".join(geo_parts))
+    people = card.get("entities_people") or []
+    if isinstance(people, list) and people:
+        names = []
+        for p in people[:8]:
+            if not isinstance(p, dict):
+                continue
+            name = str(p.get("name") or "").strip()
+            role = str(p.get("role") or "").strip()
+            if not name:
+                continue
+            names.append(f"{name} ({role})" if role else name)
+        if names:
+            parts.append("Personen + Rollen (Schreibweise & Funktion einheitlich übernehmen): " + "; ".join(names))
+    orgs = card.get("entities_organizations") or []
+    if isinstance(orgs, list) and orgs:
+        org_names = [str(o.get("name") or "").strip() for o in orgs[:6] if isinstance(o, dict) and o.get("name")]
+        if org_names:
+            parts.append("Organisationen: " + ", ".join(org_names))
+    places = card.get("entities_places") or []
+    if isinstance(places, list) and places:
+        place_names = [str(pl).strip() for pl in places[:6] if str(pl).strip()]
+        if place_names:
+            parts.append("Orte: " + ", ".join(place_names))
+    facts = card.get("key_facts") or []
+    if isinstance(facts, list) and facts:
+        fact_lines = [f"  - {str(f).strip()}" for f in facts[:6] if str(f).strip()]
+        if fact_lines:
+            parts.append("Schlüsselfakten (müssen in der Übersetzung erhalten bleiben):\n" + "\n".join(fact_lines))
+    cat = card.get("category") or {}
+    if isinstance(cat, dict):
+        primary = str(cat.get("primary") or "").strip()
+        if primary:
+            parts.append(f"Rubrik (Tonfall-Anker): {primary}")
+    editorial = str(card.get("editorial_match") or "").strip()
+    if editorial:
+        editorial_reason = str(card.get("editorial_reason") or "").strip()
+        ed_line = f"Redaktionelle Einordnung: {editorial}"
+        if editorial_reason:
+            # Pass the rationale so translator знает WHY editor classified
+            # the story this way — same context the rewriter receives.
+            # Без этого UK/EN translator может смягчить framing если не
+            # понимает почему DE master jagged hard line ("Aggressor",
+            # "rejected", "occupied territory").
+            ed_line += f" — обоснование: {editorial_reason}"
+        ed_line += (
+            ". Der Tonfall der Übersetzung muss diese Linie 1:1 wiedergeben "
+            "(insbesondere Aggressor-Framing bei Russland/Ukraine, "
+            "Ablehnung/Refusal nicht weichspülen, Quellenpositionen nicht abschwächen)."
+        )
+        parts.append(ed_line)
+    parts.append(
+        'Diese Invarianten überschreiben jede tonale Auslegung. Wenn der DE-Master eine Tatsache '
+        'benennt (z. B. „Aggressor", „Ablehnung", konkrete Funktion einer Person), muss die '
+        'Übersetzung dieselbe Tatsache mit derselben Schärfe tragen.'
+    )
+    return "\n".join(parts)
 
 
 def _annotate_translation_uniqueness(
@@ -130,6 +284,86 @@ def _annotate_translation_uniqueness(
     result.uniqueness_reason = verdict.reason
 
 
+_CARD_LEAD_LIMITS = {
+    # Долгие имена (когда target_lang == "ukrainian"/"english").
+    "ukrain": (50, 180),
+    "english": (50, 200),
+    # Стандартные ISO-коды («uk», «en») — startswith проверка иначе
+    # falls through на общий (50, 200) и UK получает английский max.
+    "uk": (50, 180),
+    "en": (50, 200),
+}
+
+# Source-attribution patterns по всем языкам. card_lead — чистый news hook,
+# атрибуция источника живёт в теле статьи.
+_TRANSLATED_CARD_LEAD_SOURCE_ATTRIBUTION_RE = re.compile(
+    r"(?ix)"
+    r"(?:^|[\s,;—–-])("
+    # English
+    r"according\s+to\s+[A-Z]"
+    r"|as\s+(?:[A-Z][\w\.\-]+\s+)?reports?"
+    r"|[A-Z][\w\.\-]+\s+reports?"
+    r"|sources?\s+say"
+    r"|per\s+[A-Z][\w\.\-]+"
+    # Ukrainian / Russian
+    r"|за\s+повідомленням(?:и)?\s+[А-ЯЇІЄҐA-Z]"
+    r"|як\s+повідомля[єют][а-яїієґ]*\s+[А-ЯЇІЄҐA-Z]"
+    r"|повідомля[єют][а-яїієґ]*\s+[А-ЯЇІЄҐA-Z]"
+    r"|за\s+даними\s+[А-ЯЇІЄҐA-Z]"
+    r"|за\s+словами\s+[А-ЯЇІЄҐA-Z]"
+    r"|пише\s+[А-ЯЇІЄҐA-Z]"
+    r"|інформує\s+[А-ЯЇІЄҐA-Z]"
+    r"|по\s+(?:сообщению|данным|информации)\s+[А-ЯA-Z]"
+    r"|сообщает\s+[А-ЯA-Z]"
+    # German (in case translator left it in)
+    r"|wie\s+[A-ZÄÖÜ][\w\.\-]+\s+(?:berichtet|meldet|mitteilt|schreibt)"
+    r"|nach\s+angaben\s+(?:von|der|des)\s+[A-ZÄÖÜ]"
+    r"|laut\s+[A-ZÄÖÜ][\w\.\-]+"
+    r"|[A-ZÄÖÜ][\w\.\-]+\s+zufolge"
+    r")"
+)
+
+
+def _sanitize_translated_card_lead(text: str, *, target_lang: str) -> str:
+    """Validate the translated card_lead. Returns "" on contract failure
+    so the mu-plugin renderer falls back to the legacy excerpt path."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<[^>]+>", " ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned.strip("\"'`«»“”„")
+    if not cleaned:
+        return ""
+    target_key = target_lang.lower()
+    min_len, max_len = (50, 200)
+    for prefix, limits in _CARD_LEAD_LIMITS.items():
+        if target_key.startswith(prefix):
+            min_len, max_len = limits
+            break
+    length = len(cleaned)
+    if length < min_len or length > max_len:
+        return ""
+    if cleaned.endswith("…") or cleaned.endswith("..."):
+        return ""
+    if cleaned[-1] not in ".!?":
+        return ""
+    inner = cleaned[:-1]
+    # Truncation guards: число/abbrev-точка В КОНЦЕ → trunc'нуто. Раньше
+    # любое \b\d+\.\s в середине роняло валидные lead'ы с датами/abbrev'ами
+    # («8. Mai», «St. Petersburg», «z. B.») в "" — что давало 60%
+    # missing card_lead в production posts.
+    if re.search(r"\b\d+\.\s*$", inner):
+        return ""
+    if re.search(r"\b[A-Za-zА-Яа-яЇїІіЄєҐґ]\.\s*$", inner):
+        return ""
+    # Multi-sentence guard: terminal punct + space + uppercase letter.
+    if re.search(r"[.!?]\s+[A-ZА-ЯЇІЄҐ]", inner):
+        return ""
+    if _TRANSLATED_CARD_LEAD_SOURCE_ATTRIBUTION_RE.search(cleaned):
+        return ""
+    return cleaned
+
+
 async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: str, model: str, target_lang: str, source_text: str) -> TranslationResult:
     try:
         base_url = "https://api.deepseek.com/v1" if provider == "deepseek" else None
@@ -158,6 +392,10 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
         title = str(data.get("title", "")).strip()
         lead = str(data.get("lead", "")).strip()
         body = str(data.get("body", "")).strip()
+        card_lead = _sanitize_translated_card_lead(
+            str(data.get("card_lead", "")).strip(),
+            target_lang=target_lang,
+        )
         if target_lang.lower().startswith("ukrain"):
             title = _normalize_ukrainian_names(title)
             lead = _normalize_ukrainian_names(lead)
@@ -185,6 +423,7 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             title=title,
             lead=lead,
             body=body,
+            card_lead=card_lead,
             success=True,
             tokens=completion_total_tokens(resp),
         )

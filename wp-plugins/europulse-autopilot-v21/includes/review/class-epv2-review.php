@@ -102,6 +102,12 @@ final class EPV2_Review {
 
 	public static function save_payload(int $item_id, array $payload): void {
 		$payload = EPV2_AI_Processor::persist_context_memory_snapshot($item_id, $payload);
+		// Stamp payload с editorial_prompt_version. При следующем resume-вызове
+		// AI-processor сравнит с текущей версией и при mismatch принудительно
+		// пересгенерирует, а не reuse stale payload (где могут быть устаревшие
+		// формулировки — Russia-Ukraine forbidden phrases и т.п.).
+		if (! is_array($payload['_meta'] ?? null)) $payload['_meta'] = [];
+		$payload['_meta']['editorial_prompt_version'] = EPV2_AI_Processor::EDITORIAL_PROMPT_VERSION;
 		$fields = [
 			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 		];

@@ -219,14 +219,20 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         )
         supporting_urls = [entry["url"] for entry in supporting_rich]
 
-    # Group E: adjust length profile based on source richness and enrichment outcome
+    # Group E: adjust length profile based on source richness and enrichment outcome.
+    # Operator-агреемент 2026-05-09: «адекватные статьи», не короткие заметки.
+    # Default = standard (300-500 слов = 2000-3300 chars). Brief только когда
+    # source ОЧЕНЬ тонкий (<60 слов = title+1 предложение) и enrichment не нашёл
+    # supporting sources. Раньше brief срабатывал при <220 слов — это давало
+    # 600-700 chars body даже на нормальных feeds → user видел «брифы».
     effective_length_profile = req.length_profile or "standard"
     ctx.effective_length_profile = effective_length_profile
     if force_enrichment:
-        # Supporting URLs are not supporting facts. Until the worker actually
-        # extracts article text from those URLs, thin feeds must stay compact;
-        # otherwise the rewriter fills the requested length with assumptions.
-        if source_word_count < 220:
+        supporting_count = len(supporting_rich) if supporting_rich else 0
+        # Только supercatastrophically thin source без enrichment → brief.
+        # Иначе оставляем standard — AI имеет supporting sources + dossier
+        # для разворачивания нормальной статьи.
+        if source_word_count < 60 and supporting_count < 2:
             effective_length_profile = "brief"
         elif source_word_count < 500 and effective_length_profile not in {"brief", "standard"}:
             effective_length_profile = "standard"
@@ -335,10 +341,16 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         lang="de",
         title=rewrite.title_de,
         excerpt=rewrite.lead_de,
+        card_lead=getattr(rewrite, "card_lead_de", "") or "",
         content=rewrite.body_de,
     )
 
-    # 4. Translate to UK + EN in parallel
+    # 4. Translate to UK + EN in parallel.
+    # Pass the upfront Story Card so the translator carries entity names,
+    # geography, key facts and editorial verdict as invariants — UK/EN
+    # framing must mirror the DE master 1:1, no softening of refusal /
+    # aggressor framing across the language jump.
+    _story_card_for_translate = _story_card_init if isinstance(_story_card_init, dict) else None
     uk_task = asyncio.create_task(
         translate_from_german(
             rewrite.title_de, rewrite.lead_de, rewrite.body_de,
@@ -346,6 +358,8 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             openai_api_key=ctx.openai_key,
             deepseek_api_key=ctx.deepseek_key,
             provider_order=ctx.provider_order,
+            card_lead_de=getattr(rewrite, "card_lead_de", "") or "",
+            story_card=_story_card_for_translate,
         )
     )
     en_task = asyncio.create_task(
@@ -355,6 +369,8 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             openai_api_key=ctx.openai_key,
             deepseek_api_key=ctx.deepseek_key,
             provider_order=ctx.provider_order,
+            card_lead_de=getattr(rewrite, "card_lead_de", "") or "",
+            story_card=_story_card_for_translate,
         )
     )
     uk_result, en_result = await asyncio.gather(uk_task, en_task)
@@ -363,12 +379,14 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         lang="uk",
         title=uk_result.title,
         excerpt=uk_result.lead,
+        card_lead=getattr(uk_result, "card_lead", "") or "",
         content=uk_result.body,
     )
     ctx.english = LanguagePackage(
         lang="en",
         title=en_result.title,
         excerpt=en_result.lead,
+        card_lead=getattr(en_result, "card_lead", "") or "",
         content=en_result.body,
     )
 
@@ -775,6 +793,7 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
             "lang": "de",
             "title": response.german_master.title,
             "excerpt": response.german_master.excerpt,
+            "card_lead": getattr(response.german_master, "card_lead", "") or "",
             "content": response.german_master.content,
             "seo_title": response.german_master.seo_title,
             "meta_description": response.german_master.meta_description,
@@ -786,6 +805,7 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
             "lang": "uk",
             "title": response.ukrainian.title,
             "excerpt": response.ukrainian.excerpt,
+            "card_lead": getattr(response.ukrainian, "card_lead", "") or "",
             "content": response.ukrainian.content,
             "seo_title": response.ukrainian.seo_title,
             "meta_description": response.ukrainian.meta_description,
@@ -797,6 +817,7 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
             "lang": "en",
             "title": response.english.title,
             "excerpt": response.english.excerpt,
+            "card_lead": getattr(response.english, "card_lead", "") or "",
             "content": response.english.content,
             "seo_title": response.english.seo_title,
             "meta_description": response.english.meta_description,

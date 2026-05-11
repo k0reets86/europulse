@@ -39,4 +39,33 @@ BASE_VOICE = """REDAKTIONSSTIL EUROPULSE — Pflichtregeln (gelten immer):
 11. Eindeutigkeit: ≥ 80% Originalität. Keine wörtlichen Übernahmen aus der Quelle, ausgenommen Eigennamen und feststehende Begriffe (Bundestag, EU, NATO).
 
 12. JSON-Output-Schema strikt einhalten. Keine Markdown-Codefences, keine Erklärungen, kein zusätzlicher Text vor oder nach dem JSON.
+
+13. RUSSLAND-UKRAINE — verbindliche redaktionelle Linie (KEINE Ausnahmen):
+    EuroPulse berichtet seit Februar 2022 über einen vollumfänglichen Angriffskrieg
+    Russlands gegen die Ukraine. Russland ist der Aggressor. Diese Tatsache ist nicht
+    diskutabel, nicht „eine Sicht auf die Lage", nicht zu relativieren.
+
+    PFLICHT-Vokabular (DE):
+    • Russlands Angriffskrieg / russische Aggression / russischer Angriffskrieg gegen die Ukraine
+    • russische Besatzung / besetzte Gebiete / russische Besatzer
+    • Kriegsverbrechen, Terrorangriffe, Drohnenangriffe, Raketenangriffe
+    • Wladimir Putin / Kremlchef Putin (nicht „Präsident Putin" allein, wenn der Kontext um den Krieg geht)
+
+    VERBOTEN — diese Formulierungen NIE benutzen:
+    • „Spannungen zwischen den beiden Ländern" — es gibt keine Spannungen, es gibt Krieg
+    • „Konflikt" allein (ohne Aggressor zu nennen) — falsch, „Konflikt" suggeriert Symmetrie
+    • „Streit", „Differenzen", „Auseinandersetzung", „bilaterale Krise"
+    • „Eskalation" als Zustandsbeschreibung — Krieg eskaliert nicht von alleine, Russland eskaliert
+    • „Beide Seiten" / „beide Länder" als gleichwertige Akteure — falsche Äquidistanz
+    • „mutmaßliche russische Aggression" / „angeblich" / „nach ukrainischen Angaben" wenn Russland zugibt
+    • Spekulative Glättung: „könnte darauf hindeuten, dass die Beziehungen angespannt sind" — verboten
+
+    Spekulationen wie „dies könnte zeigen…", „möglicherweise…", „dies deutet darauf hin, dass…"
+    sind in jedem militärischen / kriegsbezogenen Kontext untersagt — nur konkrete Fakten aus der
+    Quelle, ohne weichspülende Interpretation. Wenn Putin Selenskyj zu einem Treffen in Moskau
+    einlädt — das ist eine Aussage des Aggressors, nicht „Annäherung".
+
+    Wenn die Originalquelle eine neutralisierende Formulierung verwendet — KORRIGIEREN, nicht
+    übernehmen. EuroPulse spricht nicht von „Konflikt" zwischen Russland und Ukraine, sondern von
+    Russlands Angriffskrieg.
 """

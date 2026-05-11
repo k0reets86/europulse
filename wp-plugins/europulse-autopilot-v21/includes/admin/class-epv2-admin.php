@@ -458,7 +458,14 @@ final class EPV2_Admin {
 			wp_send_json_success(self::queue_lightweight_snapshot_payload());
 		}
 		set_transient($guard_key, time(), self::QUEUE_SNAPSHOT_REQUEST_COOLDOWN);
-		$snapshot = self::queue_snapshot_payload($orderby, $order, $state_filter, $category_filter);
+		// queue_snapshot_payload fetches a single LIMIT-80 slice across all
+		// states and then filters per-block, which silently empties the
+		// published/rejected/manual_review blocks whenever the «new» state
+		// is large enough to fill the slice. Initial server render uses
+		// queue_lightweight_snapshot_payload which queries each block
+		// separately, so blocks stay populated. AJAX refresh must use the
+		// same per-block path or sections disappear mid-session.
+		$snapshot = self::queue_lightweight_snapshot_payload();
 		set_transient($cache_key, $snapshot, self::QUEUE_SNAPSHOT_CACHE_TTL);
 		wp_send_json_success($snapshot);
 	}

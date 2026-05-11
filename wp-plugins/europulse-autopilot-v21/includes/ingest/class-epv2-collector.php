@@ -15,6 +15,28 @@ final class EPV2_Collector {
 		if (EPV2_Runs::has_recent_started('collect', 300)) {
 			return;
 		}
+		// HARD CAP: backlog protection — fires даже при force=true.
+		// Orchestrator вызывает run_scheduled(true) каждый свой tick
+		// (см. epv2_bridge_orchestrator.py:194), bypassing soft backpressure.
+		// Это нарушает контракт «защита когда pending большой» (operator
+		// feedback 2026-05-11). Hard cap @ 200 pending items блокирует
+		// collect независимо от force, без update timer/counter — просто
+		// no-op, попробуем на следующем тике.
+		global $wpdb;
+		$pending_hard = (int) $wpdb->get_var(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue
+			 WHERE state IN ('new', 'retry_process', 'processing_de')"
+		);
+		if ($pending_hard >= 200) {
+			update_option('epv2_collect_backpressure_last', [
+				'pending' => $pending_hard,
+				'hard_cap' => 200,
+				'force_was' => $force,
+				'blocked_at' => current_time('mysql'),
+				'note' => 'hard backlog cap fires regardless of force flag',
+			], false);
+			return;
+		}
 		// Backpressure-deferred until timestamp (set by previous over-
 		// capacity tick). Если сейчас < deferred_until — выходим, не
 		// триггерим should_defer повторно (иначе counter растёт каждый

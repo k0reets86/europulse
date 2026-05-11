@@ -97,6 +97,7 @@ final class EPV2_Bootstrap {
 			'EPV2_Publish_Gate' => 'publish/class-epv2-publish-gate.php',
 			'EPV2_Publisher' => 'publish/class-epv2-publisher.php',
 			'EPV2_Post_Audit' => 'publish/class-epv2-post-audit.php',
+			'EPV2_Source_Linker' => 'publish/class-epv2-source-linker.php',
 			'EPV2_Manual_Mode' => 'manual/class-epv2-manual-mode.php',
 
 			'EPV2_Logger' => 'metrics/class-epv2-logger.php',

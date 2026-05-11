@@ -65,6 +65,8 @@ final class EPV2_Publisher {
 						}
 						self::retire_stale_publish_item($fresh_item, $payload, $e->getMessage());
 						$run_payload['result'] = 'stale_ready_item_retired';
+					} elseif (self::is_media_publish_blocker($e) && self::publish_blocker_circuit_breaker_trips((int) $item->id, 'media:' . $e->getMessage())) {
+						$run_payload['result'] = 'circuit_breaker_manual_review';
 					} elseif (self::is_media_publish_blocker($e)) {
 						self::invalidate_payload_media((int) $item->id);
 						self::cleanup_partial_drafts_for_queue((int) $item->id);
@@ -94,6 +96,8 @@ final class EPV2_Publisher {
 						}
 						EPV2_Jobs::enqueue_process();
 						$run_payload['result'] = 'media_blocker_sent_to_repair';
+					} elseif (self::is_hard_publish_blocker($e) && self::publish_blocker_circuit_breaker_trips((int) $item->id, 'hard:' . $e->getMessage())) {
+						$run_payload['result'] = 'circuit_breaker_manual_review';
 					} elseif (self::is_hard_publish_blocker($e)) {
 						self::cleanup_partial_drafts_for_queue((int) $item->id);
 						$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
@@ -281,11 +285,12 @@ final class EPV2_Publisher {
 			$meta_description = (string) ($lang_payload['meta_description'] ?? $payload['seo']['meta_description'] ?? '');
 			$slug = (string) ($lang_payload['slug'] ?? $payload['seo']['slug'] ?? '');
 			$focus_keywords = $lang_payload['focus_keywords'] ?? $payload['seo']['focus_keywords'] ?? [];
+			$link_sources_initial = class_exists('EPV2_Source_Linker') ? EPV2_Source_Linker::sources_for_item($item, $payload) : [];
 			$post_data = [
 				'post_type' => 'post',
 				'post_status' => $working_status,
 				'post_title' => (string) ($lang_payload['title'] ?? $item->original_title),
-				'post_content' => self::build_post_content((string) ($lang_payload['content'] ?? $item->original_content), (string) ($lang_payload['excerpt'] ?? ''), $media_url, $inline_media_urls, $sourceUrl, $lang, $categories, (int) ($existing_posts[$lang] ?? 0)),
+				'post_content' => self::build_post_content((string) ($lang_payload['content'] ?? $item->original_content), (string) ($lang_payload['excerpt'] ?? ''), $media_url, $inline_media_urls, $sourceUrl, $lang, $categories, (int) ($existing_posts[$lang] ?? 0), $link_sources_initial),
 				'post_excerpt' => (string) ($lang_payload['excerpt'] ?? wp_trim_words(wp_strip_all_tags((string) $item->original_excerpt), 24, '')),
 				'post_category' => $term_ids,
 			];
@@ -312,6 +317,11 @@ final class EPV2_Publisher {
 			self::update_post_meta_if_changed($post_id, '_epv2_source_url', $sourceUrl);
 			self::update_post_meta_if_changed($post_id, '_epv2_queue_id', (int) $item->id);
 			self::update_post_meta_if_changed($post_id, '_epv2_publish_media_url', $media_url);
+			// Card-lead — выделенный AI-сгенерированный лид-магнит для карточек на главной.
+			// Если worker сгенерил его и провалидировал — он уже sanitised на стороне Python.
+			// Mu-plugin читает это поле первым; пустота → fallback на post_excerpt.
+			$card_lead_payload = isset($lang_payload['card_lead']) ? trim((string) $lang_payload['card_lead']) : '';
+			self::update_post_meta_if_changed($post_id, '_europulse_card_lead', sanitize_text_field($card_lead_payload));
 			self::update_post_meta_if_changed($post_id, '_epv2_title_hash', hash('sha256', mb_strtolower(trim((string) ($lang_payload['title'] ?? $item->original_title)))));
 			self::update_post_meta_if_changed($post_id, '_epv2_content_hash', hash('sha256', mb_strtolower(trim(wp_strip_all_tags((string) ($lang_payload['content'] ?? $item->original_content))))));
 			self::update_post_meta_if_changed($post_id, '_epv2_semantic_hash', hash('sha256', self::semantic_keywords((string) ($lang_payload['title'] ?? '') . ' ' . (string) ($lang_payload['excerpt'] ?? '') . ' ' . wp_strip_all_tags((string) ($lang_payload['content'] ?? '')))));
@@ -545,10 +555,11 @@ final class EPV2_Publisher {
 			$meta_description = trim((string) ($lang_payload['meta_description'] ?? ''));
 			$focus_keywords = is_array($lang_payload['focus_keywords'] ?? null) ? $lang_payload['focus_keywords'] : [];
 
+			$link_sources_update = class_exists('EPV2_Source_Linker') ? EPV2_Source_Linker::sources_for_item($item, $payload) : [];
 			$post_update = [
 				'ID' => $post_id,
 				'post_excerpt' => $excerpt,
-				'post_content' => self::build_post_content($content, $excerpt, $media_url, $inline_media_urls, $source_url, (string) $lang, $categories, $post_id),
+				'post_content' => self::build_post_content($content, $excerpt, $media_url, $inline_media_urls, $source_url, (string) $lang, $categories, $post_id, $link_sources_update),
 				'post_category' => $term_ids,
 			];
 			if ($title !== '') {
@@ -570,6 +581,8 @@ final class EPV2_Publisher {
 			self::update_post_meta_if_changed($post_id, '_epv2_source_url', $source_url);
 			self::update_post_meta_if_changed($post_id, '_epv2_queue_id', (int) $item->id);
 			self::update_post_meta_if_changed($post_id, '_epv2_publish_media_url', $media_url);
+			$card_lead_payload = isset($lang_payload['card_lead']) ? trim((string) $lang_payload['card_lead']) : '';
+			self::update_post_meta_if_changed($post_id, '_europulse_card_lead', sanitize_text_field($card_lead_payload));
 			self::update_post_meta_if_changed($post_id, '_epv2_title_hash', hash('sha256', mb_strtolower(trim($title !== '' ? $title : (string) get_the_title($post_id)))));
 			self::update_post_meta_if_changed($post_id, '_epv2_content_hash', hash('sha256', mb_strtolower(trim(wp_strip_all_tags($content)))));
 			self::update_post_meta_if_changed($post_id, '_epv2_semantic_hash', hash('sha256', self::semantic_keywords(($title !== '' ? $title : (string) get_the_title($post_id)) . ' ' . $excerpt . ' ' . wp_strip_all_tags($content))));
@@ -717,12 +730,19 @@ final class EPV2_Publisher {
 		}
 	}
 
-	private static function build_post_content(string $content, string $excerpt, string $media_url, array $inline_media_urls, string $source_url, string $lang, array $categories, int $post_id = 0): string {
+	private static function build_post_content(string $content, string $excerpt, string $media_url, array $inline_media_urls, string $source_url, string $lang, array $categories, int $post_id = 0, array $link_sources = []): string {
 		$prefix = EPV2_Media::content_prefix($media_url, $lang);
 		$inline_media_urls = array_values(array_filter(EPV2_Media::normalize_media_list($inline_media_urls), static function (string $url) use ($media_url): bool {
 			return $url !== '' && $url !== $media_url;
 		}));
 		$clean_content = self::strip_duplicate_lead($content, $excerpt);
+		// Source-linking: первое упоминание каждого источника оборачиваем
+		// в <a>...</a> для legal-attribution. Применяется ДО media-инжекции
+		// и compliance-block'а, потому что атрибуция живёт в основном
+		// тексте AI rewriter'а.
+		if ($link_sources !== [] && class_exists('EPV2_Source_Linker')) {
+			$clean_content = EPV2_Source_Linker::link_attributions($clean_content, $link_sources);
+		}
 		$clean_content = self::inject_inline_media_into_content($clean_content, $inline_media_urls, $lang);
 		$related = '';
 		$body = trim($prefix . "\n\n" . $clean_content . "\n\n" . $related);
@@ -887,6 +907,16 @@ final class EPV2_Publisher {
 			return false;
 		}
 		if (! EPV2_Media::is_fallback_stock_url($media_url)) {
+			// Source-host media (image domain matches one of the supporting
+			// source URLs) is trusted by definition: AI / RSS chose the
+			// original article photo. Filename-based relevance heuristic
+			// fires false negatives when source uses generic slugs like
+			// "image-12345.webp" or "eine-entschaerfte.webp" — those don't
+			// contain title tokens but ARE the correct editorial photo.
+			// Skip the heuristic for source-host; rely on the source choice.
+			if (EPV2_Media::is_source_host_media($media_url, $source_dossier)) {
+				return true;
+			}
 			return EPV2_Media::is_relevant_media($media_url, $title, $excerpt, $categories, $source_dossier);
 		}
 		$diagnostics = EPV2_Media::media_diagnostics($media_url, $title, $excerpt, $categories, $source_dossier);
@@ -1269,6 +1299,56 @@ final class EPV2_Publisher {
 				return true;
 			}
 		}
+		return false;
+	}
+
+	/**
+	 * Loop circuit-breaker: if the same publish blocker (media / hard /
+	 * stale) fires ≥3 times for the same item, escalate straight to
+	 * manual_review instead of looping ready_publish ↔ retry_process and
+	 * burning AI tokens on the same self-rebuilding payload.
+	 *
+	 * Returns true when the breaker tripped (caller skips the requeue).
+	 */
+	private static function publish_blocker_circuit_breaker_trips(int $item_id, string $reason): bool {
+		if ($reason === '') {
+			return false;
+		}
+		$fingerprint = substr(hash('sha256', mb_strtolower($reason)), 0, 16);
+		$item = EPV2_Queue::get_item_summary($item_id);
+		$notes = $item ? json_decode((string) ($item->admin_notes ?? ''), true) : [];
+		$notes = is_array($notes) ? $notes : [];
+		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$breaker = is_array($notes['_system']['publish_blocker_breaker'] ?? null) ? $notes['_system']['publish_blocker_breaker'] : [];
+		$current_fp = (string) ($breaker['fingerprint'] ?? '');
+		$count = (int) ($breaker['count'] ?? 0);
+		if ($current_fp === $fingerprint) {
+			$count++;
+		} else {
+			$current_fp = $fingerprint;
+			$count = 1;
+		}
+		$notes['_system']['publish_blocker_breaker'] = [
+			'fingerprint' => $current_fp,
+			'count' => $count,
+			'last_reason' => mb_substr($reason, 0, 240),
+			'updated_at' => gmdate('Y-m-d H:i:s'),
+		];
+		if ($count >= 3) {
+			EPV2_Queue::mark_state($item_id, 'manual_review', [
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+				'error_message' => 'Циркуит-брейкер: один и тот же publish-blocker сработал ' . $count . ' раз подряд. Требует ручной правки. Last reason: ' . $reason,
+			]);
+			return true;
+		}
+		// Persist incremented counter without state change so the next
+		// retry sees the running count.
+		global $wpdb;
+		$wpdb->update(
+			$wpdb->prefix . 'epv2_queue',
+			['admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE)],
+			['id' => $item_id]
+		);
 		return false;
 	}
 

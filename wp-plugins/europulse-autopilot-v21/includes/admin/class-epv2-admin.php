@@ -1125,13 +1125,10 @@ final class EPV2_Admin {
 			if ($state === 'publishing') {
 				return 'Публикуется';
 			}
-			if ($state === 'new') {
-				$retry_after = trim((string) ($system['retry_after'] ?? ''));
-				$retry_ts = $retry_after !== '' ? strtotime($retry_after) : false;
-				if ($retry_ts && $retry_ts > time()) {
-					return 'Пауза доводки до ' . wp_date('H:i', $retry_ts);
-				}
-			}
+			// «Пауза доводки до HH:MM» убран (operator-feedback 2026-05-11):
+			// «Новые» = простая очередь ждёт обработки, никаких variations.
+			// retry_after / workflow_not_before — internal, оператору
+			// не нужно видеть в этом блоке.
 		return match ($state) {
 			'new', 'reserve', 'retry_process' => 'Новый',
 			'processing_de' => 'В работе',

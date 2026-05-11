@@ -710,7 +710,14 @@ if (! defined('ABSPATH')) {
 			return ['ok' => false, 'reason' => 'изображение слишком маленькое или техническое', 'media' => $media];
 		}
 		if (! empty($media['attachment_id']) && $fallback_title !== '') {
-			update_post_meta((int) $media['attachment_id'], '_wp_attachment_image_alt', sanitize_text_field(self::alt_context_title($fallback_title, 'source')));
+			// Alt-text единственный на attachment (Polylang без Pro не
+			// translate'ит media). Если уже set — не overwrite каждый раз;
+			// иначе финальная per-language публикация (EN) затирает alt
+			// для всех 3 lang versions. Заполняем только если пусто.
+			$existing_alt = (string) get_post_meta((int) $media['attachment_id'], '_wp_attachment_image_alt', true);
+			if ($existing_alt === '') {
+				update_post_meta((int) $media['attachment_id'], '_wp_attachment_image_alt', sanitize_text_field(self::alt_context_title($fallback_title, 'source')));
+			}
 			self::apply_attachment_description((int) $media['attachment_id'], $url, $fallback_title);
 		}
 		return ['ok' => true, 'reason' => 'ok', 'media' => $media];

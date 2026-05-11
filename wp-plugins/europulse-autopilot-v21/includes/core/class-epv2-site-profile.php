@@ -179,6 +179,16 @@ final class EPV2_Site_Profile {
 			(string) ($context['stage'] ?? ''),
 		]))));
 
+		// Operator-агреемент 2026-05-09: вернулись к category-based shape
+		// selection. Content-size shape давал слишком короткие brief'ы
+		// (220-680 chars target) когда source RSS feed thin, что
+		// конфликтовало с целью «адекватные статьи» 1500-2000 chars.
+		// Length profile (standard/brief) теперь правильно балансирует
+		// AI rewriter target (см. pipeline.py); shape оставляем news/article
+		// для politik/wirtschaft/welt чтобы scorer ожидал full-format.
+		$content_only = trim(wp_strip_all_tags((string) ($context['content'] ?? '')));
+		$source_chars = mb_strlen($content_only);
+
 		if ($zone === 'analysis') {
 			return 'analysis';
 		}
@@ -197,13 +207,18 @@ final class EPV2_Site_Profile {
 		) {
 			return 'service_note';
 		}
+		// Существующий keyword-based bulletin override (announcement-style)
 		if (
 			$source_count <= 1
-			&& mb_strlen($text) <= 420
+			&& $source_chars <= 420
 			&& preg_match('/\b(heute|morgen|wird|soll|startet|beginnt|endet|streik|warnung|show|sendung|spiel|duell|event|messe|börse|beratung)\b/u', $text) === 1
 		) {
 			return 'bulletin';
 		}
+		// Категория-based fallback. Politik / wirtschaft / world / europa
+		// или ≥3 sources → article (980 min DE — для полноценных статей).
+		// Иначе news (700 min DE — обычная новость). bulletin теперь только
+		// через explicit keyword match выше (announcement-style).
 		if ($source_count >= 3 || in_array($category, ['politik', 'wirtschaft', 'world', 'europa'], true)) {
 			return 'article';
 		}

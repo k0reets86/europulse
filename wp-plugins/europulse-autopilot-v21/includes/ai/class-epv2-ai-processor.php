@@ -5586,11 +5586,19 @@ final class EPV2_AI_Processor {
 		if ($featured_media_url === '') {
 			return false;
 		}
+		// CHECK ORDER FIX (P0.2, 2026-05-11): generic_stock check FIRST,
+		// перед is_source_host_media. Если publisher serves placeholder
+		// (orf.at/og-fallback-news.png) с своего CDN, is_source_host_media
+		// возвращает true для orf.at — но image still generic placeholder.
+		// Item 2253 (post 8779/8780/8781) случай — euronews article published
+		// с orf.at og-fallback.png because dossier supporting содержал orf.at,
+		// so is_source_host matched. Inverting order — generic-stock always
+		// blocks regardless of source-host membership.
+		if (self::payload_featured_media_is_generic_stock($payload)) {
+			return false;
+		}
 		$dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? $payload['_meta']['source_dossier'] : [];
 		if (EPV2_Media::is_source_host_media($featured_media_url, $dossier)) {
-			return true;
-		}
-		if (! self::payload_featured_media_is_generic_stock($payload)) {
 			return true;
 		}
 		return ! self::payload_has_source_dossier_media_candidates($payload);

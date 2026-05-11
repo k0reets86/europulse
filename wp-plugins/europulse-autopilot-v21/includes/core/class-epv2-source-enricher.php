@@ -10,7 +10,13 @@ if (! defined('ABSPATH')) {
 		$force_supporting = ! empty($options['force_supporting']);
 		$target_supporting = max(2, min(5, (int) ($options['target_supporting'] ?? 2)));
 		$context_memory = self::normalize_context_memory((array) ($options['context_memory'] ?? []));
-		$max_runtime_seconds = max(2, min(20, (int) ($options['max_runtime_seconds'] ?? 6)));
+		// Budget bump 2026-05-11 (P0.1 fix): default 6s was too tight for
+		// 3 supporting URLs × (200-900ms fetch + DOM parse). Live audit
+		// of 20/20 published items showed empty supporting.content despite
+		// successful fetches. Reasonable URL fetch + parse takes 1-2 sec,
+		// 3 URLs = 3-6 sec + search latency (1-3 sec). Total 6-10 sec.
+		// Bumped к 12 sec default — accommodates 3-4 URLs reliably.
+		$max_runtime_seconds = max(2, min(30, (int) ($options['max_runtime_seconds'] ?? 12)));
 		$deadline = microtime(true) + $max_runtime_seconds;
 		$dossier = [
 			'primary' => self::source_entry((string) ($item->original_url ?? ''), (string) ($item->original_title ?? ''), (string) ($item->original_excerpt ?? ''), (string) ($item->original_content ?? ''), (string) ($item->source_image_url ?? '')),
@@ -99,12 +105,28 @@ if (! defined('ABSPATH')) {
 				array_values(array_filter(array_map('trim', explode(',', (string) ($item->category_proposed ?? ''))))),
 				$dossier
 			);
+			// STRICT: require actual content OR substantial excerpt (P0.1
+			// fix 2026-05-11). support_entry_can_be_brief loophole previously
+			// admitted entries с empty content if title ≥55 chars OR excerpt
+			// ≥90 chars — these URL-only stubs (no content body) feed AI
+			// nothing about supporting story, causing fabrication. Now:
+			// either ≥280 chars content OR ≥200 chars excerpt — anything
+			// less is useless context. has_visual_support remains valid path.
+			$ent_content_len = mb_strlen((string) ($entry['content'] ?? ''));
+			$ent_excerpt_len = mb_strlen((string) ($entry['excerpt'] ?? ''));
 			if (
-				mb_strlen((string) ($entry['content'] ?? '')) < 280
-				&& mb_strlen((string) ($entry['excerpt'] ?? '')) < 120
+				$ent_content_len < 280
+				&& $ent_excerpt_len < 200
 				&& ! $has_visual_support
-				&& ! self::support_entry_can_be_brief($entry, $item, $dossier['primary'])
 			) {
+				if (class_exists('EPV2_Logger')) {
+					EPV2_Logger::info('source_enricher', 'supporting_dropped_empty', [
+						'url' => $url,
+						'content_len' => $ent_content_len,
+						'excerpt_len' => $ent_excerpt_len,
+						'has_visual_support' => $has_visual_support ? 1 : 0,
+					]);
+				}
 				continue;
 			}
 			$dossier['supporting'][] = $entry;

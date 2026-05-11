@@ -73,6 +73,16 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
   ✓ EN: «Kyiv rejects meeting in Moscow, the capital of the aggressor state»
   ✗ UK: «Зеленський може поїхати до Москви»
   ✗ EN: «Zelensky may travel to Moscow».
+- KONKRETE ZAHLEN — KEINE NEUEN ERFINDUNGEN beim Übersetzen: wenn DE master
+  spezifische Zahlen enthält (Preise, Index-Stände, Prozent, Gehälter),
+  übertrage die GLEICHEN Zahlen 1:1. NIE eigene Zahlen hinzufügen, die nicht
+  im DE master stehen. Wenn DE allgemein formuliert («mehrere tausend Euro»),
+  übersetze ebenfalls allgemein («кілька тисяч євро» / «several thousand
+  euros») — niemals durch konkrete Erfindungen ersetzen.
+- Bei der Übersetzung gilt: DE master = ein-zu-eins Vorlage für Fakten.
+  Translator hat keine Quelle ausser dem DE master + story_card.key_facts.
+  Wenn UK/EN spezifische Zahl enthält, die weder im DE noch in key_facts
+  steht — diese Zahl IST eine Halluzination und muss entfernt werden.
 
 ВАЖЛИВО — РОСІЯ-УКРАЇНА — обов'язкова редакційна лінія (БЕЗ винятків):
 EuroPulse висвітлює повномасштабну агресивну війну Росії проти України з лютого 2022 року.

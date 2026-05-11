@@ -406,11 +406,87 @@ final class EPV2_AI_Response_Validator {
 		return false;
 	}
 
+	/**
+	 * Detect specific numbers in DE body that don't appear в source dossier
+	 * (primary content + supporting + story_card.key_facts). Returns array of
+	 * suspicious numbers as strings.
+	 *
+	 * Hallucination pattern (observed 2026-05-11): thin RSS teaser (~150
+	 * chars primary content), AI generates DE body with specific Euro prices
+	 * / index values / percentages that don't appear in any source. Fact-
+	 * checking 72 published items revealed 7 confirmed cases (Sylt real
+	 * estate, DAX close, Cupra car prices, UAH salaries, China inflation %).
+	 *
+	 * Only flags numbers ≥ 1000 OR specific percentage values (X,Y%) which
+	 * AI is most likely to invent. Years (2020-2030) и mass nouns are
+	 * filtered out as natural context.
+	 */
+	private static function detect_invented_numbers(array $payload): array {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$dossier = is_array($meta['source_dossier'] ?? null) ? $meta['source_dossier'] : [];
+		$haystack = '';
+		$haystack .= (string) ($dossier['primary']['content'] ?? '');
+		$haystack .= ' ' . (string) ($dossier['primary']['excerpt'] ?? '');
+		$haystack .= ' ' . (string) ($dossier['primary']['title'] ?? '');
+		foreach ((array) ($dossier['supporting'] ?? []) as $s) {
+			if (! is_array($s)) continue;
+			$haystack .= ' ' . (string) ($s['content'] ?? '');
+			$haystack .= ' ' . (string) ($s['excerpt'] ?? '');
+			$haystack .= ' ' . (string) ($s['title'] ?? '');
+		}
+		foreach ((array) ($dossier['quotes'] ?? []) as $q) {
+			$haystack .= ' ' . (is_array($q) ? (string) ($q['text'] ?? '') : (string) $q);
+		}
+		$card = is_array($meta['story_card'] ?? null) ? $meta['story_card'] : [];
+		foreach ((array) ($card['key_facts'] ?? []) as $kf) {
+			$haystack .= ' ' . (is_string($kf) ? $kf : wp_json_encode($kf, JSON_UNESCAPED_UNICODE));
+		}
+		// Strip all separators for permissive matching: «24.338» matches «24338»
+		$haystack_norm = preg_replace('/[\s.,]/', '', $haystack);
+
+		$de_content = trim(wp_strip_all_tags((string) ($payload['languages']['de']['content'] ?? '')));
+		if ($de_content === '') return [];
+
+		// Match patterns: 4+ digit numbers with German separators, или X,Y Prozent
+		preg_match_all('/\b\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?\b|\b\d{2,4}[,.]\d+\s*(?:Prozent|Euro|Dollar|EUR|USD|km|kg|Mio|Mrd|Mrd\.|Mio\.|UAH|млрд|млн)\b/u', $de_content, $m);
+		$candidates = array_unique($m[0] ?? []);
+		$invented = [];
+		foreach ($candidates as $cand) {
+			// Strip units и separators для search
+			$clean_unit = preg_replace('/\s*(Prozent|Euro|Dollar|EUR|USD|km|kg|Mio|Mrd|Mrd\.|Mio\.|UAH|млрд|млн)$/u', '', $cand);
+			$clean_unit = trim($clean_unit);
+			$norm = preg_replace('/[\s.,]/', '', $clean_unit);
+			if ($norm === '' || strlen($norm) < 3) continue;
+			// Skip years 2020-2030 — natural context references
+			if (preg_match('/^20[2-3]\d$/', $norm)) continue;
+			// Skip if normalized number found in normalized haystack
+			if (str_contains($haystack_norm, $norm)) continue;
+			// Also try with decimal — «24,338» might be «24338,00»
+			$invented[] = $cand;
+		}
+		return $invented;
+	}
+
 	public static function editorial_quality(array $payload): array {
 		$warnings = [];
 		$score = 100;
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 		$source_count = (int) ($meta['source_count'] ?? 0);
+
+		// Hallucinated specific numbers — major editorial integrity issue.
+		// Worker prompt anti-invent rules are in rewriter.py + translator.py
+		// (commit 2026-05-11). This is the second-layer guard на PHP side:
+		// even если AI ignores prompt, validator catches и penalizes score.
+		$invented_nums = self::detect_invented_numbers($payload);
+		if (count($invented_nums) >= 2) {
+			$warnings['de'][] = 'обнаружены изобретённые конкретные числа (' . count($invented_nums) . '), отсутствующие в источниках: ' . implode(', ', array_slice($invented_nums, 0, 3));
+			// Drop quality by 35 — usually pushes item ниже publish-ready
+			// threshold → manual_review для operator's decision.
+			$score -= 35;
+		} elseif (count($invented_nums) === 1) {
+			$warnings['de'][] = 'возможно изобретённое число: ' . $invented_nums[0];
+			$score -= 8;
+		}
 		$primary_url = (string) ($meta['source_dossier']['primary']['url'] ?? '');
 		$has_strong_primary = self::looks_like_official_primary($primary_url);
 		$categories = is_array($payload['categories'] ?? null) ? array_values(array_filter(array_map('strval', $payload['categories']))) : [];
@@ -621,7 +697,12 @@ final class EPV2_AI_Response_Validator {
 			}
 
 			if ($lang_warnings !== []) {
-				$warnings[$lang] = array_values(array_unique($lang_warnings));
+				// Merge with any pre-existing warnings for this lang (e.g.,
+				// hallucination guard added before the per-lang loop). Replacing
+				// the whole array would silently drop those — observed
+				// 2026-05-11 после добавления detect_invented_numbers.
+				$existing = is_array($warnings[$lang] ?? null) ? $warnings[$lang] : [];
+				$warnings[$lang] = array_values(array_unique(array_merge($existing, $lang_warnings)));
 			}
 		}
 
@@ -713,7 +794,12 @@ final class EPV2_AI_Response_Validator {
 			}
 
 			if ($lang_warnings !== []) {
-				$warnings[$lang] = array_values(array_unique($lang_warnings));
+				// Merge with any pre-existing warnings for this lang (e.g.,
+				// hallucination guard added before the per-lang loop). Replacing
+				// the whole array would silently drop those — observed
+				// 2026-05-11 после добавления detect_invented_numbers.
+				$existing = is_array($warnings[$lang] ?? null) ? $warnings[$lang] : [];
+				$warnings[$lang] = array_values(array_unique(array_merge($existing, $lang_warnings)));
 			}
 		}
 

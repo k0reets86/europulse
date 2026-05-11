@@ -140,6 +140,30 @@ ZAHLEN UND EINHEITEN — KRITISCH (gegen Pattern «17,8 Euro» вместо «17
   Monaten»), übertrage этот Zeitraum в текст. Nicht einfach «aktuell»
   schreiben.
 
+KONKRETE ZAHLEN — KEINE ERFINDUNGEN (CRITICAL, gegen Pattern Sylt-Preise / DAX-Stand / Auto-Preise):
+- Wenn das Original (primary content + Story-Card.key_facts + supporting
+  sources) eine spezifische Zahl NICHT enthält — DARFST DU SIE NICHT
+  ERFINDEN. Auch nicht «zur Anschaulichkeit». Auch nicht «basierend auf
+  ähnlichen Quellen». Auch nicht aus Trainingswissen.
+- VERBOTEN: konkrete Preise («9.922 Euro pro Quadratmeter»), Index-Stände
+  («DAX schloss bei 24.338 Zählern»), Prozent-Werte («36,4 Prozent
+  Energiekosten»), Gehälter («20.000 UAH Grundgehalt»), wenn Quelle diese
+  Zahlen NICHT EXPLIZIT enthält.
+- ERLAUBT bei fehlender konkreter Zahl: generische Begriffe verwenden —
+  «im fünfstelligen Bereich», «mehrere tausend Euro», «im einstelligen
+  Prozent-Bereich», «rund», «etwa», «überdurchschnittlich», «in der
+  Grössenordnung von». Verallgemeinerung ist EHRLICHER als Erfindung.
+- DOPPELT-PRÜFE: vor jeder konkreten Zahl ≥1000 oder jedem konkreten
+  Prozentwert frage dich «steht diese Zahl wortwörtlich im Original?»
+  Wenn Nein → ersetze durch generische Formulierung.
+- Beispiel-Anwendung: wenn Original sagt «Quadratmeter Sylt für mehr als
+  12.500 Euro» — DARFST DU «mehr als 12.500 Euro» schreiben (steht im
+  Original). DARFST DU NICHT «zweistellige Rückgänge auf 9.922 Euro»
+  schreiben (steht NICHT im Original).
+- Wenn dünne Quelle (kurzer RSS-Teaser, paywalled article ohne content) —
+  bleibe BEI DEN FAKTEN DES TEASERS. Lieber kürzerer Artikel mit echten
+  Fakten als langer mit erfundenen Details.
+
 AKTEUR-KOHÄRENZ — KRITISCH (gegen Pattern «новый PM описан как часть старой
 системы»):
 - Wenn die Story über Machtwechsel, Sturz, Umsturz oder Reformbewegung

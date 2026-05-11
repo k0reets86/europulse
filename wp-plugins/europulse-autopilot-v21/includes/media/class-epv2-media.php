@@ -1302,6 +1302,19 @@ if (! defined('ABSPATH')) {
 			'cdn.euronews.com'   => 'euronews',
 			'kyivindependent.com' => 'kyivindependent',
 			'cdn.kyivindependent.com' => 'kyivindependent',
+			// Heise CDN — observed 2026-05-11: heise.cloudimg.io serves
+			// hero images для heise.de articles.
+			'heise.cloudimg.io'  => 'heise',
+			// BR (Bayerischer Rundfunk) image CDN.
+			'img.br.de'          => 'br',
+			'cdn.br.de'          => 'br',
+			'media.br.de'        => 'br',
+			// MDR image CDN.
+			'img.mdr.de'         => 'mdr',
+			'cdn.mdr.de'         => 'mdr',
+			// FAZ-Frankfurter Rundschau (fr.de) and BR share regional family
+			// nothing here — different publishers, NO alias. fr.de и mdr.de
+			// остаются separate. Cross-publisher mismatch остаётся flagged.
 		];
 		foreach ($aliases as $suffix => $family) {
 			if ($host === $suffix || str_ends_with($host, '.' . $suffix)) {

@@ -11,7 +11,7 @@ final class EPV2_AI_Response_Validator {
 	// Prevents stale-score bypass — items с perfectly-scored payloads до
 	// validator update'а от gate'а проходят (item 2257 case: stored q=100
 	// до detect_invented_numbers deploy → publish без re-check).
-	public const VALIDATOR_VERSION = '2026-05-11-v3';
+	public const VALIDATOR_VERSION = '2026-05-11-v4';
 
 	public static function validate(array $payload): array {
 		$errors = [];
@@ -561,6 +561,132 @@ final class EPV2_AI_Response_Validator {
 		];
 	}
 
+	/**
+	 * Detect publisher/outlet attributions в DE content которые не подтверждены
+	 * source_dossier. AI часто добавляет «wie Reuters berichtet» / «in einem
+	 * Interview mit Bild am Sonntag» при thin source — закрытие пустоты
+	 * вымышленной атрибуцией.
+	 *
+	 * Operator-feedback 2026-05-11: post 8936 (UK перевод сказал «як повідомляє
+	 * Reuters» — Reuters не в source); post 8920 (Bahn-Chefin от Stern.de, но
+	 * DE сказал «interview Bild am Sonntag»).
+	 *
+	 * Strategy: проверяем только KNOWN publishers (мнимый whitelist), смотрим
+	 * упоминание имени в DE content → если упомянут но publisher's domain
+	 * НЕ в primary_url или supporting urls → flag.
+	 */
+	public static function detect_invented_publishers(array $payload): array {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$dossier = is_array($meta['source_dossier'] ?? null) ? $meta['source_dossier'] : [];
+		$allowed_hosts = [];
+		$primary_url = (string) ($dossier['primary']['url'] ?? '');
+		$primary_host = self::normalize_host($primary_url);
+		if ($primary_host !== '') $allowed_hosts[] = $primary_host;
+		foreach ((array) ($dossier['supporting'] ?? []) as $s) {
+			if (! is_array($s)) continue;
+			$h = self::normalize_host((string) ($s['url'] ?? ''));
+			if ($h !== '') $allowed_hosts[] = $h;
+		}
+		$allowed_hosts = array_unique($allowed_hosts);
+
+		$de_content = wp_strip_all_tags((string) ($payload['languages']['de']['content'] ?? ''));
+		if ($de_content === '') return [];
+
+		// Require ATTRIBUTION CONTEXT для match — не просто упоминание слова.
+		// «in einer Zeit, in der...» / «die Welle hat ein Eigenleben und
+		// braucht Zeit» = noun usage, NOT publisher. False-positive guard.
+		$attribution_verbs = '(?:wie|laut|gem[äa][ßs]|nach\s+Angaben\s+von|berichtet|teilt(?:e)?\s+mit|meldet(?:e)?|informierte|schreibt|zufolge|interview\s+mit|gegen[üu]ber|so|nach\s+Informationen\s+von|nach\s+einem\s+Bericht\s+von|Nachrichtenagentur)';
+		$invented = [];
+		foreach (self::known_publishers_map() as $name => $host) {
+			$name_q = preg_quote($name, '/');
+			// Patterns: «laut Reuters» / «wie Reuters berichtet» / «Reuters meldet»
+			//           / «interview mit Bild am Sonntag» / «Nachrichtenagentur Reuters»
+			$pattern = '/(?:' . $attribution_verbs . '\s+(?:der\s+|den\s+|die\s+|das\s+)?[\'"„"«]?' . $name_q . '\b|\b' . $name_q . '\s+(?:berichtet|meldet|teilt(?:e)?\s+mit|schreibt|zufolge)\b)/iu';
+			if (preg_match($pattern, $de_content) !== 1) continue;
+			$matched = false;
+			foreach ($allowed_hosts as $ah) {
+				if ($ah === $host || str_contains($ah, $host) || str_contains($host, $ah)) {
+					$matched = true; break;
+				}
+			}
+			if (! $matched) {
+				$invented[] = ['publisher' => $name, 'expected_host' => $host];
+			}
+		}
+		return $invented;
+	}
+
+	private static function normalize_host(string $url): string {
+		if ($url === '') return '';
+		$host = (string) wp_parse_url($url, PHP_URL_HOST);
+		$host = preg_replace('/^www\./i', '', $host) ?? $host;
+		return mb_strtolower(trim($host));
+	}
+
+	private static function known_publishers_map(): array {
+		// Canonical name → expected host substring. Names matched case-
+		// insensitively с word boundaries в DE content (translations не
+		// проверяются здесь — DE master канонический source-of-truth).
+		// List intentionally focused: только publishers которые часто
+		// fabricated AI'ем. Расширять при наблюдении false-negatives.
+		// Только однозначные publisher names. Ambiguous («Zeit» = время,
+		// «Welt» = мир, «Stern» = звезда, «Bild» = картина) удалены —
+		// слишком много false-positives в нейтральных контекстах.
+		// Multi-word варианты (Die Zeit, Bild am Sonntag) — безопасны.
+		return [
+			'Tagesschau'          => 'tagesschau.de',
+			'Spiegel'             => 'spiegel.de',
+			'Der Spiegel'         => 'spiegel.de',
+			'Die Zeit'            => 'zeit.de',
+			'FAZ'                 => 'faz.net',
+			'Süddeutsche'         => 'sueddeutsche.de',
+			'Süddeutsche Zeitung' => 'sueddeutsche.de',
+			'Bild am Sonntag'     => 'bild.de',
+			'Tagesspiegel'        => 'tagesspiegel.de',
+			'Deutschlandfunk'     => 'deutschlandfunk.de',
+			'Handelsblatt'        => 'handelsblatt.com',
+			'Reuters'             => 'reuters.com',
+			'AFP'                 => 'afp.com',
+			'BBC'                 => 'bbc.com',
+			'Guardian'            => 'theguardian.com',
+			'The Guardian'        => 'theguardian.com',
+			'CNN'                 => 'cnn.com',
+			'New York Times'      => 'nytimes.com',
+			'Bloomberg'           => 'bloomberg.com',
+			'Politico'            => 'politico.eu',
+			'УНІАН'               => 'unian',
+			'Українська правда'   => 'pravda.com.ua',
+			'Європейська правда'  => 'eurointegration',
+		];
+	}
+
+	/**
+	 * Source dossier thin signal: AI чаще hallucinates когда primary
+	 * content < 400 chars AND supporting empty/тонкий. Soft penalty
+	 * толкает item к operator review без жёсткого блока.
+	 *
+	 * Operator-feedback 2026-05-11: post 8920 Bahn-Chefin — primary
+	 * 176 chars excerpt only, AI fabricated entire topic.
+	 */
+	public static function source_dossier_thin_signal(array $payload): bool {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$dossier = is_array($meta['source_dossier'] ?? null) ? $meta['source_dossier'] : [];
+		$primary_total = mb_strlen((string) ($dossier['primary']['content'] ?? ''))
+			+ mb_strlen((string) ($dossier['primary']['excerpt'] ?? ''));
+		$supporting_count = 0;
+		foreach ((array) ($dossier['supporting'] ?? []) as $s) {
+			if (! is_array($s)) continue;
+			// Count supporting entry as «real» только если у неё есть содержание
+			$len = mb_strlen((string) ($s['content'] ?? '')) + mb_strlen((string) ($s['excerpt'] ?? ''));
+			if ($len >= 100) $supporting_count++;
+		}
+		// True egregious thin: primary < 300 chars AND ноль supporting entries
+		// со значимым содержанием. P0.1 fix tightened collector strict mode,
+		// но primary часто остаётся коротким (RSS excerpt only без full body
+		// fetch). Если supporting empty → AI заполняет fabrication'ом.
+		return $primary_total < 300 && $supporting_count === 0;
+	}
+
 	public static function editorial_quality(array $payload): array {
 		$warnings = [];
 		$score = 100;
@@ -592,6 +718,24 @@ final class EPV2_AI_Response_Validator {
 			$attr = $invented_attrs[0];
 			$warnings['de'][] = 'speaker «' . $attr['speaker'] . '» не упомянут в источнике (цитата может быть приписана)';
 			$score -= 15;
+		}
+		// Invented publisher attributions (post 8920, 8936 cases 2026-05-11):
+		// AI часто пишет «wie Reuters berichtet» / «interview Bild am Sonntag»
+		// когда publisher's host НЕ в source_dossier. Soft penalty.
+		$invented_pubs = self::detect_invented_publishers($payload);
+		if (count($invented_pubs) >= 2) {
+			$warnings['de'][] = 'invented publisher attributions: ' . implode(', ', array_map(static fn($p) => $p['publisher'], array_slice($invented_pubs, 0, 3)));
+			$score -= 25;
+		} elseif (count($invented_pubs) === 1) {
+			$warnings['de'][] = 'publisher «' . $invented_pubs[0]['publisher'] . '» упомянут в DE, но не в source dossier';
+			$score -= 12;
+		}
+		// Thin source dossier — AI hallucination risk amplifier (post 8920
+		// case 2026-05-11). Soft signal: алоне не блокирует, но усиливает
+		// другие penalty при их одновременном срабатывании.
+		if (self::source_dossier_thin_signal($payload)) {
+			$warnings['de'][] = 'тонкий source dossier (primary < 300, supporting empty) — повышенный риск hallucination';
+			$score -= 10;
 		}
 		$primary_url = (string) ($meta['source_dossier']['primary']['url'] ?? '');
 		$has_strong_primary = self::looks_like_official_primary($primary_url);

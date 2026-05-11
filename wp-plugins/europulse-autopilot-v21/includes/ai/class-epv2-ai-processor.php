@@ -12,7 +12,7 @@ final class EPV2_AI_Processor {
 	 * версией; при resume проверяется mismatch и устаревшие payload'ы
 	 * принудительно пересгенерируются вместо silent reuse'а.
 	 */
-	public const EDITORIAL_PROMPT_VERSION = '2026-05-11-v11';
+	public const EDITORIAL_PROMPT_VERSION = '2026-05-11-v12';
 
 		public static function process_scheduled(bool $force = false, bool $ignore_retry_after = false): void {
 			$started_at = microtime(true);
@@ -2415,6 +2415,13 @@ final class EPV2_AI_Processor {
 				$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 				$payload['_meta']['story_card'] = $existing_card;
 			}
+			// Stamp prompt version on each successful worker payload so the
+			// drop_stale_payload_version_mismatch check at process_scheduled
+			// can identify fresh-prompt payloads и не re-rewrite их каждый
+			// тик. Без stamp каждый item бесконечно re-rewriting'ся —
+			// burning tokens на uneven payloads (observed 2026-05-11 audit).
+			$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			$payload['_meta']['editorial_prompt_version'] = self::EDITORIAL_PROMPT_VERSION;
 			// External worker already returns a normalized payload for the requested
 			// stage. Re-running heavy finalization here reintroduces the same long
 			// blocking path we are trying to remove from the parent process.

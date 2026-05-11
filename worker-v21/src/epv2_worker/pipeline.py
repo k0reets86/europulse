@@ -291,7 +291,23 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
                     "domain": entry.get("domain", ""),
                 })
             if related_entries:
-                lines = ["DOSSIER (Zusatzquellen für Synthese, jede beim Einbringen namentlich nennen):"]
+                # 2026-05-11 (operator-feedback after deep quality audit):
+                # supporting entries CONTAIN ONLY title + domain — content is
+                # NEVER fetched. Previously prompt told AI «DOSSIER für
+                # Synthese» — AI assumed it had real content and fabricated
+                # quotes/numbers/details «как сообщает Spiegel...» when only
+                # the title was actually known. New header makes the limit
+                # explicit: titles only, do not synthesize, do not attribute
+                # facts to these names.
+                lines = [
+                    'VERWANDTE TITEL (nur Überschriften aus Bing News — KEIN Inhalt geladen).',
+                    'Diese Liste bestätigt nur, dass die Story breit berichtet wird.',
+                    'STRIKT VERBOTEN: Inhalte / Zitate / Zahlen aus diesen Einträgen einbauen oder',
+                    'Sätze formulieren wie "Wie [Domain] berichtet …" / "Laut [Domain] …" — weil keine',
+                    'Inhalte vorliegen, wäre jede solche Attribution Erfindung. Nur die Primärquelle',
+                    '(oben im Prompt) liefert echte Fakten.',
+                    '',
+                ]
                 seen: set[str] = set()
                 for entry in related_entries:
                     domain = entry["domain"] or entry["url"]
@@ -301,7 +317,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
                         continue
                     seen.add(key)
                     lines.append(f"  • {domain}: {title}")
-                if len(lines) > 1:
+                if len(lines) > 7:  # header lines + at least one entry
                     rewrite_dossier_block = "\n".join(lines)
 
     # Phase 2.3: rubric_slug — prefer category_final, fall back to category_proposed.

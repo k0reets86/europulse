@@ -538,6 +538,29 @@ final class EPV2_Admin {
 			if (is_array($row_notes_decoded) && is_array($row_notes_decoded['_system'] ?? null)) {
 				$row_token = (string) ($row_notes_decoded['_system']['workflow_owner_token'] ?? '');
 			}
+			// ufs-first routing (operator-feedback 2026-05-11 b):
+			// ready_publish/publishing ВСЕГДА идут в «Готово к публикации»,
+			// даже если active_id pointer или workflow_owner_token ещё не
+			// очистились (между mark_state и sync_active_automation_item
+			// возможен ms-зазор; нестандартные transition paths могут оставить
+			// token на ready_publish row). Старая логика проверяла
+			// is_active_row ДО ufs, и items с label «Готов к публикации»
+			// рендерились в секции «В работе» — наблюдалось на 2462/2463.
+			$ufs = EPV2_Queue::user_facing_state_for_row($row);
+			if (in_array($ufs, ['ready_publish', 'publishing'], true)) {
+				$publish_items[] = $row;
+				continue;
+			}
+			// «В работе» = state='processing_de' ИЛИ row.id == active_id
+			// ИЛИ row имеет non-empty workflow_owner_token (orchestrator
+			// claim). Active automation pointer держится с момента claim
+			// до terminal state — но между orchestrator-тиками option
+			// может быть кратко 0. workflow_owner_token (per-row) — более
+			// надёжный signal "сейчас обрабатывается": orchestrator claim
+			// ставит token, terminal state clear'ит token. Без этой
+			// проверки item с активным token, но без option, попадал в
+			// «Новые» — выглядело как параллельная работа над несколькими
+			// items в «Новые» (operator-feedback 2026-05-11).
 			$is_active_row = $row->state === 'processing_de'
 				|| ($active_id > 0 && $rid === $active_id)
 				|| $row_token !== '';
@@ -545,18 +568,7 @@ final class EPV2_Admin {
 				$active_items[] = $row;
 				continue;
 			}
-			// Route by user_facing_state FIRST (operator-feedback 2026-05-11):
-			// item 2215 был state=retry_process, ufs=ready_publish (payload
-			// готов q=100, ждёт publish slot). Старая логика клала его в
-			// «Новые» по state-check до проверки ufs. Operator видел в «Новые»
-			// status «Готов к публикации до HH:MM» — inconsistent. Теперь
-			// payload-ready items идут в «Готово к публикации» секцию даже
-			// при DB state=new/retry_process (orchestrator_v2 collapse).
-			// «Новые» = только truly untouched items (ufs='new').
-			$ufs = EPV2_Queue::user_facing_state_for_row($row);
-			if (in_array($ufs, ['ready_publish', 'publishing'], true)) {
-				$publish_items[] = $row;
-			} elseif ($ufs === 'new') {
+			if ($ufs === 'new') {
 				$new_items[] = $row;
 			}
 		}
@@ -774,6 +786,29 @@ final class EPV2_Admin {
 			if (is_array($row_notes_decoded) && is_array($row_notes_decoded['_system'] ?? null)) {
 				$row_token = (string) ($row_notes_decoded['_system']['workflow_owner_token'] ?? '');
 			}
+			// ufs-first routing (operator-feedback 2026-05-11 b):
+			// ready_publish/publishing ВСЕГДА идут в «Готово к публикации»,
+			// даже если active_id pointer или workflow_owner_token ещё не
+			// очистились (между mark_state и sync_active_automation_item
+			// возможен ms-зазор; нестандартные transition paths могут оставить
+			// token на ready_publish row). Старая логика проверяла
+			// is_active_row ДО ufs, и items с label «Готов к публикации»
+			// рендерились в секции «В работе» — наблюдалось на 2462/2463.
+			$ufs = EPV2_Queue::user_facing_state_for_row($row);
+			if (in_array($ufs, ['ready_publish', 'publishing'], true)) {
+				$publish_items[] = $row;
+				continue;
+			}
+			// «В работе» = state='processing_de' ИЛИ row.id == active_id
+			// ИЛИ row имеет non-empty workflow_owner_token (orchestrator
+			// claim). Active automation pointer держится с момента claim
+			// до terminal state — но между orchestrator-тиками option
+			// может быть кратко 0. workflow_owner_token (per-row) — более
+			// надёжный signal "сейчас обрабатывается": orchestrator claim
+			// ставит token, terminal state clear'ит token. Без этой
+			// проверки item с активным token, но без option, попадал в
+			// «Новые» — выглядело как параллельная работа над несколькими
+			// items в «Новые» (operator-feedback 2026-05-11).
 			$is_active_row = $row->state === 'processing_de'
 				|| ($active_id > 0 && $rid === $active_id)
 				|| $row_token !== '';
@@ -781,18 +816,7 @@ final class EPV2_Admin {
 				$active_items[] = $row;
 				continue;
 			}
-			// Route by user_facing_state FIRST (operator-feedback 2026-05-11):
-			// item 2215 был state=retry_process, ufs=ready_publish (payload
-			// готов q=100, ждёт publish slot). Старая логика клала его в
-			// «Новые» по state-check до проверки ufs. Operator видел в «Новые»
-			// status «Готов к публикации до HH:MM» — inconsistent. Теперь
-			// payload-ready items идут в «Готово к публикации» секцию даже
-			// при DB state=new/retry_process (orchestrator_v2 collapse).
-			// «Новые» = только truly untouched items (ufs='new').
-			$ufs = EPV2_Queue::user_facing_state_for_row($row);
-			if (in_array($ufs, ['ready_publish', 'publishing'], true)) {
-				$publish_items[] = $row;
-			} elseif ($ufs === 'new') {
+			if ($ufs === 'new') {
 				$new_items[] = $row;
 			}
 		}

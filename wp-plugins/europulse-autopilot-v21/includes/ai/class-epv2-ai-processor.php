@@ -6320,15 +6320,30 @@ final class EPV2_AI_Processor {
 		if ($combined === '') {
 			return false;
 		}
+		// 2026-05-11: split contamination heuristics. Short German function
+		// words (die/der/das/und/mit/für/wird/nicht) legitimately appear в
+		// proper nouns в любом не-немецком тексте про Германию: "Haus der
+		// Kunst", "Süddeutsche Zeitung", "Frankfurter Allgemeine", "Land der
+		// Berge" и т.п. — поэтому single hit на short stopword недостаточно.
+		// Считаем количество: ≥3 совпадений = real contamination. Domain
+		// phrases (bundesregierung/fachkräfte/akteuren vor ort) — fail на
+		// первом hit, они не встречаются в proper nouns. Item 2215 был
+		// заблокирован на "Haus der Kunst" — operator-feedback 2026-05-11.
+		$short_stopword_pattern = '/\b(die|der|das|und|mit|für|wird|nicht)\b/iu';
+		$domain_phrase_pattern  = '/\b(bundesregierung|fachkr[aä]fte|akteuren vor ort)\b/iu';
+		$short_hits = preg_match_all($short_stopword_pattern, $combined);
+		$domain_hits = preg_match_all($domain_phrase_pattern, $combined);
 		if ($lang === 'uk') {
 			return preg_match('/\p{Cyrillic}/u', $combined) === 1
 				&& preg_match('/[ыэёъ]/u', $combined) !== 1
-				&& preg_match('/\b(die|der|das|und|mit|für|wird|nicht|bundesregierung|fachkr[aä]fte|akteuren vor ort)\b/iu', $combined) !== 1;
+				&& $short_hits < 3
+				&& $domain_hits === 0;
 		}
 		if ($lang === 'en') {
 			return preg_match('/[A-Za-z]/u', $combined) === 1
 				&& preg_match('/\p{Cyrillic}/u', $combined) !== 1
-				&& preg_match('/\b(die|der|das|und|mit|für|wird|nicht|bundesregierung|fachkr[aä]fte|akteuren vor ort)\b/iu', $combined) !== 1
+				&& $short_hits < 3
+				&& $domain_hits === 0
 				&& ! str_contains($combined, 'Die Bundesregierung');
 		}
 		return true;

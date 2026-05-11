@@ -87,6 +87,24 @@ final class EPV2_Story_Card_Builder {
 	}
 
 	/**
+	 * Build Story Card на ingest stage — когда у нас ещё нет queue row,
+	 * только array $item с original_title/url/excerpt/content/category.
+	 * Используется collector'ом для smart event-signature dedup ДО save.
+	 */
+	public static function build_from_array( array $item, array $dossier = [] ): array {
+		$obj = (object) [
+			'id'                 => (int) ( $item['id'] ?? 0 ),
+			'original_title'     => (string) ( $item['title'] ?? '' ),
+			'original_excerpt'   => (string) ( $item['excerpt'] ?? '' ),
+			'original_content'   => (string) ( $item['content'] ?? '' ),
+			'original_url'       => (string) ( $item['url'] ?? '' ),
+			'source_language'    => (string) ( $item['language'] ?? '' ),
+			'category_proposed'  => (string) ( $item['category'] ?? '' ),
+		];
+		return self::build( $obj, $dossier );
+	}
+
+	/**
 	 * Convenience accessor: read the story card from a payload, normalised.
 	 */
 	public static function from_payload( array $payload ): array {

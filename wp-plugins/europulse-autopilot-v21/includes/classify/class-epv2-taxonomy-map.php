@@ -15,9 +15,13 @@ final class EPV2_Taxonomy_Map {
 			'welt' => 'Мир',
 			'politik' => 'Политика',
 			'wirtschaft' => 'Экономика',
+			'auto' => 'Авто',
+			'it' => 'IT',
+			'technologie' => 'Технологии',
 			'leben-in-deutschland' => 'Жизнь в Германии',
 			'kultur' => 'Культура',
 			'sport' => 'Спорт',
+			'meinung' => 'Мнение',
 			'community' => 'Комьюнити',
 			'veranstaltungen' => 'События',
 			'ukrainische-initiativen' => 'Украинские инициативы',
@@ -30,9 +34,9 @@ final class EPV2_Taxonomy_Map {
 		$profile = EPV2_Site_Profile::get();
 		$slug = self::normalize_slug($slug);
 		$map = [
-			'de' => ['deutschland' => 14, 'muenchen' => 1, 'bayern' => 12, 'ukraine' => 1140, 'europa' => 18, 'welt' => 2801, 'politik' => 22, 'wirtschaft' => 24, 'leben-in-deutschland' => 26, 'kultur' => 28, 'sport' => 249, 'community' => 1258, 'veranstaltungen' => 48, 'ukrainische-initiativen' => 50, 'vereine-projekte' => 52, 'treffen-networking' => 54],
-			'uk' => ['deutschland' => 184, 'muenchen' => 187, 'bayern' => 189, 'ukraine' => 191, 'europa' => 194, 'welt' => 2805, 'politik' => 197, 'wirtschaft' => 200, 'leben-in-deutschland' => 203, 'kultur' => 206, 'sport' => 209, 'community' => 212, 'veranstaltungen' => 215, 'ukrainische-initiativen' => 217, 'vereine-projekte' => 219, 'treffen-networking' => 221],
-			'en' => ['deutschland' => 151, 'muenchen' => 154, 'bayern' => 156, 'ukraine' => 16, 'europa' => 159, 'welt' => 2803, 'politik' => 162, 'wirtschaft' => 165, 'leben-in-deutschland' => 168, 'kultur' => 171, 'sport' => 30, 'community' => 46, 'veranstaltungen' => 176, 'ukrainische-initiativen' => 178, 'vereine-projekte' => 180, 'treffen-networking' => 182],
+			'de' => ['deutschland' => 14, 'muenchen' => 1, 'bayern' => 12, 'ukraine' => 1140, 'europa' => 18, 'welt' => 2801, 'politik' => 22, 'wirtschaft' => 24, 'auto' => 31377, 'it' => 31383, 'technologie' => 31389, 'leben-in-deutschland' => 26, 'kultur' => 28, 'sport' => 249, 'meinung' => 31395, 'community' => 1258, 'veranstaltungen' => 48, 'ukrainische-initiativen' => 50, 'vereine-projekte' => 52, 'treffen-networking' => 54],
+			'uk' => ['deutschland' => 184, 'muenchen' => 187, 'bayern' => 189, 'ukraine' => 191, 'europa' => 194, 'welt' => 2805, 'politik' => 197, 'wirtschaft' => 200, 'auto' => 31381, 'it' => 31387, 'technologie' => 31393, 'leben-in-deutschland' => 203, 'kultur' => 206, 'sport' => 209, 'meinung' => 31400, 'community' => 212, 'veranstaltungen' => 215, 'ukrainische-initiativen' => 217, 'vereine-projekte' => 219, 'treffen-networking' => 221],
+			'en' => ['deutschland' => 151, 'muenchen' => 154, 'bayern' => 156, 'ukraine' => 16, 'europa' => 159, 'welt' => 2803, 'politik' => 162, 'wirtschaft' => 165, 'auto' => 31379, 'it' => 31385, 'technologie' => 31391, 'leben-in-deutschland' => 168, 'kultur' => 171, 'sport' => 30, 'meinung' => 31397, 'community' => 46, 'veranstaltungen' => 176, 'ukrainische-initiativen' => 178, 'vereine-projekte' => 180, 'treffen-networking' => 182],
 		];
 		$id = $map[$lang][$slug] ?? 0;
 		return ['term_id' => $id, 'lang' => $lang, 'slug' => $slug, 'profile' => $profile ? 'loaded' : 'none'];

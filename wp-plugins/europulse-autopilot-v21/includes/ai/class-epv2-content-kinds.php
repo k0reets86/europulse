@@ -77,6 +77,13 @@ final class EPV2_Content_Kinds {
 				'quality_thresholds'   => [
 					'quality'         => 95,
 					'seo_quality'     => 95,
+					// Revert 90→85 (2026-05-10): threshold 90 блокировал items
+					// с rel=88 / goo=85 несмотря на quality=100. Накапливалось
+					// 8+ items в manual_review с «слишком короткий / слишком
+					// поверхностный» warning'ом. Pipeline переставал работать.
+					// 85 — items проходят с warnings, операторы могут force-edit
+					// если контент реально short. Лучше publish с warning чем
+					// stuck в manual.
 					'release_quality' => 85,
 					'google_quality'  => 85,
 				],
@@ -313,6 +320,18 @@ final class EPV2_Content_Kinds {
 			return self::KIND_ANALYSIS;
 		}
 
+		// 9b. Worker emits two kinds with no PHP spec yet:
+		//   community_event       → diaspora event listings, short-format article
+		//   service_announcement  → official notices, brief-format
+		// Map them explicitly so they don't fall through to news_brief and
+		// inherit the wrong quality thresholds.
+		if ($card_kind === 'community_event') {
+			return self::KIND_NEWS_ARTICLE;
+		}
+		if ($card_kind === 'service_announcement') {
+			return self::KIND_NEWS_BRIEF;
+		}
+
 		// 10. Extended news
 		if ($source_count >= 2 && $topics >= 3 && $entities_people >= 2) {
 			return self::KIND_EXTENDED_NEWS;
@@ -376,10 +395,16 @@ final class EPV2_Content_Kinds {
 			return true;
 		}
 		// Sources already present (organically multi-source): treat as enriched.
-		$related = is_array($payload['_meta']['source_dossier']['related'] ?? null)
-			? $payload['_meta']['source_dossier']['related']
+		// Принимаем как `related`, так и `supporting` — оба представляют
+		// дополнительные источники к primary. Раньше check ловил только
+		// related, и items с 3-6 supporting sources но 0 related блокировались
+		// canonical publish gate с 'enrichment_required' (1830, 2007 etc.).
+		$dossier = is_array($payload['_meta']['source_dossier'] ?? null)
+			? $payload['_meta']['source_dossier']
 			: [];
-		return count($related) >= 1;
+		$related = is_array($dossier['related'] ?? null) ? $dossier['related'] : [];
+		$supporting = is_array($dossier['supporting'] ?? null) ? $dossier['supporting'] : [];
+		return (count($related) + count($supporting)) >= 1;
 	}
 
 	public static function payload_meets_kind_spec(array $payload, ?string $kind = null): bool {

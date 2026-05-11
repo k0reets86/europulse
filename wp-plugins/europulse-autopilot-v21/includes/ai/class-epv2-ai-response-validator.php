@@ -34,7 +34,22 @@ final class EPV2_AI_Response_Validator {
 		$categories = is_array($payload['categories'] ?? null) ? array_values(array_filter($payload['categories'])) : [];
 		$categories = EPV2_Review::normalize_categories(implode(',', $categories));
 		$payload['categories'] = $categories;
-		$payload['tags'] = self::sanitize_tags_for_language(is_array($payload['tags'] ?? null) ? $payload['tags'] : [], 'de', $categories);
+		// Story Card primacy: when the upfront card carries curated tags
+		// (clean German nouns / proper names vetted by the LLM), they take
+		// precedence over whatever made it into payload['tags'] from
+		// downstream TF-IDF or translation-time keywording. Card tags can
+		// be enriched with existing payload tags but never replaced by them.
+		$card_tags_raw = is_array($payload['_meta']['story_card']['tags'] ?? null) ? $payload['_meta']['story_card']['tags'] : [];
+		$card_tags = [];
+		foreach ($card_tags_raw as $entry) {
+			$tag = trim((string) $entry);
+			if ($tag !== '') {
+				$card_tags[] = $tag;
+			}
+		}
+		$existing_tags = is_array($payload['tags'] ?? null) ? $payload['tags'] : [];
+		$tags_seed = $card_tags !== [] ? array_values(array_unique(array_merge($card_tags, $existing_tags))) : $existing_tags;
+		$payload['tags'] = self::sanitize_tags_for_language($tags_seed, 'de', $categories);
 		$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 		$payload['_meta']['blocked_media_urls'] = self::normalize_blocked_media_urls((array) ($payload['_meta']['blocked_media_urls'] ?? []));
 		if (is_array($payload['_meta']['source_dossier'] ?? null)) {
@@ -125,19 +140,14 @@ final class EPV2_AI_Response_Validator {
 			}
 		}
 		$seed_for_category = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
-		$content_detected_primary = EPV2_Categorizer::detect(
+		$resolved_primary = EPV2_Categorizer::resolve_for_payload(
+			$payload,
 			(string) ($seed_for_category['title'] ?? ''),
 			(string) ($seed_for_category['content'] ?? ''),
 			implode(',', $categories)
 		);
-		$refined_primary = EPV2_Categorizer::refine_with_event_context(
-			$content_detected_primary !== '' ? $content_detected_primary : (string) ($categories[0] ?? ''),
-			(array) ($payload['_meta']['source_dossier'] ?? []),
-			(string) ($seed_for_category['title'] ?? ''),
-			(string) ($seed_for_category['content'] ?? '')
-		);
-		if ($refined_primary !== '') {
-			$categories = EPV2_Review::normalize_categories($refined_primary . ',' . implode(',', $categories));
+		if ($resolved_primary !== '') {
+			$categories = EPV2_Review::normalize_categories($resolved_primary . ',' . implode(',', $categories));
 			$payload['categories'] = $categories;
 		}
 		$seed = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];

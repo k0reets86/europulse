@@ -7,23 +7,81 @@ if (! defined('ABSPATH')) {
 final class EPV2_Categorizer {
 	/**
 	 * Story-Card-aware category detection. If the caller passed a payload
-	 * carrying a Story Card with category.confidence ≥ 0.7, we trust the
+	 * carrying a Story Card with category.confidence ≥ 0.6, we trust the
 	 * AI verdict and skip the keyword-driven detect entirely — the
 	 * keyword path was over-eager (mention of "Ukraine-Krieg" in a piece
 	 * about Putin's parade in Moscow flipped category to ukraine even
 	 * though Story Card said welt with confidence 0.9). The keyword path
 	 * remains as a fallback for items without a trusted Story Card.
+	 *
+	 * Geography guard: even when the story card confidence is sub-threshold
+	 * for the trust shortcut, if it says the story is international and the
+	 * primary country is not Germany / Ukraine, we forbid the keyword path
+	 * from returning a domestic-Germany rubric (deutschland/bayern/muenchen)
+	 * — those stories belong in welt/europa/politik, not deutschland.
 	 */
 	public static function detect_with_payload(string $title, string $content, string $source_bias, array $payload): string {
 		$story_card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
+		$primary = '';
+		$confidence = 0.0;
 		if ($story_card !== []) {
 			$confidence = (float) ($story_card['category']['confidence'] ?? 0.0);
 			$primary = trim((string) ($story_card['category']['primary'] ?? ''));
-			if ($confidence >= 0.7 && $primary !== '') {
+			if ($confidence >= 0.6 && $primary !== '') {
 				return self::canonical_slug($primary);
 			}
 		}
-		return self::detect($title, $content, $source_bias);
+		$detected = self::detect($title, $content, $source_bias);
+		if (self::is_clearly_non_german_international($story_card) && in_array($detected, ['deutschland', 'bayern', 'muenchen'], true)) {
+			if ($primary !== '') {
+				return self::canonical_slug($primary);
+			}
+			return 'welt';
+		}
+		return $detected;
+	}
+
+	/**
+	 * Returns true when the story card unambiguously places the story
+	 * outside Germany (international flag set + non-DE country code).
+	 * UA-themed stories are NOT considered "non-German international" here
+	 * because they have their own canonical rubric (ukraine).
+	 */
+	public static function is_clearly_non_german_international(array $story_card): bool {
+		if ($story_card === []) {
+			return false;
+		}
+		$geo = is_array($story_card['geography'] ?? null) ? $story_card['geography'] : [];
+		$is_intl = ! empty($geo['is_international']);
+		$country = strtoupper(trim((string) ($geo['primary_country'] ?? '')));
+		if (! $is_intl || $country === '' || in_array($country, ['DE', 'DEU', 'GERMANY'], true)) {
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Canonical resolver used wherever the publish/review pipeline needs to
+	 * (re)assign a payload's primary category. Story Card with confidence
+	 * ≥ 0.6 wins; otherwise keyword detect runs but is constrained by the
+	 * geography guard above. Event-context refinement is only applied when
+	 * the story card is absent or low-confidence — once the AI explicitly
+	 * rules a slug, the heuristic event-context post-pass cannot overturn it.
+	 */
+	public static function resolve_for_payload(array $payload, string $title, string $content, string $seed_bias = ''): string {
+		$story_card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
+		$primary = trim((string) ($story_card['category']['primary'] ?? ''));
+		$confidence = (float) ($story_card['category']['confidence'] ?? 0.0);
+		if ($primary !== '' && $confidence >= 0.6) {
+			return self::canonical_slug($primary);
+		}
+		$detected = self::detect_with_payload($title, $content, $seed_bias, $payload);
+		$dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? $payload['_meta']['source_dossier'] : [];
+		$refined = self::refine_with_event_context($detected !== '' ? $detected : $seed_bias, $dossier, $title, $content);
+		if (self::is_clearly_non_german_international($story_card) && in_array($refined, ['deutschland', 'bayern', 'muenchen'], true)) {
+			return $primary !== '' ? self::canonical_slug($primary) : 'welt';
+		}
+		return $refined;
 	}
 
 	public static function detect(string $title, string $content, string $source_bias = ''): string {

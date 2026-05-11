@@ -2630,6 +2630,16 @@ final class EPV2_AI_Processor {
 			if ($parsed !== null) {
 				$parsed['_meta'] = is_array($parsed['_meta'] ?? null) ? $parsed['_meta'] : [];
 				$parsed['_meta']['context_analysis'] = $context_analysis;
+				// Propagate story_card from fallback (built at line ~2527) into
+				// the AI-success payload. Без этого story_card теряется на
+				// каждом successful AI call — observed на 2464/2465/2468 где
+				// _meta.story_card отсутствовал. Story Card primacy doctrine:
+				// _meta.story_card должна быть единым source of truth для
+				// downstream stages (categorizer override, media resolver,
+				// tagger, SEO).
+				if (empty($parsed['_meta']['story_card']) && ! empty($fallback['_meta']['story_card'])) {
+					$parsed['_meta']['story_card'] = $fallback['_meta']['story_card'];
+				}
 				if (! empty($context_analysis['category'])) {
 					$parsed['categories'] = EPV2_Review::normalize_categories((string) $context_analysis['category'] . ',' . implode(',', (array) ($parsed['categories'] ?? [])));
 				}
@@ -2651,6 +2661,9 @@ final class EPV2_AI_Processor {
 					$parsed['_meta'] = is_array($parsed['_meta'] ?? null) ? $parsed['_meta'] : [];
 					$parsed['_meta']['fallback_mode'] = 'gemini_without_tools';
 					$parsed['_meta']['context_analysis'] = $context_analysis;
+					if (empty($parsed['_meta']['story_card']) && ! empty($fallback['_meta']['story_card'])) {
+						$parsed['_meta']['story_card'] = $fallback['_meta']['story_card'];
+					}
 					if (! empty($context_analysis['category'])) {
 						$parsed['categories'] = EPV2_Review::normalize_categories((string) $context_analysis['category'] . ',' . implode(',', (array) ($parsed['categories'] ?? [])));
 					}
@@ -2672,6 +2685,9 @@ final class EPV2_AI_Processor {
 					$parsed['_meta'] = is_array($parsed['_meta'] ?? null) ? $parsed['_meta'] : [];
 					$parsed['_meta']['fallback_provider_used'] = (string) ($fallback_config['provider'] ?? '');
 					$parsed['_meta']['context_analysis'] = $context_analysis;
+					if (empty($parsed['_meta']['story_card']) && ! empty($fallback['_meta']['story_card'])) {
+						$parsed['_meta']['story_card'] = $fallback['_meta']['story_card'];
+					}
 					if (! empty($context_analysis['category'])) {
 						$parsed['categories'] = EPV2_Review::normalize_categories((string) $context_analysis['category'] . ',' . implode(',', (array) ($parsed['categories'] ?? [])));
 					}

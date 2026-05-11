@@ -522,15 +522,26 @@ final class EPV2_Admin {
 		$new_items = [];
 		$publish_items = [];
 		foreach ($live_rows as $row) {
-			// «В работе» = state='processing_de' ИЛИ row.id == active_id.
-			// Active automation pointer держится с момента claim до
-			// terminal state — это **физический владелец** orchestrator'а.
-			// Badge "В работе · X%" также рендерится по active_id (line
-			// 1070), теперь section grouping consistent с badge.
-			// retry_process / 'new' / reserve (без active_id) → «Новые».
-			// Остальное (ready_publish, publishing) → «Готово».
+			// «В работе» = state='processing_de' ИЛИ row.id == active_id
+			// ИЛИ row имеет non-empty workflow_owner_token (orchestrator
+			// claim). Active automation pointer держится с момента claim
+			// до terminal state — но между orchestrator-тиками option
+			// может быть кратко 0. workflow_owner_token (per-row) — более
+			// надёжный signal "сейчас обрабатывается": orchestrator claim
+			// ставит token, terminal state clear'ит token. Без этой
+			// проверки item с активным token, но без option, попадал в
+			// «Новые» — выглядело как параллельная работа над несколькими
+			// items в «Новые» (operator-feedback 2026-05-11).
 			$rid = (int) ($row->id ?? 0);
-			if ($row->state === 'processing_de' || ($active_id > 0 && $rid === $active_id)) {
+			$row_token = '';
+			$row_notes_decoded = json_decode((string) ($row->admin_notes ?? ''), true);
+			if (is_array($row_notes_decoded) && is_array($row_notes_decoded['_system'] ?? null)) {
+				$row_token = (string) ($row_notes_decoded['_system']['workflow_owner_token'] ?? '');
+			}
+			$is_active_row = $row->state === 'processing_de'
+				|| ($active_id > 0 && $rid === $active_id)
+				|| $row_token !== '';
+			if ($is_active_row) {
 				$active_items[] = $row;
 				continue;
 			}
@@ -743,15 +754,26 @@ final class EPV2_Admin {
 		$new_items = [];
 		$publish_items = [];
 		foreach ($live_rows as $row) {
-			// «В работе» = state='processing_de' ИЛИ row.id == active_id.
-			// Active automation pointer держится с момента claim до
-			// terminal state — это **физический владелец** orchestrator'а.
-			// Badge "В работе · X%" также рендерится по active_id (line
-			// 1070), теперь section grouping consistent с badge.
-			// retry_process / 'new' / reserve (без active_id) → «Новые».
-			// Остальное (ready_publish, publishing) → «Готово».
+			// «В работе» = state='processing_de' ИЛИ row.id == active_id
+			// ИЛИ row имеет non-empty workflow_owner_token (orchestrator
+			// claim). Active automation pointer держится с момента claim
+			// до terminal state — но между orchestrator-тиками option
+			// может быть кратко 0. workflow_owner_token (per-row) — более
+			// надёжный signal "сейчас обрабатывается": orchestrator claim
+			// ставит token, terminal state clear'ит token. Без этой
+			// проверки item с активным token, но без option, попадал в
+			// «Новые» — выглядело как параллельная работа над несколькими
+			// items в «Новые» (operator-feedback 2026-05-11).
 			$rid = (int) ($row->id ?? 0);
-			if ($row->state === 'processing_de' || ($active_id > 0 && $rid === $active_id)) {
+			$row_token = '';
+			$row_notes_decoded = json_decode((string) ($row->admin_notes ?? ''), true);
+			if (is_array($row_notes_decoded) && is_array($row_notes_decoded['_system'] ?? null)) {
+				$row_token = (string) ($row_notes_decoded['_system']['workflow_owner_token'] ?? '');
+			}
+			$is_active_row = $row->state === 'processing_de'
+				|| ($active_id > 0 && $rid === $active_id)
+				|| $row_token !== '';
+			if ($is_active_row) {
 				$active_items[] = $row;
 				continue;
 			}
@@ -1080,7 +1102,9 @@ final class EPV2_Admin {
 				}
 				return 'Готов к публикации';
 			}
-			if ($item_id > 0 && $item_id === $active_id) {
+			$row_token = (string) ($system['workflow_owner_token'] ?? '');
+			$is_active = ($item_id > 0 && $item_id === $active_id) || $row_token !== '';
+			if ($is_active) {
 				if (self::queue_light_item_is_stalled($item, $system)) {
 					return 'Остановлено защитой · 0% · обработка прервана';
 				}

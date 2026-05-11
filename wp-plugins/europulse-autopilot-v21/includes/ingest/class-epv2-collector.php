@@ -250,8 +250,18 @@ final class EPV2_Collector {
 			return false;
 		}
 		$deferred_total = (int) get_option('epv2_collect_backpressure_total_seconds', 0);
-		if ($deferred_total >= 30 * MINUTE_IN_SECONDS) {
-			// 30 минут уже отложено суммарно. Force run, reset counters.
+		// Escape hatch для slight overload only. Если pending в пределах
+		// 1-3× threshold — после 30 мин cumulative defer можно force-run
+		// (вероятно один stuck row, не overload). Но если pending МАССОВО
+		// over threshold (>3×), force-run только усугубит — backlog никогда
+		// не дренируется. Backlog нужно clear'ить через quarantine handler
+		// (catches stuck items via workflow_step_attempts) или operator
+		// intervention, не через игнорирование backpressure.
+		// Operator-feedback 2026-05-11: «мы договаривались, что там будет
+		// срабатывать защита» — escape hatch нарушал contract.
+		if ($deferred_total >= 30 * MINUTE_IN_SECONDS && $pending <= $threshold * 3) {
+			// Slight overload + 30 min waited. Probably one stuck row.
+			// Force run, reset counters.
 			delete_option('epv2_collect_backpressure_total_seconds');
 			delete_option('epv2_collect_deferred_until');
 			return false;

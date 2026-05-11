@@ -39,14 +39,23 @@ final class EPV2_Deduplicator {
 			return ['duplicate' => true, 'duplicate_of' => (int) $dup->id, 'reason' => 'hash'];
 		}
 
-		$terminal_states = ['rejected', 'duplicate', 'error', 'manual_review', 'published'];
+		// Window сокращён 7d → 1d (2026-05-10): RSS feeds возвращают same items
+		// многократно, и когда rejected/manual_review за 7d держало 100+ URLs,
+		// pipeline всё новое марк'ал как duplicate и pipeline останавливался
+		// (за день 0 published). 1d достаточно чтобы избежать re-fetch одной
+		// session, но не блокирует RSS rotation. Плюс 'published' всё равно
+		// держится навсегда через wp_posts.guid check ниже.
+		// Также 'rejected' исключен из terminal_states — отбракованный item
+		// не должен forever блокировать future RSS items с похожим title.
+		// Если pre-AI patterns/selection всё ещё match — отвергнем повторно.
+		$terminal_states = ['duplicate', 'error', 'manual_review', 'published'];
 		$terminal_placeholders = implode(',', array_fill(0, count($terminal_states), '%s'));
 		if ($url !== '' && $normalized_url !== '') {
 			$terminal_dup = $wpdb->get_row(
 				$wpdb->prepare(
 					"SELECT CASE WHEN duplicate_of IS NOT NULL AND duplicate_of > 0 THEN duplicate_of ELSE id END AS id
 					FROM {$table}
-					WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+					WHERE created_at >= DATE_SUB(NOW(), INTERVAL 1 DAY)
 					  AND state IN ({$terminal_placeholders})
 					  AND (
 						title_hash = %s
@@ -71,7 +80,7 @@ final class EPV2_Deduplicator {
 				$wpdb->prepare(
 					"SELECT CASE WHEN duplicate_of IS NOT NULL AND duplicate_of > 0 THEN duplicate_of ELSE id END AS id
 					FROM {$table}
-					WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+					WHERE created_at >= DATE_SUB(NOW(), INTERVAL 1 DAY)
 					  AND state IN ({$terminal_placeholders})
 					  AND (title_hash = %s OR content_hash = %s)
 					ORDER BY updated_at DESC
@@ -85,6 +94,32 @@ final class EPV2_Deduplicator {
 		}
 		if ($terminal_dup) {
 			return ['duplicate' => true, 'duplicate_of' => (int) $terminal_dup->id, 'reason' => 'recent_terminal_exact'];
+		}
+
+		// Cost-saving short-circuit: when the SAME URL was rejected within
+		// the last 4 hours, skip the full re-evaluation (analyze_item +
+		// story_card rebuild) and treat it as a duplicate. This is narrower
+		// than including 'rejected' in terminal_states (which would block
+		// title-hash overlap for 24h and break legitimate RSS rotation —
+		// see 2026-05-10 design note above). URL-exact + 4h is a tight
+		// match that only catches genuine RSS re-publishes of the same
+		// item, not topic-similar follow-ups.
+		if ($url !== '' && $normalized_url !== '') {
+			$rejected_url_dup = $wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT id
+					FROM {$table}
+					WHERE state = 'rejected'
+					  AND created_at >= DATE_SUB(NOW(), INTERVAL 4 HOUR)
+					  AND (original_url IN (%s, %s) OR canonical_url IN (%s, %s))
+					ORDER BY updated_at DESC
+					LIMIT 1",
+					$url, $normalized_url, $url, $normalized_url
+				)
+			);
+			if ($rejected_url_dup) {
+				return ['duplicate' => true, 'duplicate_of' => (int) $rejected_url_dup, 'reason' => 'recent_rejected_url'];
+			}
 		}
 
 		if ($url !== '') {

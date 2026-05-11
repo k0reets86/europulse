@@ -330,6 +330,33 @@ final class EPV2_REST {
 		$cleanup['rejected_low_grade_ready_publish_rows'] = EPV2_Queue::sanitize_low_grade_ready_publish_items(50);
 		$cleanup['workflow_quarantine'] = EPV2_Queue::quarantine_pathological_workflow_loops(100);
 		$cleanup['promoted_ready_like_rows'] = EPV2_Queue::promote_ready_like_rows(50);
+		// Auto-router: state='new' items с готовым payload → ready_publish;
+		// state='new' items с manual_confirmation_required / terminal_reason
+		// → manual_review. Без этого они зависают в «Новые», но selector их
+		// не берёт (bridge filter пропускает).
+		$cleanup['auto_routed_new_rows'] = EPV2_Queue::auto_route_misclassified_new_items(50);
+		// Items в ready_publish с quality ниже порога / carry-over quarantine,
+		// которые publish-gate стабильно отклоняет → manual_review. Иначе
+		// publish-таймер бесконечно растёт без фактической публикации.
+		$cleanup['sanitized_stuck_ready_publish_rows'] = EPV2_Queue::sanitize_stuck_ready_publish_items(50);
+		// Items в state='publishing' с post_id=NULL >8 мин — publish_item()
+		// был убит mid-flight (FastCGI timeout / fatal). Возвращаем в
+		// ready_publish для повторной попытки. Без этого guard'а row сидит
+		// в 'publishing' навсегда, и никто его не освобождает.
+		$cleanup['sanitized_stuck_publishing_rows'] = EPV2_Queue::sanitize_stuck_publishing_items(20);
+		// Items в state='processing_de' с updated_at >30 мин и без
+		// active_pointer'a — orchestrator не завершил, worker умер или
+		// зависает. Освобождаем чтобы category_cap не блокировал ingest
+		// (один stuck processing_de держит cap всю рубрику на часы).
+		$cleanup['sanitized_stuck_processing_de_rows'] = EPV2_Queue::sanitize_stuck_processing_de_items(20);
+		// Items в manual_review с qual=100 + всеми 3 языками + media —
+		// auto-promote назад в retry_process (carry-over quarantine cleanup).
+		$cleanup['auto_promoted_complete_manual_rows'] = EPV2_Queue::auto_promote_complete_manual_review_items(30);
+		// Operator-агреемент 2026-05-09: «всё что больше 80 чисти». Терминальные
+		// rejected/error/duplicate items, выходящие за пределы 80, удаляются
+		// каждым maintenance тиком — admin (heavy path лимитирован 80 items по
+		// created_at) больше не вытесняет manual_review/ready_publish из видимости.
+		$cleanup['trimmed_terminal_rows'] = EPV2_Queue::trim_old_terminal_items(80);
 		// Phase 3 watchdogs (architecture audit section 3): three background
 		// safety nets — stuck-item release, Polylang link repair, dedup of
 		// published posts. All idempotent, all return small status arrays.

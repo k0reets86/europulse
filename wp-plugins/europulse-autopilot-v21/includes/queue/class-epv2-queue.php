@@ -914,6 +914,12 @@ final class EPV2_Queue {
 	}
 
 	public static function sanitize_non_publish_grade_new_items(int $limit = 100): int {
+		// Сначала вычищаем «зомби» — items, которым sanitize ранее уже выдал
+		// «снят из автоматической очереди», но AI-processor воскресил их в
+		// retry_process / processing_de через gate.mode=ai_publish_finish_resume.
+		// Возвращаем в rejected окончательно (без resurrect-шанса).
+		self::force_reject_zombie_pre_ai_rejects();
+
 		$items = self::get_queue_items_summary(['states' => ['new'], 'limit' => max(1, min(500, $limit))]);
 		if ($items === []) {
 			return 0;
@@ -933,6 +939,15 @@ final class EPV2_Queue {
 			if (self::workflow_owner_token($item) !== '' || self::workflow_step($item) !== '') {
 				continue;
 			}
+			// Anti-loop: если planner_selected_soft_candidate=true (планировщик
+			// явно хочет этот item для добора рубрики), reactivate-handler
+			// тут же вернёт его обратно в new при следующем maintenance run.
+			// Это создавало бесконечный цикл sanitize→reject→reactivate→new
+			// (item «мелькал» в админке часами). Просто пропускаем такие —
+			// пусть остаются в new, planner их переварит через AI цикл.
+			if (! self::automation_requires_publish_grade() && self::planner_selected_soft_candidate($item)) {
+				continue;
+			}
 			$decision = self::row_selection_decision($item);
 			self::mark_state((int) $item->id, 'rejected', [
 				'error_message' => 'Материал снят из автоматической очереди: предварительный publish-priority "' . ($decision !== '' ? $decision : 'unknown') . '" не допускает автономную обработку.',
@@ -940,6 +955,420 @@ final class EPV2_Queue {
 			$changed++;
 		}
 
+		return $changed;
+	}
+
+	/**
+	 * Auto-router: items в state='new' с payload-сигналами «уже не свежие»
+	 * перемещает в правильное user-visible место. Иначе они зависают в
+	 * «Новые» и selector их игнорирует (бридж-фильтр пропускает items с
+	 * manual_confirmation_required и items с user_facing=ready_publish без
+	 * workflow_step).
+	 *
+	 * Конкретные правила:
+	 * - state='new' + payload_is_publish_ready  → mark_state(ready_publish)
+	 * - state='new' + admin_notes._system.manual_confirmation_required != ''
+	 *                                           → mark_state(manual_review)
+	 * - state='new' + admin_notes._system.workflow_terminal_reason != ''
+	 *                                           → mark_state(manual_review)
+	 *   (ранее worker уже terminate'нул, мы его вернули в 'new' reset'ом
+	 *   counter'ов, но без очистки причины — selector такие игнорирует.)
+	 */
+	public static function auto_route_misclassified_new_items(int $limit = 50): int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
+			 WHERE state = 'new'
+			 ORDER BY updated_at ASC
+			 LIMIT %d",
+			max(1, min(200, $limit))
+		));
+		if (! is_array($rows) || $rows === []) return 0;
+
+		$active_owner_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
+		$moved = 0;
+		foreach ($rows as $row) {
+			if (! ($row instanceof stdClass)) continue;
+			// Race guard: skip rows the orchestrator is actively claiming or
+			// processing. Those carry workflow_owner_token / are the active
+			// automation item; auto-routing under them creates a state-
+			// vs-token mismatch the orchestrator cannot recover from.
+			$row_id = (int) ($row->id ?? 0);
+			if ($active_owner_id > 0 && $row_id === $active_owner_id) continue;
+			if (self::workflow_owner_token($row) !== '') continue;
+			$notes = self::row_notes($row);
+			$sys = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+
+			$manual_required = trim((string) ($sys['manual_confirmation_required'] ?? ''));
+			$terminal_reason = trim((string) ($sys['workflow_terminal_reason'] ?? ''));
+
+			// Узкий allowlist: workflow_terminal_reason бывает ∈
+			// {ready_publish, published, rejected, error_terminal,
+			//  workflow_quarantine, selection_publish_blocked, worker_terminal_outcome}.
+			// Только последние три действительно требуют ручной проверки;
+			// первые четыре — promote/finalize signals, для которых в new
+			// item не должен сидеть, но и роуть его в manual_review мы НЕ
+			// хотим. Без allowlist'а здоровый item (state='new' случайно с
+			// terminal_reason='ready_publish' от старого resume) попадал в
+			// очередь оператора.
+			$manual_terminal_reasons = [
+				'workflow_quarantine',
+				'selection_publish_blocked',
+				'worker_terminal_outcome',
+			];
+			$is_manual_terminal = $terminal_reason !== '' && in_array($terminal_reason, $manual_terminal_reasons, true);
+
+			if ($manual_required !== '' || $is_manual_terminal) {
+				self::mark_state((int) $row->id, 'manual_review', [
+					'error_message' => (string) ($row->error_message ?? '')
+						?: 'Material требует ручной проверки: '
+						. ($manual_required !== '' ? "manual_confirmation_required=$manual_required" : "workflow_terminal_reason=$terminal_reason"),
+				]);
+				$moved++;
+				continue;
+			}
+
+			$payload = self::row_payload($row);
+			if ($payload !== [] && EPV2_AI_Processor::payload_is_publish_ready($payload)) {
+				self::mark_state((int) $row->id, 'ready_publish');
+				$moved++;
+			}
+		}
+		if ($moved > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "auto_route_misclassified_new_items: переместил $moved items из new");
+		}
+		return $moved;
+	}
+
+	/**
+	 * Auto-promote: items в manual_review с idealными scores, всеми 3
+	 * языками переведёнными, media URL — ВЕРНУТЬ в retry_process для
+	 * повторной попытки публикации. Часто такие застревают потому что
+	 * gate отклонил по contracts на одной попытке, а quarantine унаследовал
+	 * stale reason после моего reset'а retry-counters. Если scores =
+	 * threshold AND контент полный — это публикабельный материал.
+	 */
+	public static function auto_promote_complete_manual_review_items(int $limit = 30): int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
+			 WHERE state IN ('manual_review','ready_review')
+			   AND updated_at < DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+			 ORDER BY updated_at ASC
+			 LIMIT %d",
+			max(1, min(100, $limit))
+		));
+		if (! is_array($rows) || $rows === []) return 0;
+
+		$promoted = 0;
+		foreach ($rows as $row) {
+			if (! ($row instanceof stdClass)) continue;
+			$payload = self::row_payload($row);
+			if ($payload === []) continue;
+
+			// Quality scores — softer criteria (2026-05-10): items с
+			// quality=100 + rel/goo >= 80 публикабельны. Раньше требовалось
+			// rel/goo >= threshold (90) — items с 88/85 forever stuck в
+			// manual_review. Pipeline теряет ~30% potential output.
+			// Если qua=100 (worker уверен в content) + rel/goo >= 80
+			// (acceptable scoring) — auto-promote.
+			$rel_score = (int) ($payload['_meta']['release_quality']['score'] ?? 0);
+			$goo_score = (int) ($payload['_meta']['google_quality']['score'] ?? 0);
+			$qua_score = (int) ($payload['_meta']['quality']['score'] ?? 0);
+			if ($qua_score < 95 || $rel_score < 80 || $goo_score < 80) {
+				continue;
+			}
+
+			// All 3 languages have title + body
+			$langs_ok = true;
+			foreach (['de', 'uk', 'en'] as $l) {
+				$title = trim((string) ($payload['languages'][$l]['title'] ?? ''));
+				$body = trim((string) ($payload['languages'][$l]['body_html'] ?? ($payload['languages'][$l]['content'] ?? '')));
+				if ($title === '' || mb_strlen(strip_tags($body)) < 200) {
+					$langs_ok = false;
+					break;
+				}
+			}
+			if (! $langs_ok) continue;
+
+			// Media URL present
+			$has_media = ! empty($payload['featured_media_url']) || ! empty($payload['media_url'])
+				|| ! empty($payload['languages']['de']['media_url']);
+			if (! $has_media) continue;
+
+			// Loop terminator: count how many times we've auto-promoted
+			// this row. If ≥2, the item already failed the publish gate
+			// twice after a "complete" verdict — leave it in manual_review
+			// for operator triage instead of looping retry_process →
+			// publish_ready_gate fail → manual_review → auto_promote forever.
+			// Without this, items with quality=100 but failing some other
+			// gate (media relevance, contract integrity) burn AI tokens
+			// in an infinite cycle.
+			$notes = self::row_notes($row);
+			$sys_check = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$prior_promotes = (int) ($sys_check['auto_promote_count'] ?? 0);
+			if ($prior_promotes >= 2) {
+				continue;
+			}
+
+			// All clear → reset terminal signals, retry_process
+			if (! is_array($notes['_system'] ?? null)) $notes['_system'] = [];
+			$sys = &$notes['_system'];
+			foreach ([
+				'quarantine_reason','last_stage_blocker','workflow_terminal_reason',
+				'workflow_step_attempts','workflow_step','workflow_step_status',
+				'workflow_owner_token','workflow_heartbeat_at','workflow_claimed_at',
+				'workflow_last_error','workflow_not_before','retry_after',
+				'review_finish_signature','review_rebuild_signature',
+				'next_operator_action','manual_confirmation_required',
+			] as $k) {
+				unset($sys[$k]);
+			}
+			$sys['admin_promote_at'] = current_time('mysql');
+			$sys['admin_promote_reason'] = "auto_promote_complete: scores rel=$rel_score goo=$goo_score qua=$qua_score, all 3 langs, media OK";
+			$sys['auto_promote_count'] = $prior_promotes + 1;
+			unset($sys);
+			self::update_fields((int) $row->id, [
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+				'error_message' => '',
+			]);
+			self::mark_state((int) $row->id, 'retry_process');
+			$promoted++;
+		}
+		if ($promoted > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "auto_promote_complete_manual_review_items: $promoted items вернули в retry_process");
+		}
+		return $promoted;
+	}
+
+	/**
+	 * Items в ready_publish, которые publish-gate стабильно отклоняет
+	 * (release_quality / google_quality ниже текущих порогов content-kind,
+	 * либо есть quarantine_reason без post_id, и item висит дольше 5 мин)
+	 * — переезжают в manual_review. Иначе они вечно крутятся: publisher
+	 * вызывается каждый тик, gate возвращает not allowed, publish_not_before
+	 * сдвигается вперёд, таймер постоянно растёт, ничего не публикуется.
+	 */
+	public static function sanitize_stuck_ready_publish_items(int $limit = 50): int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
+			 WHERE state='ready_publish' AND (post_id IS NULL OR post_id = 0)
+			   AND updated_at < DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+			 ORDER BY updated_at ASC
+			 LIMIT %d",
+			max(1, min(200, $limit))
+		));
+		if (! is_array($rows) || $rows === []) return 0;
+
+		$active_owner_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
+		$moved = 0;
+		foreach ($rows as $row) {
+			if (! ($row instanceof stdClass)) continue;
+			// Race guard: don't sanitize while publisher / orchestrator owns
+			// the row — they may flip it to publishing/published in the next
+			// tick. The 5-minute updated_at filter already excludes recent
+			// activity, but the active-owner option + workflow_owner_token
+			// add a final compare-and-swap so concurrent writers cannot lose
+			// each other's update.
+			$row_id = (int) ($row->id ?? 0);
+			if ($active_owner_id > 0 && $row_id === $active_owner_id) continue;
+			if (self::workflow_owner_token($row) !== '') continue;
+			$payload = self::row_payload($row);
+			if ($payload === []) continue;
+
+			$content_kind = sanitize_key((string) ($payload['_meta']['content_kind'] ?? 'news_brief'));
+			$thresholds = [];
+			if (class_exists('EPV2_Content_Kinds')) {
+				$specs = EPV2_Content_Kinds::specs();
+				$thresholds = (array) ($specs[$content_kind]['quality_thresholds'] ?? []);
+			}
+			$rel_threshold = (int) ($thresholds['release_quality'] ?? 0);
+			$goo_threshold = (int) ($thresholds['google_quality'] ?? 0);
+			$rel_score = (int) ($payload['_meta']['release_quality']['score'] ?? 0);
+			$goo_score = (int) ($payload['_meta']['google_quality']['score'] ?? 0);
+
+			$notes = self::row_notes($row);
+			$sys = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$quarantine = trim((string) ($sys['quarantine_reason'] ?? ''));
+
+			$below_quality = ($rel_threshold > 0 && $rel_score < $rel_threshold)
+				|| ($goo_threshold > 0 && $goo_score < $goo_threshold);
+
+			if (! $below_quality && $quarantine === '') continue;
+
+			$reason_msg = $below_quality
+				? "Quality ниже порога $content_kind: release=$rel_score/$rel_threshold, google=$goo_score/$goo_threshold."
+				: "Carry-over quarantine: $quarantine.";
+			self::mark_state((int) $row->id, 'manual_review', [
+				'error_message' => 'Материал застрял в очереди публикации (gate отклонял каждый тик). ' . $reason_msg . ' Требует ручной правки или ребилда.',
+			]);
+			$moved++;
+		}
+		if ($moved > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "sanitize_stuck_ready_publish_items: $moved items → manual_review");
+		}
+		return $moved;
+	}
+
+	/**
+	 * State='publishing' is the window where mark_state('publishing') has
+	 * fired but publish_item() has not yet reached state_for_post_statuses.
+	 * Normally this lasts seconds. If an upstream timeout (FastCGI) or a
+	 * fatal kills the PHP process mid-publish, the row stays in 'publishing'
+	 * forever — neither watchdog (handles only 'processing_de'/'retry_*'
+	 * legs) nor sanitize_stuck_ready_publish_items (handles only
+	 * 'ready_publish' rows) cover it.
+	 *
+	 * Recovery rule:
+	 *   - post_id NULL  → no posts were created yet, safe to bounce back to
+	 *                     'ready_publish' for a fresh attempt.
+	 *   - post_id set   → at least one language post exists. Leave it; the
+	 *                     watchdog's repair_polylang_links + post_audit
+	 *                     pipeline finishes the bundle on the next tick.
+	 */
+	public static function sanitize_stuck_publishing_items(int $limit = 50): int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
+			 WHERE state='publishing'
+			   AND (post_id IS NULL OR post_id = 0)
+			   AND updated_at < DATE_SUB(NOW(), INTERVAL 8 MINUTE)
+			 ORDER BY updated_at ASC
+			 LIMIT %d",
+			max(1, min(200, $limit))
+		));
+		if (! is_array($rows) || $rows === []) return 0;
+
+		$active_owner_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
+		$moved = 0;
+		foreach ($rows as $row) {
+			if (! ($row instanceof stdClass)) continue;
+			$row_id = (int) ($row->id ?? 0);
+			// Race guard: if publisher just claimed this row in the current
+			// tick, leave it alone — its updated_at would already be fresh
+			// and excluded by the 8-minute filter, but defence-in-depth.
+			if ($active_owner_id > 0 && $row_id === $active_owner_id) continue;
+			self::mark_state($row_id, 'ready_publish', [
+				'error_message' => 'Watchdog: state="publishing" >8 min с post_id=NULL — publish_item() не завершился (вероятно upstream timeout или fatal). Сброс в ready_publish для повторной попытки.',
+			]);
+			$moved++;
+		}
+		if ($moved > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "sanitize_stuck_publishing_items: $moved items → ready_publish");
+		}
+		return $moved;
+	}
+
+	/**
+	 * State='processing_de' is the window where orchestrator claimed an
+	 * item and worker is generating DE master. Normally this lasts 30-90
+	 * seconds. If the worker process crashes, dies mid-call, or upstream
+	 * (OpenAI/DeepSeek) hangs past timeout AND release_stuck_active_item
+	 * (which only fires when option `epv2_active_automation_item` points
+	 * to the stuck row) misses it — the row stays in processing_de forever.
+	 *
+	 * This becomes a category-cap blocker (queue_new_max_per_category counts
+	 * processing_de active load, so 1 stuck item per rubric blocks ingest
+	 * for that rubric).
+	 *
+	 * Recovery rule: state='processing_de' AND updated_at < NOW - 30min
+	 * AND option-pointer DOESN'T point to this row → reset to 'new' so
+	 * the orchestrator can re-claim on the next tick. CAS-guarded: skip
+	 * if active_id matches (release_stuck_active_item is the canonical
+	 * handler in that case).
+	 */
+	public static function sanitize_stuck_processing_de_items(int $limit = 20): int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
+			 WHERE state='processing_de'
+			   AND updated_at < DATE_SUB(NOW(), INTERVAL 30 MINUTE)
+			 ORDER BY updated_at ASC
+			 LIMIT %d",
+			max(1, min(100, $limit))
+		));
+		if (! is_array($rows) || $rows === []) return 0;
+
+		$active_owner_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
+		$moved = 0;
+		foreach ($rows as $row) {
+			if (! ($row instanceof stdClass)) continue;
+			$row_id = (int) ($row->id ?? 0);
+			// Defer to release_stuck_active_item when the pointer matches
+			// — that's the canonical handler and it does its own CAS check.
+			if ($active_owner_id > 0 && $row_id === $active_owner_id) continue;
+			$notes = self::row_notes($row);
+			$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$notes['_system']['workflow_owner_token'] = '';
+			$notes['_system']['workflow_heartbeat_at'] = '';
+			$notes['_system']['workflow_step'] = '';
+			$notes['_system']['workflow_step_status'] = '';
+			self::mark_state($row_id, 'new', [
+				'error_message' => 'Watchdog: state="processing_de" >30 мин без active_pointer — worker завис или процесс убит. Сброс в new для повторной попытки.',
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+			]);
+			$moved++;
+		}
+		if ($moved > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "sanitize_stuck_processing_de_items: $moved items → new");
+		}
+		return $moved;
+	}
+
+	/**
+	 * Operator-агреемент 2026-05-09: «всё что больше 80 чисти». Чтобы admin
+	 * (heavy path с лимитом 80 items по created_at) видел все живые секции
+	 * без вытеснения, периодически удаляем самые старые rejected / error /
+	 * duplicate items, оставляя только последние $keep штук в каждом из
+	 * этих terminal-состояний. Published не трогаем (там post_id ссылка
+	 * на актуальный пост, archive безопасен).
+	 */
+	public static function trim_old_terminal_items(int $keep = 80): int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$total_deleted = 0;
+		foreach (['rejected', 'error', 'duplicate'] as $state) {
+			$rows = $wpdb->get_results($wpdb->prepare(
+				"SELECT id FROM {$table} WHERE state=%s ORDER BY updated_at DESC, id DESC LIMIT %d, 1000",
+				$state,
+				$keep
+			));
+			if (! $rows) continue;
+			foreach ((array) $rows as $r) {
+				$wpdb->delete($table, ['id' => (int) $r->id], ['%d']);
+				$total_deleted++;
+			}
+		}
+		if ($total_deleted > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "trim_old_terminal_items: удалено $total_deleted (keep=$keep)");
+		}
+		return $total_deleted;
+	}
+
+	private static function force_reject_zombie_pre_ai_rejects(): int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$sql = $wpdb->prepare(
+			"SELECT id, state, error_message FROM {$table}
+			 WHERE state IN ('new','retry_process','processing_de','reserve','manual_review','ready_review')
+			   AND error_message LIKE %s
+			 LIMIT 200",
+			'%снят из автоматической очереди: предварительный publish-priority%'
+		);
+		$rows = (array) $wpdb->get_results($sql);
+		$changed = 0;
+		foreach ($rows as $r) {
+			self::mark_state((int) $r->id, 'rejected', [
+				'error_message' => (string) $r->error_message,
+			]);
+			$changed++;
+		}
 		return $changed;
 	}
 
@@ -1308,6 +1737,20 @@ final class EPV2_Queue {
 			if ($not_before > 0) {
 				return $not_before;
 			}
+			// Lazy-инициализация: publish_not_before set'ится только когда
+			// публикатор первый раз позовёт publish_due(). До того момента
+			// в admin_notes этого поля нет — UI таймер падает на global
+			// fallback и сразу истекает. Возвращаем aligned slot от
+			// updated_at (момент, когда item стал ready_publish), чтобы
+			// таймер показывал реальное время до публикации.
+			$state = (string) ($item->state ?? '');
+			if (in_array($state, ['ready_publish', 'retry_publish'], true)) {
+				$updated_ts = (int) strtotime((string) ($item->updated_at ?? '')) ?: time();
+				$slot = (int) EPV2_Jobs::next_publish_slot_after($updated_ts);
+				if ($slot > 0) {
+					return $slot;
+				}
+			}
 		}
 		return null;
 	}
@@ -1556,21 +1999,29 @@ final class EPV2_Queue {
 		// callers that omit the ai_tokens column field (e.g.
 		// transition_item_to_ready_publish) still feed the daily counter
 		// and the per-provider Settings widget.
-		if (class_exists('EPV2_Stats') && isset($extra['ai_payload'])) {
-			$bump_payload = json_decode((string) $extra['ai_payload'], true);
-			if (is_array($bump_payload)) {
-				$_meta = is_array($bump_payload['_meta'] ?? null) ? $bump_payload['_meta'] : [];
-				$_runtime = is_array($_meta['ai_runtime'] ?? null) ? $_meta['ai_runtime'] : [];
-				$_runtime_tokens = 0;
-				foreach ($_runtime as $entry) {
-					if (is_array($entry)) {
-						$_runtime_tokens += max(0, (int) ($entry['tokens'] ?? 0));
-					}
+		// Memoize the incoming ai_payload decode — same JSON gets re-parsed
+		// later (line ~2024 for ready_publish path) and that doubles cost
+		// for 100-300 KB payloads on hot mark_state path.
+		$incoming_payload_decoded = null;
+		if (isset($extra['ai_payload'])) {
+			$incoming_payload_decoded = json_decode((string) $extra['ai_payload'], true);
+			if (! is_array($incoming_payload_decoded)) {
+				$incoming_payload_decoded = null;
+			}
+		}
+		if (class_exists('EPV2_Stats') && $incoming_payload_decoded !== null) {
+			$bump_payload = $incoming_payload_decoded;
+			$_meta = is_array($bump_payload['_meta'] ?? null) ? $bump_payload['_meta'] : [];
+			$_runtime = is_array($_meta['ai_runtime'] ?? null) ? $_meta['ai_runtime'] : [];
+			$_runtime_tokens = 0;
+			foreach ($_runtime as $entry) {
+				if (is_array($entry)) {
+					$_runtime_tokens += max(0, (int) ($entry['tokens'] ?? 0));
 				}
-				$_meta_total = (int) ($_meta['tokens'] ?? 0);
-				if ($_runtime_tokens > 0 || $_meta_total > 0) {
-					EPV2_Stats::record_payload_ai_usage($bump_payload);
-				}
+			}
+			$_meta_total = (int) ($_meta['tokens'] ?? 0);
+			if ($_runtime_tokens > 0 || $_meta_total > 0) {
+				EPV2_Stats::record_payload_ai_usage($bump_payload);
 			}
 		}
 		// Central terminal-state guard. Eight independent code paths used to
@@ -1593,9 +2044,16 @@ final class EPV2_Queue {
 		}
 		$state = self::canonicalize_single_workflow_state($id, $state, $current, $extra);
 		if ($state === 'ready_publish') {
-			$payload_json = array_key_exists('ai_payload', $extra) ? (string) $extra['ai_payload'] : (string) ($current->ai_payload ?? '');
-			$payload = json_decode($payload_json, true);
-			$payload = is_array($payload) ? $payload : [];
+			// Reuse the already-decoded payload when the caller passed one
+			// via $extra['ai_payload'] (memoized above for Stats accounting).
+			// Falls back to fresh decode of $current->ai_payload otherwise.
+			if (array_key_exists('ai_payload', $extra) && $incoming_payload_decoded !== null) {
+				$payload = $incoming_payload_decoded;
+			} else {
+				$payload_json = array_key_exists('ai_payload', $extra) ? (string) $extra['ai_payload'] : (string) ($current->ai_payload ?? '');
+				$payload = json_decode($payload_json, true);
+				$payload = is_array($payload) ? $payload : [];
+			}
 				if ($payload !== []) {
 					$payload = EPV2_AI_Processor::force_payload_pipeline_stage($payload, '');
 					$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
@@ -1907,6 +2365,7 @@ final class EPV2_Queue {
 		self::sanitize_non_publish_grade_new_items(150);
 		self::normalize_staged_new_items();
 		self::normalize_duplicate_recoverable_original_urls();
+		self::trim_old_terminal_items(80);
 		$active_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
 		$table = $wpdb->prefix . 'epv2_queue';
 		$states = ['processing_de', 'reserve', 'retry_process', 'ready_review'];
@@ -2150,6 +2609,10 @@ final class EPV2_Queue {
 		'selection_reject',
 		'selection_low',
 		'не пересматривается перезапуском',
+		// Pre-AI publish-priority sanitize verdict — terminal окончательно,
+		// иначе soft-terminal guard конвертирует rejection в ready_review,
+		// и item возвращается в processing цикл через ai_publish_finish_resume.
+		'предварительный publish-priority',
 	];
 
 	/**
@@ -2867,6 +3330,7 @@ final class EPV2_Queue {
 			'states' => ['new', 'retry_process', 'ready_review', 'ready_publish', 'retry_publish', 'publishing', 'reserve'],
 			'limit' => $limit,
 		]);
+		$active_owner_id = (int) get_option(self::OPTION_ACTIVE_AUTOMATION_ITEM, 0);
 		$changed = 0;
 		foreach ($rows as $row) {
 			if (! ($row instanceof stdClass) || ! self::row_has_live_published_posts($row)) {
@@ -2875,7 +3339,20 @@ final class EPV2_Queue {
 			if ((string) ($row->state ?? '') === 'published') {
 				continue;
 			}
-			self::mark_state((int) $row->id, 'published', [
+			// Race guard: don't trample an active orchestrator/publisher that
+			// holds this row. If it's the active automation item or has a
+			// non-empty workflow_owner_token, the owner is mid-pipeline and
+			// will reach a terminal state on its own. Promoting from under
+			// it can cause lost-update races (orchestrator writes
+			// retry_process while we just wrote published).
+			$row_id = (int) ($row->id ?? 0);
+			if ($active_owner_id > 0 && $row_id === $active_owner_id) {
+				continue;
+			}
+			if (self::workflow_owner_token($row) !== '') {
+				continue;
+			}
+			self::mark_state($row_id, 'published', [
 				'error_message' => '',
 			]);
 			$changed++;

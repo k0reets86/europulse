@@ -165,10 +165,25 @@ final class EPV2_Watchdog {
 		$current_state = (string) ($row->state ?? '');
 		// Already in a terminal state? just release the slot.
 		if (in_array($current_state, ['published', 'rejected', 'manual_review', 'duplicate'], true)) {
-			delete_option('epv2_active_automation_item');
+			// Atomic CAS: only delete the option if it still points to the
+			// item we inspected. If orchestrator claimed a new item between
+			// our read and now, leave its claim alone.
+			$current_active = (int) get_option('epv2_active_automation_item', 0);
+			if ($current_active === $active_id) {
+				delete_option('epv2_active_automation_item');
+			}
 			$result['released'] = 1;
 			$result['item_id'] = $active_id;
 			$result['reason'] = 'active_pointed_to_terminal';
+			return $result;
+		}
+		// Re-verify the active pointer hasn't moved (concurrent claim by
+		// orchestrator). If it has, our stale-state assessment was for a
+		// row no longer owned — skip the reset to avoid trampling the
+		// fresh claim.
+		$current_active = (int) get_option('epv2_active_automation_item', 0);
+		if ($current_active !== $active_id) {
+			$result['reason'] = 'active_pointer_moved_during_check';
 			return $result;
 		}
 		// Push the item back to `new` so it gets a fresh attempt on the
@@ -181,7 +196,12 @@ final class EPV2_Watchdog {
 				$stale_minutes
 			),
 		]);
-		delete_option('epv2_active_automation_item');
+		// Re-check once more after mark_state — if option moved during the
+		// transition, leave it alone.
+		$current_active = (int) get_option('epv2_active_automation_item', 0);
+		if ($current_active === $active_id) {
+			delete_option('epv2_active_automation_item');
+		}
 		$result['released'] = 1;
 		$result['item_id'] = $active_id;
 		$result['reason'] = 'stuck_in_' . $current_state;

@@ -2676,9 +2676,40 @@ final class EPV2_Queue {
 			return false;
 		}
 		$haystack = mb_strtolower($error_message);
+		// Tokens classified by length:
+		// - Multi-word phrases (snimat'sya, predvariteln'iy, etc.): substring
+		//   match safe — these are unique enough phrases.
+		// - Short single-word tokens (duplicate, promotional, etc.): word-
+		//   boundary match required to prevent false positives like «no
+		//   duplicate of source X» or «promotional-style headline» matching
+		//   как hard terminal (P1 fix 2026-05-11).
+		$short_word_tokens = [
+			'duplicate', 'promotional', 'community_promo', 'routine_official',
+			'meta_index_page', 'hub_page', 'paywall_only', 'selection_reject',
+			'selection_low',
+		];
 		foreach (self::HARD_TERMINAL_REASON_TOKENS as $token) {
-			if (mb_stripos($haystack, $token) !== false) {
-				return true;
+			if (in_array($token, $short_word_tokens, true)) {
+				// Strict word boundary: token surrounded by whitespace, colon,
+				// punctuation, or start/end. Excludes hyphen-adjacent matches
+				// like «promotional-style» which would partial-match.
+				// Allowed boundaries: space, colon, comma, period, dot, slash,
+				// newline, start/end.
+				$pattern = '/(?:^|[\s:,.\/\(])' . preg_quote($token, '/') . '(?:$|[\s:,.\/\)])/u';
+				if (preg_match($pattern, $haystack) === 1) {
+					// Reject if в negation context: «not <token>», «no <token>»,
+					// «без <token>», «not a <token>», «no real <token>».
+					$neg_pattern = '/(?:not|no|без)\s+(?:[a-zA-Zа-яА-Я]+\s+)?' . preg_quote($token, '/') . '/u';
+					if (preg_match($neg_pattern, $haystack) === 1) {
+						continue;
+					}
+					return true;
+				}
+			} else {
+				// Multi-word phrase: substring match
+				if (mb_stripos($haystack, $token) !== false) {
+					return true;
+				}
 			}
 		}
 		return false;
@@ -2874,7 +2905,21 @@ final class EPV2_Queue {
 		global $wpdb;
 		$max_per_category = max(1, min(50, $max_per_category));
 		$max_per_source = max(1, min(50, $max_per_source));
-		$rows = $wpdb->get_results("SELECT id, source_id, category_proposed, story_score, admin_notes, created_at FROM {$wpdb->prefix}epv2_queue WHERE state = 'new' ORDER BY created_at DESC", ARRAY_A);
+		// EXCLUDE items с workflow_step set (P1 fix 2026-05-11): orchestrator_v2
+		// collapses processing_de/retry_process → state='new' via canonicalize.
+		// Items mid-pipeline (workflow_step='build_de_master','publish_ready_gate'
+		// etc.) match state='new' — но они ACTIVELY being processed. Раньше
+		// trim could delete in-flight items as «over cap», losing AI work.
+		// Now: only truly untouched items (empty workflow_step) considered.
+		$rows = $wpdb->get_results(
+			"SELECT id, source_id, category_proposed, story_score, admin_notes, created_at
+			 FROM {$wpdb->prefix}epv2_queue
+			 WHERE state = 'new'
+			   AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step')), '') = ''
+			   AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_owner_token')), '') = ''
+			 ORDER BY created_at DESC",
+			ARRAY_A
+		);
 		if (! $rows) {
 			return 0;
 		}

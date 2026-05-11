@@ -2653,6 +2653,14 @@ final class EPV2_Queue {
 		'promotional',
 		'sponsored content',
 		'sponsored/paid',
+		// Post-story-card pre-AI verdict (operator feedback 2026-05-11):
+		// item получил story_card, heuristic post-card analyze вернул
+		// decision=low/reject — это editorial-level reject (not transient).
+		// Без hard-terminal, soft_terminal_guard salvage'ит обратно в
+		// ready_review → canonicalize → 'new' → item resurrect'ится в
+		// «Новые» с warning text. Operator видит junk в очереди.
+		'снят после story-card',
+		'pre-ai verdict',
 	];
 
 	/**

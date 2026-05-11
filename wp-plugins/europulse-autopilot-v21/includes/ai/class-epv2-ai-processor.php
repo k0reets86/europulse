@@ -114,6 +114,51 @@ final class EPV2_AI_Processor {
 						&& empty($existing_payload['_meta']['story_card'])
 					) {
 						$story_card = EPV2_Story_Card_Builder::build($source_item, (array) ($existing_payload['_meta']['source_dossier'] ?? []));
+						// Operator-feedback 2026-05-11: items published без
+						// story_card (12 items today, including #2152 China
+						// inflation с hallucinated 36.4%/22.4%, #2088 Arda
+						// Saatci с invented 604). Pipeline без editorial
+						// verdict не имеет защиты от halucinations и
+						// от-rubric content. Hard requirement: story_card
+						// MUST be built before any worker rewrite.
+						if (empty($story_card['success'])) {
+							// Build failed. Track attempts; retry до 3 раз
+							// then route to manual_review с clear reason.
+							$build_attempts = (int) ($existing_payload['_meta']['story_card_build_attempts'] ?? 0);
+							$build_attempts++;
+							$existing_payload['_meta']['story_card_build_attempts'] = $build_attempts;
+							$existing_payload['_meta']['story_card_last_error'] = (string) ($story_card['reason'] ?? 'unknown');
+							EPV2_Queue::update_fields((int) $item->id, [
+								'ai_payload' => wp_json_encode($existing_payload, JSON_UNESCAPED_UNICODE),
+							]);
+							self::log_process_item_step('story_card_build_failed', (int) $item->id, [
+								'attempt' => $build_attempts,
+								'reason' => (string) ($story_card['reason'] ?? 'unknown'),
+								'duration_ms' => self::duration_ms_since($item_started_at),
+							]);
+							if ($build_attempts >= 3) {
+								// Persistent failure → manual_review с clear reason.
+								// hard_editorial token prevents soft_terminal salvage.
+								$reason_msg = sprintf(
+									'hard_editorial — story_card build failed %dx (last: %s). Pipeline cannot continue без AI editorial verdict.',
+									$build_attempts,
+									(string) ($story_card['reason'] ?? 'unknown')
+								);
+								EPV2_Queue::mark_state((int) $item->id, 'manual_review', [
+									'error_message' => $reason_msg,
+								]);
+								EPV2_Queue::clear_active_automation_item((int) $item->id);
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = 'story_card_build_exhausted';
+								break;
+							}
+							// Otherwise release ownership и пробуем на следующем
+							// orchestrator tick (worker может быть transient down).
+							EPV2_Queue::clear_active_automation_item((int) $item->id);
+							$run_payload['result'] = 'story_card_build_retry';
+							break;
+						}
 						if (! empty($story_card['success'])) {
 							$existing_payload = EPV2_Story_Card_Builder::attach_to_payload($existing_payload, $story_card);
 							// Persist immediately so subsequent ticks reuse it.

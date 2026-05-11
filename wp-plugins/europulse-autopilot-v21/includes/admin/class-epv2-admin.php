@@ -1343,7 +1343,27 @@ final class EPV2_Admin {
 		// non-terminal states (where it's actually informative about
 		// the in-progress run).
 		if ($error !== '' && ! in_array($state, ['rejected', 'manual_review', 'error'], true)) {
-			$issues[] = $error;
+			// Suppress infrastructure-level technical errors that aren't
+			// actionable for operator на item-level (operator-feedback
+			// 2026-05-11). Provider cooldown — это resilience circuit-breaker
+			// (provider re-enabled через 30 min automatically), item стоит
+			// в очереди ждёт retry. Показывать оператору — noise.
+			$infra_noise_patterns = [
+				'/провайдер временно отключ/iu',
+				'/provider unavailable/iu',
+				'/cooldown active/iu',
+				'/rate.?limit/iu',
+			];
+			$is_infra_noise = false;
+			foreach ($infra_noise_patterns as $pat) {
+				if (preg_match($pat, $error) === 1) {
+					$is_infra_noise = true;
+					break;
+				}
+			}
+			if (! $is_infra_noise) {
+				$issues[] = $error;
+			}
 		}
 		$quality_score = self::queue_light_quality_score($item);
 		$seo_score = self::queue_light_seo_score($item);

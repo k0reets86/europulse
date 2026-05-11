@@ -1108,6 +1108,32 @@ if (! defined('ABSPATH')) {
 			if (! self::candidate_entry_is_story_relevant_relaxed($entry, $item, $primary)) {
 				continue;
 			}
+			// STRICT content требование 2026-05-11 (operator-feedback): salvage
+			// path раньше возвращал URL-only stubs (title+url, content=0,
+			// excerpt=0) когда fetch fail'ил — anti-bot, paywall, JS-rendering.
+			// Эти stubs кормили AI как «supporting sources» — AI видел URL
+			// list, ассумировал contents, fabricated attributions «wie WSJ
+			// berichtet» / «Reuters meldet». Strict mirror основного loop:
+			// content ≥ 280 chars OR excerpt ≥ 200 chars OR visual_support.
+			$has_visual_support = ! empty($entry['image']) && EPV2_Media::is_relevant_media(
+				(string) $entry['image'],
+				(string) ($primary['title'] ?? $item->original_title ?? ''),
+				(string) ($primary['excerpt'] ?? $item->original_excerpt ?? ''),
+				array_values(array_filter(array_map('trim', explode(',', (string) ($item->category_proposed ?? ''))))),
+				['primary' => $primary]
+			);
+			$ent_content_len = mb_strlen((string) ($entry['content'] ?? ''));
+			$ent_excerpt_len = mb_strlen((string) ($entry['excerpt'] ?? ''));
+			if ($ent_content_len < 280 && $ent_excerpt_len < 200 && ! $has_visual_support) {
+				if (class_exists('EPV2_Logger')) {
+					EPV2_Logger::info('source_enricher', 'salvage_dropped_empty', [
+						'url' => $url,
+						'content_len' => $ent_content_len,
+						'excerpt_len' => $ent_excerpt_len,
+					]);
+				}
+				continue;
+			}
 			$seen[$host] = true;
 			$salvaged[] = $entry;
 		}

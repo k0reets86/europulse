@@ -189,10 +189,14 @@ final class EPV2_Deduplicator {
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 
-		// Find earliest item in same event cluster (last 24h, any state
-		// except this row itself). Searching by JSON_EXTRACT on
-		// story_card payload — index-friendly via the explicit signature
-		// column would be even better, but we keep the change small.
+		// Pull every cluster candidate в окне 24h. Угол-level Jaccard
+		// требует видеть ВСЕ same-sig items, а не первый (operator-feedback
+		// 2026-05-11): Pistorius Kyiv visit имел 8 items с разными angles
+		// (defense coop / drones / Russia statement / Selenskyj 6 projects),
+		// старый код break'ался на первом и сравнивал только с anchor —
+		// 3 копии одного angle (zeit/abendzeitung/dlf) проходили потому что
+		// pravda.ua «drones» был anchor, а Jaccard с drones для defense-coop
+		// низкий. Новый walk: max Jaccard против ВСЕХ same-sig members.
 		$rows = $wpdb->get_results($wpdb->prepare(
 			"SELECT id, state, updated_at, ai_payload
 			 FROM {$table}
@@ -206,7 +210,11 @@ final class EPV2_Deduplicator {
 		if (! $rows) {
 			return ['duplicate' => false, 'reason' => 'no_recent_cluster'];
 		}
-		$first = null;
+		$current_facts = self::extract_key_facts_set($story_card);
+		$best_overlap = 0.0;
+		$best_match = null;
+		$first_match = null;
+		$matched_count = 0;
 		foreach ($rows as $row) {
 			$other_payload = json_decode((string) ($row->ai_payload ?? ''), true);
 			if (! is_array($other_payload)) {
@@ -217,127 +225,136 @@ final class EPV2_Deduplicator {
 				continue;
 			}
 			$other_signature = self::compute_event_signature($other_card, $other_payload);
-			if ($other_signature !== '' && $other_signature === $signature) {
-				$first = $row;
-				$first->story_card = $other_card;
-				break;
+			if ($other_signature === '' || $other_signature !== $signature) {
+				continue;
+			}
+			$matched_count++;
+			if ($first_match === null) {
+				$first_match = $row;
+			}
+			$other_facts = self::extract_key_facts_set($other_card);
+			$jaccard = self::jaccard_similarity($current_facts, $other_facts);
+			if ($jaccard > $best_overlap) {
+				$best_overlap = $jaccard;
+				$best_match = $row;
 			}
 		}
-		if (! $first) {
+		if ($matched_count === 0) {
 			return ['duplicate' => false, 'reason' => 'signature_unique'];
 		}
-		$age_seconds = max(0, time() - (int) strtotime((string) $first->updated_at));
-		// Tier 1: 0-30 min — strict drop
-		if ($age_seconds <= 30 * MINUTE_IN_SECONDS) {
-			return [
-				'duplicate' => true,
-				'reason' => 'event_signature_under_30_min',
-				'duplicate_of' => (int) $first->id,
-				'signature' => $signature,
-				'age_seconds' => $age_seconds,
-			];
-		}
-		// Tier 3+4: 3-24 h — allow as update / recap
-		if ($age_seconds >= 3 * HOUR_IN_SECONDS) {
-			return [
-				'duplicate' => false,
-				'reason' => 'allowed_as_update_or_recap',
-				'cluster_anchor' => (int) $first->id,
-				'age_seconds' => $age_seconds,
-			];
-		}
-		// Tier 2: 30 min - 3 h — allow only if breaking/top_story OR new key_facts
-		$is_breaking = ! empty($story_card['breaking_candidate'])
-			|| ! empty($story_card['top_story_candidate'])
-			|| (string) ($story_card['publishable_estimate'] ?? '') === 'high';
-		if ($is_breaking) {
+		// Angle-level Jaccard (operator-feedback 2026-05-11, tuned twice):
+		//   Grace: first 2 items в кластере свободны (anchor + первая legit
+		//   variation), defenses kick in с 3-го.
+		//   Threshold 0.60: drop true-duplicate angles. Jaccard работает на
+		//   key_facts — у настоящих near-duplicates пересекается весь facts
+		//   set (zeit/dlf про defense-cooperation: >0.6), у distinct angles
+		//   только base facts (drones vs Russia statement: <0.3).
+		//   Breaking-override НЕ нужен: novel updates по definition имеют
+		//   новые key_facts → low Jaccard → pass automatically. Старый
+		//   override на publishable_estimate=high эффективно отключал dedup
+		//   для всех political stories (Pistorius cluster: 0 drops).
+		if ($matched_count < 2) {
 			return [
 				'duplicate' => false,
-				'reason' => 'breaking_override',
-				'cluster_anchor' => (int) $first->id,
+				'reason' => 'cluster_grace_first_two',
+				'cluster_anchor' => (int) ($first_match->id ?? 0),
+				'matched_cluster_size' => $matched_count,
+				'best_overlap' => $best_overlap,
+			];
+		}
+		// Adaptive threshold: чем больше кластер, тем строже dedup. Цель —
+		// допускать 3-5 distinct angles на крупный event (Pistorius Kyiv:
+		// defense-coop / drones / Russia / Selenskyj-6-projects), но
+		// дальше требовать всё большую новизну. Базовая интуиция:
+		//   2 members → 0.70 (lenient, anchor пар)
+		//   3 members → 0.60
+		//   4 members → 0.55
+		//   5 members → 0.50
+		//   ≥6        → 0.45 (event bloat — нужны действительно новые факты)
+		$threshold = match (true) {
+			$matched_count >= 6 => 0.45,
+			$matched_count == 5 => 0.50,
+			$matched_count == 4 => 0.55,
+			$matched_count == 3 => 0.60,
+			default             => 0.70,
+		};
+		if ($best_overlap >= $threshold) {
+			$age_seconds = $best_match ? max(0, time() - (int) strtotime((string) $best_match->updated_at)) : 0;
+			if (class_exists('EPV2_Logger')) {
+				EPV2_Logger::info('dedup', 'event_angle_high_overlap drop', [
+					'item' => $current_id,
+					'duplicate_of' => (int) ($best_match->id ?? 0),
+					'signature' => $signature,
+					'overlap' => $best_overlap,
+					'threshold' => $threshold,
+					'cluster_size' => $matched_count,
+					'age_seconds' => $age_seconds,
+				]);
+			}
+			return [
+				'duplicate' => true,
+				'reason' => 'event_angle_high_overlap',
+				'duplicate_of' => (int) ($best_match->id ?? 0),
+				'signature' => $signature,
+				'similarity' => $best_overlap,
+				'threshold' => $threshold,
+				'matched_cluster_size' => $matched_count,
 				'age_seconds' => $age_seconds,
 			];
 		}
-		$current_facts = self::extract_key_facts_set($story_card);
-		$first_facts = self::extract_key_facts_set($first->story_card);
-		$jaccard = self::jaccard_similarity($current_facts, $first_facts);
-		// 60%+ overlap = same angle, drop. Below = new facts, allow.
-		if ($jaccard >= 0.6) {
-			return [
-				'duplicate' => true,
-				'reason' => 'event_signature_high_facts_overlap',
-				'duplicate_of' => (int) $first->id,
+		if (class_exists('EPV2_Logger') && $best_overlap >= 0.30) {
+			EPV2_Logger::info('dedup', 'event_angle_pass', [
+				'item' => $current_id,
+				'cluster_anchor' => (int) ($first_match->id ?? 0),
 				'signature' => $signature,
-				'similarity' => $jaccard,
-				'age_seconds' => $age_seconds,
-			];
+				'overlap' => $best_overlap,
+				'threshold' => $threshold,
+				'cluster_size' => $matched_count,
+			]);
 		}
 		return [
 			'duplicate' => false,
-			'reason' => 'new_facts_present',
-			'cluster_anchor' => (int) $first->id,
-			'similarity' => $jaccard,
-			'age_seconds' => $age_seconds,
+			'reason' => 'new_angle_present',
+			'cluster_anchor' => (int) ($first_match->id ?? 0),
+			'matched_cluster_size' => $matched_count,
+			'best_overlap' => $best_overlap,
+			'threshold' => $threshold,
 		];
 	}
 
 	/**
 	 * Compute "event signature" for a Story Card:
-	 *   top_entity | top_event_keyword | date_day
-	 * All lowercase, normalized. Returns '' if not enough signal.
+	 *   canonical_entity | date_day
+	 *
+	 * Operator-feedback 2026-05-11: dropped event_kw. Within same
+	 * (entity, day) cluster, factual-overlap Jaccard в is_event_duplicate
+	 * decides angle vs duplicate — multiple distinct angles per entity per
+	 * day are allowed (Pistorius Kyiv visit: defense-coop / drones /
+	 * Russia statement / Selenskyj 6 projects).
+	 *
+	 * canonical_entity = last surname token, transliterated to latin,
+	 * lowercased, alphanumeric-only. Lets «Boris Pistorius» (DE) cluster
+	 * с «Борис Пісторіус» (UK) — обе нормализуются к "pistorius".
 	 */
 	public static function compute_event_signature(array $story_card, array $payload = []): string {
-		// Top entity from story_card.entities_people[0]
 		$entity = '';
 		$people = (array) ($story_card['entities_people'] ?? []);
 		foreach ($people as $person) {
 			if (is_array($person)) {
 				$name = trim((string) ($person['name'] ?? ''));
-				if ($name !== '') {
-					$entity = $name;
-					break;
-				}
+				if ($name !== '') { $entity = $name; break; }
 			} elseif (is_string($person) && trim($person) !== '') {
-				$entity = trim($person);
-				break;
+				$entity = trim($person); break;
 			}
 		}
-		// Event keyword: payload._meta.context_memory.event_title is where
-		// the worker stores the AI-extracted event title; it's our richest
-		// source. Fall back to story_card.topics[0] / tags[0] /
-		// search_queries[0] / key_phrases[0] in that order.
-		$event_kw = '';
-		$context_memory = is_array($payload['_meta']['context_memory'] ?? null) ? $payload['_meta']['context_memory'] : [];
-		$event_title = (string) ($context_memory['event_title'] ?? '');
-		if ($event_title === '') {
-			$event_title = (string) (is_array($story_card['event_context'] ?? null) ? ($story_card['event_context']['event_title'] ?? '') : '');
-		}
-		if ($event_title !== '') {
-			$tokens = preg_split('/[\s\-—,.:;!?\/«»"„"\'()]+/u', mb_strtolower($event_title)) ?: [];
-			$stop = ['der','die','das','und','mit','von','des','dem','den','eine','einer','einem','ein','auch','sich','ist','sind','wird','werden','auf','im','in','an','am','zu','zum','zur','beim','beim','bei','beim','dass','wenn','dann','noch','nicht','schon','heute','morgen','gestern','letzte','letzten','letzter','this','for','the','and','with','von','on','at','by','of','to','as','or','о','про','для','та','і','в','на','з','за','до','об','а','i','y','o','also','ohne','ohne'];
-			$candidates = array_filter($tokens, static fn($t) => mb_strlen($t) >= 5 && ! in_array($t, $stop, true));
-			if ($candidates !== []) {
-				usort($candidates, static fn($a, $b) => mb_strlen($b) <=> mb_strlen($a));
-				$event_kw = $candidates[0];
-			}
-		}
-		if ($event_kw === '') {
-			foreach (['topics','tags','search_queries','key_phrases'] as $field) {
-				$arr = (array) ($story_card[$field] ?? []);
-				foreach ($arr as $entry) {
-					$text = is_array($entry) ? trim((string) ($entry['text'] ?? $entry['name'] ?? '')) : trim((string) $entry);
-					if (mb_strlen($text) >= 5) {
-						$event_kw = mb_strtolower($text);
-						break 2;
-					}
-				}
-			}
-		}
-		if ($entity === '' || $event_kw === '') {
+		if ($entity === '') {
 			return '';
 		}
-		// Date day from context_memory.dates[0] / event_context.dates[0]
-		// / story_card.dates[0]; fall back to today UTC.
+		$entity_key = self::canonical_entity_key($entity);
+		if ($entity_key === '') {
+			return '';
+		}
+		$context_memory = is_array($payload['_meta']['context_memory'] ?? null) ? $payload['_meta']['context_memory'] : [];
 		$date_day = '';
 		foreach ([
 			(array) ($context_memory['dates'] ?? []),
@@ -355,10 +372,49 @@ final class EPV2_Deduplicator {
 		if ($date_day === '') {
 			$date_day = gmdate('Y-m-d');
 		}
-		// Truncate event_kw to first 12 characters of the lemma — the
-		// 4 parade items had "siegesparade", "tag", "siege" — we want
-		// the longest single word but capped to keep the signature tight.
-		return mb_strtolower($entity) . '|' . mb_substr(mb_strtolower($event_kw), 0, 16) . '|' . $date_day;
+		return $entity_key . '|' . $date_day;
+	}
+
+	/**
+	 * Normalize entity name to a stable cross-language surname key.
+	 * «Boris Pistorius» → «pistorius»; «Борис Пісторіус» → «pistorius»
+	 * (via Transliterator если intl доступен); «Bundesverteidigungsminister
+	 * Pistorius» → «pistorius» (role prefix stripped). Возвращает ''
+	 * для пустых/коротких имён (защита от false-positive collisions).
+	 */
+	private static function canonical_entity_key(string $name): string {
+		$name = trim($name);
+		if ($name === '') {
+			return '';
+		}
+		// Strip common political role prefixes that some entries bake in.
+		$name = preg_replace(
+			'/^(bundes)?(verteidigungs|finanz|außen|innen|wirtschafts|gesundheits|familien|justiz|verkehrs|umwelt|bau|arbeits)?(kanzler|kanzlerin|minister|ministerin|pr[äa]sident|pr[äa]sidentin|chancellor|president|prime\s+minister|premier|premierminister|ministerpr[äa]sident)\s+/iu',
+			'',
+			$name
+		) ?: $name;
+		// Cyrillic → Latin if intl is available
+		if (class_exists('Transliterator')) {
+			$tr = Transliterator::create('Any-Latin; Latin-ASCII; Lower');
+			if ($tr) {
+				$latin = $tr->transliterate($name);
+				if (is_string($latin) && $latin !== '') {
+					$name = $latin;
+				}
+			}
+		}
+		$name = mb_strtolower($name);
+		$words = preg_split('/\s+/u', $name) ?: [];
+		// Walk words from right (surname is usually last meaningful token).
+		for ($i = count($words) - 1; $i >= 0; $i--) {
+			$w = preg_replace('/[^a-z0-9]/u', '', (string) $words[$i]) ?? '';
+			// Require ≥4 chars to avoid common false-positive collisions
+			// on initials/short particles (von/zu/de/al).
+			if (mb_strlen($w) >= 4) {
+				return $w;
+			}
+		}
+		return '';
 	}
 
 	private static function extract_key_facts_set(array $story_card): array {

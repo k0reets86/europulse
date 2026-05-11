@@ -11,7 +11,7 @@ final class EPV2_AI_Response_Validator {
 	// Prevents stale-score bypass — items с perfectly-scored payloads до
 	// validator update'а от gate'а проходят (item 2257 case: stored q=100
 	// до detect_invented_numbers deploy → publish без re-check).
-	public const VALIDATOR_VERSION = '2026-05-11-v2';
+	public const VALIDATOR_VERSION = '2026-05-11-v3';
 
 	public static function validate(array $payload): array {
 		$errors = [];
@@ -476,6 +476,91 @@ final class EPV2_AI_Response_Validator {
 		return $invented;
 	}
 
+	/**
+	 * Detect quotes attributed to speakers who don't appear in source dossier.
+	 *
+	 * Catches case (post 8861 2026-05-11): AI invented цитата
+	 * «Wir müssen alles daran setzen, die Bürger vor Internetkriminalität zu
+	 * schützen.» attributed to Bundeskanzler Friedrich Merz. Real source
+	 * (Deutschlandfunk Cybersicherheitsmonitor) quoted BSI-Präsidentin
+	 * Plattner, not Merz. Merz appeared только в page sidebar nav.
+	 *
+	 * Strategy v1 (intentionally permissive, не задушить автоматику):
+	 * Extract «...» / "..." quotes ≥40 chars в DE content, найти ближайшую
+	 * speaker-attribution (sagte X / X erklärte / X: «...») в окне ±60
+	 * chars. Если surname (last word ≥4 chars) не встречается в source
+	 * dossier (primary + supporting content/excerpt/title/quotes) — flag.
+	 * False-positive risk: speaker mentioned in source nav/sidebar но не
+	 * как actual quoted source. Soft penalty в editorial_quality (-15),
+	 * не hard block в publish gate — operator всё ещё видит item в normal
+	 * flow и решает.
+	 *
+	 * Returns list of ['speaker' => str, 'quote' => str (first 80 chars)].
+	 */
+	public static function detect_invented_quote_attributions(array $payload): array {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$dossier = is_array($meta['source_dossier'] ?? null) ? $meta['source_dossier'] : [];
+		$haystack = (string) ($dossier['primary']['content'] ?? '')
+			. ' ' . (string) ($dossier['primary']['excerpt'] ?? '')
+			. ' ' . (string) ($dossier['primary']['title'] ?? '');
+		foreach ((array) ($dossier['supporting'] ?? []) as $s) {
+			if (! is_array($s)) continue;
+			$haystack .= ' ' . (string) ($s['content'] ?? '')
+				. ' ' . (string) ($s['excerpt'] ?? '')
+				. ' ' . (string) ($s['title'] ?? '');
+		}
+		foreach ((array) ($dossier['quotes'] ?? []) as $q) {
+			$haystack .= ' ' . (is_array($q) ? (string) ($q['text'] ?? '') : (string) $q);
+		}
+		$haystack_norm = mb_strtolower(preg_replace('/\s+/u', ' ', wp_strip_all_tags($haystack)) ?? $haystack);
+
+		$de_content = trim(wp_strip_all_tags((string) ($payload['languages']['de']['content'] ?? '')));
+		if ($de_content === '' || $haystack_norm === '') {
+			return [];
+		}
+
+		// German speech verbs / attribution markers
+		$verbs = '(?:sagte|sagt|erkl[äa]rte|erkl[äa]rt|betonte|betont|forderte|fordert|warnte|warnt|teilte\s+mit|teilt\s+mit|berichtete|berichtet|kommentierte|kommentiert|so|laut|nach\s+Angaben\s+von|hatte\s+gesagt)';
+		$invented = [];
+		$seen_speakers = [];
+
+		// Pattern A: «...», VERB SpeakerName.
+		if (preg_match_all('/[«"„](.{40,400}?)[»""]\s*[,.]?\s*' . $verbs . '\s+([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+){0,2})/u', $de_content, $matches, PREG_SET_ORDER)) {
+			foreach ($matches as $m) {
+				self::collect_invented_attribution($m[1] ?? '', $m[2] ?? '', $haystack_norm, $invented, $seen_speakers);
+			}
+		}
+		// Pattern B: SpeakerName VERB[:]? «...»
+		if (preg_match_all('/([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+){0,2})\s+' . $verbs . '[:]?\s*[«"„](.{40,400}?)[»""]/u', $de_content, $matches, PREG_SET_ORDER)) {
+			foreach ($matches as $m) {
+				self::collect_invented_attribution($m[3] ?? '', $m[1] ?? '', $haystack_norm, $invented, $seen_speakers);
+			}
+		}
+		return $invented;
+	}
+
+	private static function collect_invented_attribution(string $quote, string $speaker_full, string $haystack_norm, array &$invented, array &$seen): void {
+		$speaker_full = trim($speaker_full);
+		if ($speaker_full === '') return;
+		// Surname = last word with ≥4 chars (more stable than first name across translations)
+		$words = preg_split('/\s+/u', $speaker_full) ?: [];
+		$surname = '';
+		for ($i = count($words) - 1; $i >= 0; $i--) {
+			$w = trim((string) $words[$i], " \t.,;:!?");
+			if (mb_strlen($w) >= 4) { $surname = $w; break; }
+		}
+		if ($surname === '' || isset($seen[$surname])) return;
+		// Common false-positive guard: skip generic role-tokens that aren't names
+		$role_tokens = ['Minister','Ministerin','Kanzler','Kanzlerin','Präsident','Präsidentin','Sprecher','Sprecherin','Behörde','Bundesregierung','Bundestag','Bundesrat','Polizei','Staatsanwaltschaft'];
+		if (in_array($surname, $role_tokens, true)) return;
+		if (str_contains($haystack_norm, mb_strtolower($surname))) return;
+		$seen[$surname] = true;
+		$invented[] = [
+			'speaker' => $speaker_full,
+			'quote' => mb_substr($quote, 0, 80),
+		];
+	}
+
 	public static function editorial_quality(array $payload): array {
 		$warnings = [];
 		$score = 100;
@@ -495,6 +580,18 @@ final class EPV2_AI_Response_Validator {
 		} elseif (count($invented_nums) === 1) {
 			$warnings['de'][] = 'возможно изобретённое число: ' . $invented_nums[0];
 			$score -= 8;
+		}
+		// Invented quote attributions (post 8861 case 2026-05-11): Merz
+		// quoted in DE content, реальная цитата от Plattner. Soft penalty
+		// (не hard block, чтобы false-positive не задушил автоматику).
+		$invented_attrs = self::detect_invented_quote_attributions($payload);
+		if (count($invented_attrs) >= 2) {
+			$warnings['de'][] = 'выдуманные атрибуции цитат (' . count($invented_attrs) . '): ' . implode('; ', array_map(static fn($a) => $a['speaker'], array_slice($invented_attrs, 0, 3)));
+			$score -= 30;
+		} elseif (count($invented_attrs) === 1) {
+			$attr = $invented_attrs[0];
+			$warnings['de'][] = 'speaker «' . $attr['speaker'] . '» не упомянут в источнике (цитата может быть приписана)';
+			$score -= 15;
 		}
 		$primary_url = (string) ($meta['source_dossier']['primary']['url'] ?? '');
 		$has_strong_primary = self::looks_like_official_primary($primary_url);

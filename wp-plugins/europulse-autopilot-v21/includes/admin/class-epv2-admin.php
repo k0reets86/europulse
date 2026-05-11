@@ -545,10 +545,14 @@ final class EPV2_Admin {
 				$active_items[] = $row;
 				continue;
 			}
-			if (in_array($row->state, ['retry_process', 'new', 'reserve'], true)) {
-				$new_items[] = $row;
-				continue;
-			}
+			// Route by user_facing_state FIRST (operator-feedback 2026-05-11):
+			// item 2215 был state=retry_process, ufs=ready_publish (payload
+			// готов q=100, ждёт publish slot). Старая логика клала его в
+			// «Новые» по state-check до проверки ufs. Operator видел в «Новые»
+			// status «Готов к публикации до HH:MM» — inconsistent. Теперь
+			// payload-ready items идут в «Готово к публикации» секцию даже
+			// при DB state=new/retry_process (orchestrator_v2 collapse).
+			// «Новые» = только truly untouched items (ufs='new').
 			$ufs = EPV2_Queue::user_facing_state_for_row($row);
 			if (in_array($ufs, ['ready_publish', 'publishing'], true)) {
 				$publish_items[] = $row;
@@ -777,10 +781,14 @@ final class EPV2_Admin {
 				$active_items[] = $row;
 				continue;
 			}
-			if (in_array($row->state, ['retry_process', 'new', 'reserve'], true)) {
-				$new_items[] = $row;
-				continue;
-			}
+			// Route by user_facing_state FIRST (operator-feedback 2026-05-11):
+			// item 2215 был state=retry_process, ufs=ready_publish (payload
+			// готов q=100, ждёт publish slot). Старая логика клала его в
+			// «Новые» по state-check до проверки ufs. Operator видел в «Новые»
+			// status «Готов к публикации до HH:MM» — inconsistent. Теперь
+			// payload-ready items идут в «Готово к публикации» секцию даже
+			// при DB state=new/retry_process (orchestrator_v2 collapse).
+			// «Новые» = только truly untouched items (ufs='new').
 			$ufs = EPV2_Queue::user_facing_state_for_row($row);
 			if (in_array($ufs, ['ready_publish', 'publishing'], true)) {
 				$publish_items[] = $row;

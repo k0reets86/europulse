@@ -7955,6 +7955,30 @@ final class EPV2_AI_Processor {
 				return true;
 			}
 		}
+		// URL pattern detection (operator-feedback 2026-05-11): some publishers
+		// serve generic OG-fallback / placeholder / default images when
+		// article-specific image не available (e.g., orf.at og-fallback-news.png,
+		// generic «teaser-fallback», «default-cover», «placeholder.jpg»).
+		// These are content-agnostic graphics that look broken для news cards.
+		// Item 2253 case: euronews article published с orf.at og-fallback.
+		$path = (string) wp_parse_url($url, PHP_URL_PATH);
+		$haystack = strtolower($path);
+		foreach ([
+			'og-fallback',
+			'og_fallback',
+			'/fallback-',
+			'/default-cover',
+			'/default-image',
+			'/default-thumb',
+			'placeholder',
+			'teaser-fallback',
+			'common/images/og-',
+			'/social-share-default',
+		] as $pattern) {
+			if (str_contains($haystack, $pattern)) {
+				return true;
+			}
+		}
 		return false;
 	}
 

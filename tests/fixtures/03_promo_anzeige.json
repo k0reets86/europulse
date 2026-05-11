@@ -1,0 +1,40 @@
+{
+  "_fixture": {
+    "name": "03 promo_anzeige — Anzeige promotional content",
+    "description": "Title prefix 'Anzeige:' is paid promo. Pipeline должен hard-reject (operator policy 2026-05-11). Reject must stick — soft_terminal_state_guard must NOT salvage.",
+    "expects": {
+      "after_processing": {
+        "state": "rejected"
+      },
+      "error_contains": "promotional"
+    }
+  },
+  "source_id": 122,
+  "state": "new",
+  "mode": "auto",
+  "language_plan": "de,uk,en",
+  "original_url": "https://example-fixture.test/anzeige/microsoft-365",
+  "original_title": "Anzeige: Microsoft 365 Administration: Identitäten, Security, Intune",
+  "original_content": "In diesem Sponsored-Post zeigen wir, wie Microsoft 365 Administration für Unternehmen funktioniert. Identitäten verwalten, Security-Policies konfigurieren, Intune Endpoint Management einrichten. Verfügbar in Heise+ Premium.",
+  "original_excerpt": "Sponsored: Microsoft 365 Verwaltung",
+  "original_date": "2026-05-11 10:00:00",
+  "category_proposed": "wirtschaft",
+  "story_score": 40,
+  "story_format": "bulletin",
+  "admin_notes": {
+    "selection": {
+      "score": 40,
+      "tier": "C",
+      "decision": "review",
+      "category": "wirtschaft"
+    }
+  },
+  "_mock_story_card": {
+    "v": "1",
+    "kind": "news",
+    "category": {"primary": "wirtschaft", "confidence": 0.6},
+    "publishable_estimate": "reject",
+    "editorial_match": "reject_low_value",
+    "editorial_reason": "promotional sponsored content"
+  }
+}

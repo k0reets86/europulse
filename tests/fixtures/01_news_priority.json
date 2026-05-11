@@ -1,0 +1,63 @@
+{
+  "_fixture": {
+    "name": "01 news_priority — high-priority politik news",
+    "description": "Item from top-tier source with clear politik content, ingest score 70+, expected to pass selection cleanly and reach ready_publish.",
+    "expects": {
+      "after_processing": {
+        "state": "ready_publish",
+        "category_final": "politik",
+        "_meta.story_card.editorial_match": "match",
+        "_meta.story_card.publishable_estimate": "high"
+      }
+    }
+  },
+  "source_id": 122,
+  "state": "new",
+  "mode": "auto",
+  "language_plan": "de,uk,en",
+  "original_url": "https://example-fixture.test/politik/eu-summit-decision",
+  "original_title": "EU-Gipfel: Klare Mehrheit für neue Sanktionen gegen Russland nach Drohne-Vorfall",
+  "original_content": "Brüssel — Die EU-Staaten haben sich auf neue Sanktionen gegen Russland geeinigt. Der Beschluss erfolgte nach dem jüngsten Drohnen-Vorfall an der NATO-Ostflanke. Bundeskanzler Friedrich Merz sprach von einem 'klaren Signal an Moskau'. Die Massnahmen umfassen Exportverbote für Dual-Use-Technologien und erweiterte Personenlisten. Die EU-Kommission soll bis Ende Mai die Detaillisten vorlegen. Acht Mitgliedsstaaten unterstützten den Vorschlag bereits in einer Vorab-Abstimmung — darunter Polen, die baltischen Staaten und die Niederlande. Ungarn und die Slowakei stimmten dagegen, ohne die Mehrheit zu blockieren.",
+  "original_excerpt": "EU einigt sich auf neue Russland-Sanktionen nach Drohnen-Vorfall. Merz: 'Klares Signal an Moskau'.",
+  "original_date": "2026-05-11 10:00:00",
+  "original_author": "Deutsche Welle",
+  "source_image_url": "https://example-fixture.test/img/eu-summit.jpg",
+  "title_hash": "fixture01_title_hash_unique",
+  "content_hash": "fixture01_content_hash_unique",
+  "category_proposed": "politik",
+  "story_score": 72,
+  "story_format": "article",
+  "admin_notes": {
+    "selection": {
+      "score": 72,
+      "tier": "A",
+      "decision": "priority",
+      "reject_class": "",
+      "breaking_candidate": false,
+      "category": "politik",
+      "reasons": ["high-priority politik story с consensus mentions", "top-tier source"]
+    }
+  },
+  "_mock_story_card": {
+    "v": "1",
+    "kind": "news",
+    "language": "de",
+    "category": {"primary": "politik", "secondary": "ukraine", "confidence": 0.92},
+    "geography": {"countries": ["EU", "RU"], "is_german_domestic": false},
+    "entities_people": ["Friedrich Merz"],
+    "entities_organizations": ["EU-Kommission", "NATO"],
+    "entities_places": ["Brüssel", "Moskau"],
+    "key_facts": [
+      "EU einigt sich auf neue Sanktionen",
+      "Drohnen-Vorfall an NATO-Ostflanke",
+      "Acht Mitgliedsstaaten unterstützen",
+      "Ungarn und Slowakei dagegen"
+    ],
+    "topics": ["sanktionen", "russland", "eu-gipfel"],
+    "tags": ["EU", "Russland", "Sanktionen", "Merz"],
+    "publishable_estimate": "high",
+    "editorial_match": "match",
+    "editorial_reason": "Top-tier politik story с consensus mentions",
+    "media_required": "named_entity"
+  }
+}

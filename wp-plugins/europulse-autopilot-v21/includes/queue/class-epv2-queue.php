@@ -1081,6 +1081,21 @@ final class EPV2_Queue {
 				continue;
 			}
 
+			// AI editorial endorsement check (2026-05-11): quality streams
+			// могут быть perfect (worker строит технически чистый payload),
+			// но если AI editorial verdict не вынесен (story_card.editorial_match
+			// = NULL / reject_low_value), item не должен возвращаться в
+			// автопайплайн. Это closes loop: Sandra Bullock celebrity item
+			// 2096 имел q=100/100/100/100 + 3 langs + media → auto_promote
+			// → publish_ready_gate reject (selection_blocked) → manual_review
+			// → auto_promote снова. AI editorial — единственное что отличает
+			// «publishable» от «технически собранный мусор».
+			$story_card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
+			$ed_match = strtolower((string) ($story_card['editorial_match'] ?? ''));
+			if ($ed_match === '' || $ed_match === 'reject_low_value') {
+				continue;
+			}
+
 			// All 3 languages have title + body
 			$langs_ok = true;
 			foreach (['de', 'uk', 'en'] as $l) {
@@ -1487,10 +1502,28 @@ final class EPV2_Queue {
 	}
 
 	public static function quarantine_pathological_workflow_loops(int $limit = 100): array {
-		$items = self::get_queue_items_summary([
-			'states' => ['new', 'retry_process'],
-			'limit' => max(1, min(500, $limit)),
-		]);
+		// Target stuck items specifically (workflow_step_attempts >= 2)
+		// instead of get_queue_items_summary which caps at 100 newest by
+		// created_at DESC. С 200+ свежими 'new' items от collector'а, старые
+		// stuck items (как 2096) утопали в slice и handler их не видел.
+		// Now we query directly for elevated attempts, sorted by attempts
+		// DESC so worst offenders come first. Limit 100 на handler invocation
+		// — items по attempts быстро разруливаются.
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$capped_limit = max(1, min(500, $limit));
+		$items = $wpdb->get_results($wpdb->prepare(
+			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
+			 WHERE state IN ('new', 'retry_process')
+			   AND CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) >= 2
+			 ORDER BY CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.workflow_step_attempts')) AS UNSIGNED) DESC,
+			          updated_at DESC
+			 LIMIT %d",
+			$capped_limit
+		));
+		if (! is_array($items)) {
+			$items = [];
+		}
 		$result = [
 			'checked' => 0,
 			'changed' => 0,

@@ -16,25 +16,35 @@ final class EPV2_Time_Planner {
 		// The night window has zero allowed slots: only breaking_alert
 		// items override the schedule (handled in
 		// EPV2_Time_Planner::should_publish via has_breaking_watch()).
+		// Operator-агреемент 2026-05-09 (вечерняя сессия):
+		//   06–09  collect 2/час (на :00 и :30)         publish каждые 5 мин
+		//   09–16  collect 1/час (на :00)               publish каждые 5 мин
+		//   16–19  collect 2/час (на :00 и :30)         publish каждые 5 мин
+		//   19–22  collect 1/час (на :00)               publish каждые 5 мин
+		//   22–23  collect 1× (на :00 в 22:00)          publish каждые 5 мин
+		//   23–00  collect OFF                          publish каждые 5 мин (очередь дорабатывается)
+		//   00–01  collect 1× (на :00 в 00:00)          publish OFF
+		//   01–06  collect OFF, publish OFF — только breaking + top stories
+		// Breaking всегда обходит лимиты (см. should_collect/should_publish).
 		$timer_5  = range(0, 55, 5);
-		$timer_8  = [0, 8, 16, 24, 32, 40, 48, 56];
-		$timer_15 = [0, 15, 30, 45];
 		return [
 			'windows' => [
-				// Morning catch-up: ночные сводки + анонсы дня
+				// Morning catch-up
 				['start' => '06:00', 'end' => '09:00', 'mode' => 'morning_catchup',  'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
-				// Daytime active flow
-				['start' => '09:00', 'end' => '12:00', 'mode' => 'daytime_active',   'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
-				// Lunch peak: brief / news / sport_result
-				['start' => '12:00', 'end' => '13:30', 'mode' => 'lunch_peak',       'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
-				// Daytime mid-tempo (8 min between publications)
-				['start' => '13:30', 'end' => '18:00', 'mode' => 'daytime_mid',      'collect_minutes' => [0, 30], 'publish_minutes' => $timer_8],
-				// Evening prime: long content (feature / analysis / extended)
-				['start' => '18:00', 'end' => '22:00', 'mode' => 'evening_prime',    'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
-				// Wind-down: max 4 publications per hour
-				['start' => '22:00', 'end' => '00:00', 'mode' => 'wind_down',        'collect_minutes' => [0],     'publish_minutes' => $timer_15],
-				// Night pause: only breaking_alert allowed
-				['start' => '00:00', 'end' => '06:00', 'mode' => 'night_monitor',    'collect_minutes' => [0],     'publish_minutes' => []],
+				// Daytime active (один сбор в час)
+				['start' => '09:00', 'end' => '16:00', 'mode' => 'daytime_active',   'collect_minutes' => [0],     'publish_minutes' => $timer_5],
+				// Daytime peak: 2 сбора в час
+				['start' => '16:00', 'end' => '19:00', 'mode' => 'daytime_peak',     'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
+				// Evening prime: один сбор в час
+				['start' => '19:00', 'end' => '22:00', 'mode' => 'evening_prime',    'collect_minutes' => [0],     'publish_minutes' => $timer_5],
+				// Last collect of the day at 22:00, publish продолжается
+				['start' => '22:00', 'end' => '23:00', 'mode' => 'wind_down_final',  'collect_minutes' => [0],     'publish_minutes' => $timer_5],
+				// Wind-down hour: collect OFF (но publish продолжается)
+				['start' => '23:00', 'end' => '00:00', 'mode' => 'wind_down_quiet',  'collect_minutes' => [],      'publish_minutes' => $timer_5],
+				// Полуночный одиночный сбор (00:00). Без publish — ночью только breaking.
+				['start' => '00:00', 'end' => '01:00', 'mode' => 'night_open',       'collect_minutes' => [0],     'publish_minutes' => []],
+				// Night: collect OFF, publish OFF — только breaking/top
+				['start' => '01:00', 'end' => '06:00', 'mode' => 'night_monitor',    'collect_minutes' => [],      'publish_minutes' => []],
 			],
 			'breaking_watch_minutes' => [0, 30],
 			'timezone' => 'Europe/Berlin',
@@ -67,14 +77,23 @@ final class EPV2_Time_Planner {
 		if ($force) {
 			return true;
 		}
-		$window = self::current_window();
-		if (($window['mode'] ?? '') === 'night_monitor') {
-			// Night: collect every 2h (at 00:00, 02:00, 04:00) or immediately if breaking_watch active
-			$hour        = (int) self::now()->format('G');
-			$on_schedule = in_array( $hour, [0, 2, 4], true ) && self::minute_allowed( [0] );
-			return ( $on_schedule || self::has_breaking_watch() );
+		// Breaking news ВСЕГДА проходит, любое окно, любой минутный слот.
+		if (self::has_breaking_watch()) {
+			return true;
 		}
-		return self::minute_allowed((array) ($window['collect_minutes'] ?? []));
+		$window = self::current_window();
+		$mode = (string) ($window['mode'] ?? '');
+		// Окна где collect полностью off (ночь, тихий час перед последним сбором).
+		if (in_array($mode, ['night_monitor', 'wind_down_quiet'], true)) {
+			return false;
+		}
+		$collect_minutes = (array) ($window['collect_minutes'] ?? []);
+		// Пустой list = collect off для этого окна (раньше = «всегда», что
+		// конфликтовало с дизайном — теперь явно «никогда»).
+		if ($collect_minutes === []) {
+			return false;
+		}
+		return self::minute_allowed($collect_minutes);
 	}
 
 	public static function should_process(bool $force = false): bool {

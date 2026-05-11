@@ -6,9 +6,16 @@ if (! defined('ABSPATH')) {
 
 final class EPV2_Admin {
 	private const QUEUE_PAGE_FETCH_LIMIT = 80;
-	private const QUEUE_SNAPSHOT_CACHE_TTL = 1;
-	private const QUEUE_SNAPSHOT_REFRESH_MS = 2500;
-	private const QUEUE_SNAPSHOT_REQUEST_COOLDOWN = 2;
+	private const QUEUE_SNAPSHOT_CACHE_TTL = 3;
+	// Refresh interval bumped 2500 → 10000 (operator-feedback 2026-05-10):
+	// AI processing занимает 30-60 сек и item проходит через 5 state-
+	// transitions (new → processing_de → retry_process → ready_publish
+	// или published). При 2.5-сек snapshot admin делал 12 refreshes за
+	// один AI цикл и item визуально перепрыгивал между «Новые» / «В работе»
+	// / «Готово» каждые несколько секунд. 10 сек — реактивно достаточно
+	// для operator, но stable рендер (одна secция fade за visit).
+	private const QUEUE_SNAPSHOT_REFRESH_MS = 10000;
+	private const QUEUE_SNAPSHOT_REQUEST_COOLDOWN = 5;
 
 	private static function require_manage_capability(): void {
 		if (! current_user_can('manage_europulse_autopilot')) {
@@ -479,10 +486,59 @@ final class EPV2_Admin {
 		$collect_paused = EPV2_Jobs::collect_paused();
 		$automation_paused = EPV2_Jobs::automation_paused();
 		$active_id = self::active_queue_item_id();
-		$active_items = $active_id > 0 ? self::queue_light_rows_by_ids([$active_id]) : [];
-		$new_items = self::queue_light_rows_by_states(['new', 'retry_process', 'ready_review', 'reserve', 'processing_de'], 30, [$active_id]);
-		$publish_items = self::queue_light_rows_by_states(['ready_publish', 'retry_publish', 'publishing'], 30);
-		$manual_review_items = self::queue_light_rows_by_states(['manual_review'], 30);
+		// Группировка для admin queue (operator-feedback 2026-05-10):
+		// «Новые»          = реально не начатые + ждут retry (new, reserve, retry_process)
+		// «В работе»       = ТОЛЬКО active (orchestrator-claimed) + processing_de.
+		//                    retry_process сюда НЕ входит — он ждёт следующего
+		//                    тика, не работает прямо сейчас. Single-owner
+		//                    orchestrator гарантирует ≤1 active одновременно.
+		// «Готово к публ.» = ready_publish, retry_publish, publishing
+		// «Ручная проверка»= manual_review + ready_review (worker сделал, ждёт оператора)
+		// «Отклонённые»    = rejected, error, duplicate
+		// «Опубликованные» = published
+		// Reclassify lightweight rows через user_facing_state_for_row() —
+		// heavy server-side render использует тот же классификатор. Без этого
+		// items с готовым payload (state='new' но user_facing='ready_publish')
+		// flicker'ят между «Новые» (lightweight) и «Готово к публикации» (heavy).
+		$live_rows = self::queue_light_rows_by_states(
+			['new', 'reserve', 'processing_de', 'retry_process', 'ready_publish', 'retry_publish', 'publishing'],
+			120
+		);
+		// State-based router: active_id pointer НЕ pre-place'ит row в
+		// «В работе» — это решает state. Active orchestrator claim ставит
+		// option=row_id + token, но state у row может быть 'new' первые
+		// 1-3 сек до worker call. Pre-fetch по active_id путал router'a:
+		// item state='new' попадал в «В работе» через pre-fetch, исчезая
+		// из «Новые» при refresh. Single-owner contract = ≤1 item в
+		// processing_de — этого достаточно для «В работе» секции.
+		$active_items = [];
+		$new_items = [];
+		$publish_items = [];
+		foreach ($live_rows as $row) {
+			// «В работе» = state='processing_de' ИЛИ row.id == active_id.
+			// Active automation pointer держится с момента claim до
+			// terminal state — это **физический владелец** orchestrator'а.
+			// Badge "В работе · X%" также рендерится по active_id (line
+			// 1070), теперь section grouping consistent с badge.
+			// retry_process / 'new' / reserve (без active_id) → «Новые».
+			// Остальное (ready_publish, publishing) → «Готово».
+			$rid = (int) ($row->id ?? 0);
+			if ($row->state === 'processing_de' || ($active_id > 0 && $rid === $active_id)) {
+				$active_items[] = $row;
+				continue;
+			}
+			if (in_array($row->state, ['retry_process', 'new', 'reserve'], true)) {
+				$new_items[] = $row;
+				continue;
+			}
+			$ufs = EPV2_Queue::user_facing_state_for_row($row);
+			if (in_array($ufs, ['ready_publish', 'publishing'], true)) {
+				$publish_items[] = $row;
+			} elseif ($ufs === 'new') {
+				$new_items[] = $row;
+			}
+		}
+		$manual_review_items = self::queue_light_rows_by_states(['manual_review', 'ready_review'], 30);
 		$rejected_items = self::queue_light_rows_by_states(['rejected', 'error', 'duplicate'], 30);
 		$published_items = self::queue_light_rows_by_states(['published'], 30);
 		$next_publish = self::queue_next_publish_timestamp($publish_items);
@@ -527,12 +583,25 @@ final class EPV2_Admin {
 		$active_work_items = array_values(array_filter($items, static fn($item) => self::is_active_work_item($item, $active_item_id)));
 		$ready_publish_items = array_values(array_filter($items, static fn($item) => self::is_ready_publish_item($item, $active_item_id)));
 		$new_queue_items = array_values(array_filter($items, static fn($item) => self::is_new_queue_item($item, $active_item_id)));
-		// Manual-review items use raw `state` rather than user_facing_state
-		// because workflow_is_terminal_state currently does not include
-		// 'manual_review' (changing that would alter the broader workflow
-		// guards). Pulling by raw state gives the admin its own bucket
-		// without touching workflow logic.
-		$manual_review_items = array_values(array_filter($items, static fn($item) => (string) ($item->state ?? '') === 'manual_review'));
+		// Per-section ранжирование по «времени события» DESC независимо от
+		// глобального ?orderby=. Все live-секции (Новые / В работе / Готово /
+		// Ручная / Отклонённые) сортируются по updated_at DESC — это
+		// «когда что-то с этим item'ом случилось последним». Сортировка
+		// «Новые» переключена с created_at на updated_at (operator-feedback
+		// 2026-05-10): после manual regenerate item должен подскочить
+		// наверх «Новых», а не утонуть среди свежесобранных RSS-items.
+		// Раньше heavy path сортил «Новые» по created_at, а lightweight
+		// snapshot по updated_at — поэтому AJAX-refresh показывал item
+		// сверху, а page refresh внизу, и item визуально мигал/пропадал.
+		// Опубликованные сортируются по post_date_gmt (см. ниже).
+		$active_work_items = self::sort_queue_items($active_work_items, 'updated_at', 'desc');
+		$ready_publish_items = self::sort_queue_items($ready_publish_items, 'updated_at', 'desc');
+		$new_queue_items = self::sort_queue_items($new_queue_items, 'updated_at', 'desc');
+		// Manual-review + ready_review items use raw `state` rather than
+		// user_facing_state because workflow_is_terminal_state currently
+		// does not include 'manual_review'/'ready_review'. Pulling по raw
+		// state даёт admin own bucket without touching workflow logic.
+		$manual_review_items = array_values(array_filter($items, static fn($item) => in_array((string) ($item->state ?? ''), ['manual_review', 'ready_review'], true)));
 		$manual_review_ids = array_flip(array_map(static fn($i) => (int) ($i->id ?? 0), $manual_review_items));
 		$rejected_items = array_values(array_filter($items, static function ($item) use ($manual_review_ids) {
 			$id = (int) ($item->id ?? 0);
@@ -541,7 +610,14 @@ final class EPV2_Admin {
 			}
 			return in_array(EPV2_Queue::user_facing_state_for_row($item), ['rejected', 'error', 'duplicate'], true);
 		}));
+		$manual_review_items = self::sort_queue_items($manual_review_items, 'updated_at', 'desc');
+		$rejected_items = self::sort_queue_items($rejected_items, 'updated_at', 'desc');
 		$published_items = array_values(array_filter($items, static fn($item) => (string) $item->state === 'published'));
+		// Опубликованные ВСЕГДА ранжируются по времени публикации DESC,
+		// независимо от URL ?orderby=. Default-сорт ($items по created_at)
+		// клал items с большим id (но раньше публиковавшиеся) выше — оператор
+		// видел старые публикации над свежими.
+		$published_items = self::sort_queue_items($published_items, 'published_at', 'desc');
 		$published_recent_items = array_slice($published_items, 0, 12);
 		$published_archive_items = array_slice($published_items, 12);
 		$automation_paused = EPV2_Jobs::automation_paused();
@@ -642,10 +718,48 @@ final class EPV2_Admin {
 
 	private static function queue_lightweight_blocks_html(): string {
 		$active_id = self::active_queue_item_id();
-		$active_items = $active_id > 0 ? self::queue_light_rows_by_ids([$active_id]) : [];
-		$new_items = self::queue_light_rows_by_states(['new', 'retry_process', 'ready_review', 'reserve', 'processing_de'], 30, [$active_id]);
-		$publish_items = self::queue_light_rows_by_states(['ready_publish', 'retry_publish', 'publishing'], 30);
-		$manual_review_items = self::queue_light_rows_by_states(['manual_review'], 30);
+		// Reclassify через user_facing_state_for_row — см. throttled snapshot
+		// (queue_lightweight_throttled_snapshot) выше: items с готовым payload
+		// должны попадать в «Готово к публикации» / «В работе», а не в «Новые».
+		$live_rows = self::queue_light_rows_by_states(
+			['new', 'reserve', 'processing_de', 'retry_process', 'ready_publish', 'retry_publish', 'publishing'],
+			120
+		);
+		// State-based router: active_id pointer НЕ pre-place'ит row в
+		// «В работе» — это решает state. Active orchestrator claim ставит
+		// option=row_id + token, но state у row может быть 'new' первые
+		// 1-3 сек до worker call. Pre-fetch по active_id путал router'a:
+		// item state='new' попадал в «В работе» через pre-fetch, исчезая
+		// из «Новые» при refresh. Single-owner contract = ≤1 item в
+		// processing_de — этого достаточно для «В работе» секции.
+		$active_items = [];
+		$new_items = [];
+		$publish_items = [];
+		foreach ($live_rows as $row) {
+			// «В работе» = state='processing_de' ИЛИ row.id == active_id.
+			// Active automation pointer держится с момента claim до
+			// terminal state — это **физический владелец** orchestrator'а.
+			// Badge "В работе · X%" также рендерится по active_id (line
+			// 1070), теперь section grouping consistent с badge.
+			// retry_process / 'new' / reserve (без active_id) → «Новые».
+			// Остальное (ready_publish, publishing) → «Готово».
+			$rid = (int) ($row->id ?? 0);
+			if ($row->state === 'processing_de' || ($active_id > 0 && $rid === $active_id)) {
+				$active_items[] = $row;
+				continue;
+			}
+			if (in_array($row->state, ['retry_process', 'new', 'reserve'], true)) {
+				$new_items[] = $row;
+				continue;
+			}
+			$ufs = EPV2_Queue::user_facing_state_for_row($row);
+			if (in_array($ufs, ['ready_publish', 'publishing'], true)) {
+				$publish_items[] = $row;
+			} elseif ($ufs === 'new') {
+				$new_items[] = $row;
+			}
+		}
+		$manual_review_items = self::queue_light_rows_by_states(['manual_review', 'ready_review'], 30);
 		$rejected_items = self::queue_light_rows_by_states(['rejected', 'error', 'duplicate'], 30);
 		$published_items = self::queue_light_rows_by_states(['published'], 30);
 		$automation_paused = EPV2_Jobs::automation_paused();
@@ -704,6 +818,12 @@ final class EPV2_Admin {
 		if ($table_type === 'publish') {
 			$automation_paused = ! empty($context['automation_paused']);
 			$next_publish = (int) ($context['next_publish'] ?? 0);
+			// Fallback: даже когда очередь пуста, показываем countdown до
+			// следующего publish слота из time-planner. Это даёт оператору
+			// понимание «когда будет следующая публикация» вместо пустоты.
+			if ($next_publish <= 0) {
+				$next_publish = (int) EPV2_Jobs::next_publish_slot_after(time());
+			}
 			if ($next_publish > 0) {
 				$publish_remaining = max(0, $next_publish - time());
 				$publish_minutes = (int) floor($publish_remaining / MINUTE_IN_SECONDS);
@@ -843,7 +963,7 @@ final class EPV2_Admin {
 		$table = $wpdb->prefix . 'epv2_queue';
 		$placeholders = implode(',', array_fill(0, count($ids), '%d'));
 		return $wpdb->get_results($wpdb->prepare(
-			"SELECT id, state, original_title, category_proposed, category_final, original_url, source_image_url, created_at, updated_at, admin_notes, error_message, publish_payload, post_id,
+			"SELECT id, state, original_title, category_proposed, category_final, original_url, source_image_url, created_at, updated_at, admin_notes, error_message, publish_payload, post_id, ai_payload, story_score,
 				CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$.selection.score')) AS UNSIGNED) AS _epv2_selection_score,
 				JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$.selection.tier')) AS _epv2_selection_tier,
 				CAST(JSON_UNQUOTE(JSON_EXTRACT(ai_payload, '$._meta.quality.score')) AS UNSIGNED) AS _epv2_quality_score,
@@ -879,7 +999,11 @@ final class EPV2_Admin {
 		// (default updated_at DESC) so column-header sorting still
 		// works when the operator actively chooses a different sort.
 		$is_published_block = count($states) === 1 && $states[0] === 'published';
-		$sql = "SELECT q.id, q.state, q.original_title, q.category_proposed, q.category_final, q.original_url, q.source_image_url, q.created_at, q.updated_at, q.admin_notes, q.error_message, q.publish_payload, q.post_id,
+		// ai_payload + story_score нужны user_facing_state_for_row() в lightweight
+		// section composer (consistency с heavy path: items с готовым payload'ом
+		// показываем в «Готово к публикации» даже при state='new', а не как
+		// «Новые» — иначе flicker между разделами при page refresh / AJAX).
+		$sql = "SELECT q.id, q.state, q.original_title, q.category_proposed, q.category_final, q.original_url, q.source_image_url, q.created_at, q.updated_at, q.admin_notes, q.error_message, q.publish_payload, q.post_id, q.ai_payload, q.story_score,
 			CAST(JSON_UNQUOTE(JSON_EXTRACT(q.admin_notes, '$.selection.score')) AS UNSIGNED) AS _epv2_selection_score,
 			JSON_UNQUOTE(JSON_EXTRACT(q.admin_notes, '$.selection.tier')) AS _epv2_selection_tier,
 			CAST(JSON_UNQUOTE(JSON_EXTRACT(q.ai_payload, '$._meta.quality.score')) AS UNSIGNED) AS _epv2_quality_score,
@@ -970,7 +1094,10 @@ final class EPV2_Admin {
 				}
 			}
 		return match ($state) {
-			'processing_de', 'new', 'retry_process', 'ready_review', 'reserve' => 'Новый',
+			'new', 'reserve', 'retry_process' => 'Новый',
+			'processing_de' => 'В работе',
+			'ready_review', 'manual_review' => 'Ручная проверка',
+			'ready_publish', 'retry_publish', 'publishing' => 'Готов к публикации',
 			'published' => 'Опубликован',
 			'rejected' => 'Отклонён',
 			'duplicate' => 'Дубликат',
@@ -1198,18 +1325,26 @@ final class EPV2_Admin {
 			$release_score = 0;
 			$google_score = 0;
 		}
-		if ($quality_score > 0 && $quality_score < 90) {
+		// Threshold-логика синхронизирована с pass-логикой scorer'а
+		// (EPV2_AI_Response_Validator). «Не дотянуто» / «не пройден»
+		// показываем только когда scorer ФАКТИЧЕСКИ не дал pass:
+		//   release pass = score >= 72 (см. release_quality)
+		//   google  pass = score >= 78 (см. google_preflight_quality)
+		// Раньше badge показывался при score < 90 — это создавало ложный
+		// сигнал «failed» на нормально passed brief-материалах (88/85
+		// типичные для коротких новостей).
+		if ($quality_score > 0 && $quality_score < 75) {
 			$issues[] = 'редакционное качество ниже нормы';
 		}
-		if ($seo_score > 0 && $seo_score < 90) {
+		if ($seo_score > 0 && $seo_score < 75) {
 			$issues[] = 'SEO требует доводки';
 		}
-		if ($release_score > 0 && $release_score < 90) {
+		if ($release_score > 0 && $release_score < 72) {
 			$issues[] = 'готовность к выпуску не дотянута';
 		} elseif ($release_score <= 0 && ($quality_score > 0 || $seo_score > 0)) {
 			$issues[] = 'готовность к выпуску не подтверждена';
 		}
-		if ($google_score > 0 && $google_score < 90) {
+		if ($google_score > 0 && $google_score < 78) {
 			$issues[] = 'Google preflight не пройден';
 		} elseif ($google_score <= 0 && ($quality_score > 0 || $seo_score > 0)) {
 			$issues[] = 'Google preflight не подтверждён';
@@ -1347,13 +1482,38 @@ final class EPV2_Admin {
 			}
 			$not_before = (int) ($notes['_system']['publish_not_before'] ?? 0);
 			if ($not_before <= 0) {
-				continue;
+				// Item в ready_publish, но publish_not_before ещё не сохранён
+				// в admin_notes (set'ится lazy при первом publish_due() вызове
+				// внутри maintenance тика). Вычисляем slot по updated_at — это
+				// момент, когда item стал ready_publish. Без этого UI таймер
+				// падал на global next_publish_timestamp() от текущего момента
+				// и моментально истекал, а item оставался в очереди публикации.
+				$state = (string) ($item->state ?? '');
+				if (! in_array($state, ['ready_publish', 'retry_publish'], true)) {
+					continue;
+				}
+				$updated_ts = (int) strtotime((string) ($item->updated_at ?? '')) ?: time();
+				$not_before = (int) EPV2_Jobs::next_publish_slot_after($updated_ts);
+				if ($not_before <= 0) continue;
 			}
 			if ($candidate <= 0 || $not_before < $candidate) {
 				$candidate = $not_before;
 			}
 		}
-		return $candidate > 0 ? $candidate : null;
+		if ($candidate <= 0) {
+			return null;
+		}
+		// Align candidate UP to nearest publish_minute slot. Item's
+		// publish_not_before может быть на minute=29, но publish actually
+		// fires только на window's publish_minutes ([0,5,10,...]). Без
+		// alignment timer считал к 18:29:53 и заключал в 0:00, пока item
+		// фактически ждёт 18:30:00. Возвращаем aligned slot, чтобы timer
+		// в админке совпадал с реальным fire-моментом. Передаём $candidate,
+		// не $candidate-1: «следующий slot ≥ candidate». При $candidate-1
+		// если кандидат уже на алайнменте, slot прыгал на следующий
+		// (timer 30s длиннее реальности).
+		$aligned = (int) EPV2_Jobs::next_publish_slot_after($candidate);
+		return max($candidate, $aligned);
 	}
 
 	private static function queue_next_publish_timestamp(array $items): int {
@@ -1370,16 +1530,33 @@ final class EPV2_Admin {
 	}
 
 	private static function is_active_work_item(object $item, int $active_item_id): bool {
-		return EPV2_Queue::user_facing_state_for_row($item) === 'active';
+		// «В работе» = state='processing_de' (worker call в полёте) ИЛИ
+		// active automation pointer на этот row. Badge "В работе · X%"
+		// также рендерится через active_id (queue_light_state_label).
+		// Section и badge теперь consistent: single state видим оператору
+		// с момента claim до terminal state.
+		$state = (string) ($item->state ?? '');
+		if ($state === 'processing_de') {
+			return true;
+		}
+		$row_id = (int) ($item->id ?? 0);
+		return ($active_item_id > 0 && $row_id === $active_item_id);
 	}
 
 	private static function is_new_queue_item(object $item, int $active_item_id): bool {
-		// Manual-review rows currently fall through to user_facing='new'
-		// (workflow_is_terminal_state does not include 'manual_review').
-		// Without this exclusion they would appear in both the "Новые" and
-		// the new "Ручная проверка" buckets simultaneously.
-		if ((string) ($item->state ?? '') === 'manual_review') {
+		// «Новые» = items ожидающие очереди. Active orchestrator-claimed
+		// item ВСЕГДА идёт в «В работе» (is_active_work_item) — даже
+		// если state='new'. retry_process — ждёт следующего AI-цикла.
+		$state = (string) ($item->state ?? '');
+		if (in_array($state, ['processing_de', 'manual_review', 'ready_review'], true)) {
 			return false;
+		}
+		$row_id = (int) ($item->id ?? 0);
+		if ($active_item_id > 0 && $row_id === $active_item_id) {
+			return false; // owned by orchestrator → goes to «В работе»
+		}
+		if ($state === 'retry_process' || $state === 'new' || $state === 'reserve') {
+			return true;
 		}
 		return EPV2_Queue::user_facing_state_for_row($item) === 'new';
 	}
@@ -1411,6 +1588,15 @@ final class EPV2_Admin {
 	}
 
 	private static function is_ready_publish_item(object $item, int $active_item_id): bool {
+		// Mutual-exclusion с is_active_work_item: items в processing_de /
+		// retry_process в данный момент в AI cycle, а не «готовы к публикации»
+		// в admin sense (даже если payload уже publish-ready, gate их вернул
+		// в retry). Без этого 1830 (state=retry_process, ufs=ready_publish)
+		// показывался в ОБЕИХ секциях — flicker при render/AJAX.
+		$state = (string) ($item->state ?? '');
+		if (in_array($state, ['processing_de', 'retry_process'], true)) {
+			return false;
+		}
 		return in_array(EPV2_Queue::user_facing_state_for_row($item), ['ready_publish', 'publishing'], true);
 	}
 
@@ -2466,7 +2652,7 @@ final class EPV2_Admin {
 	 * https://t.me/userinfobot or the chat's URL.
 	 */
 	public static function telegram_page(): void {
-		self::require_view_capability();
+		self::require_manage_capability();
 		$opt = (array) get_option('epv2_settings', []);
 		$token = (string) ($opt['telegram_bot_token'] ?? '');
 		$chat_id = (string) ($opt['telegram_chat_id'] ?? '');
@@ -2548,7 +2734,7 @@ final class EPV2_Admin {
 	 * epv2_settings.time_schedule_profile.
 	 */
 	public static function schedule_page(): void {
-		self::require_view_capability();
+		self::require_manage_capability();
 		$profile = (array) (EPV2_Settings::get('time_schedule_profile', EPV2_Time_Planner::defaults()));
 		$windows = (array) ($profile['windows'] ?? []);
 		$timezone = (string) ($profile['timezone'] ?? 'Europe/Berlin');
@@ -3361,10 +3547,22 @@ final class EPV2_Admin {
 				'id' => ((int) $a->id) <=> ((int) $b->id),
 				'state' => strcmp((string) $a->state, (string) $b->state),
 				'category' => strcmp((string) ($a->category_final ?: $a->category_proposed), (string) ($b->category_final ?: $b->category_proposed)),
-				'published_at' => self::queue_published_timestamp($a) <=> self::queue_published_timestamp($b),
+				'published_at' => (function() use ($a, $b) {
+					// Items с NULL/missing published_at должны идти в КОНЕЦ
+					// при DESC сортировке, не в начало (strcmp пустой строки
+					// vs date может ставить broken-timestamp row на топ).
+					$ta = self::queue_published_timestamp($a);
+					$tb = self::queue_published_timestamp($b);
+					if ($ta === 0 && $tb === 0) return 0;
+					if ($ta === 0) return -1; // ASC-смысл: $a меньше; DESC reverse → внизу
+					if ($tb === 0) return 1;
+					return $ta <=> $tb;
+				})(),
 				'priority' => self::queue_priority_value($a) <=> self::queue_priority_value($b),
 				'quality' => self::queue_quality_value($a) <=> self::queue_quality_value($b),
 				'seo' => self::queue_seo_value($a) <=> self::queue_seo_value($b),
+				'updated_at' => strcmp((string) ($a->updated_at ?? ''), (string) ($b->updated_at ?? '')),
+				'created_at' => strcmp((string) $a->created_at, (string) $b->created_at),
 				default => strcmp((string) $a->created_at, (string) $b->created_at),
 			};
 			if ($compare === 0) {
@@ -4183,11 +4381,16 @@ jQuery(function($){
           queueRefreshing = false;
         });
     };
+    // First refresh delay 1200→4000ms: server render и первый AJAX могут
+    // catch разные snapshots если pipeline state изменился за 1.2s
+    // (item ушёл из new в processing). User видит «item мелькает в Новые
+    // и исчезает». 4с buffer — initial server render visible stable,
+    // потом AJAX берёт fresh state.
     window.setTimeout(function() {
       if (typeof refreshQueueBlocks === 'function') {
         refreshQueueBlocks(true);
       }
-    }, 1200);
+    }, 4000);
     window.setInterval(refreshQueueBlocks, __EPV2_QUEUE_SNAPSHOT_REFRESH_MS__);
     document.addEventListener('visibilitychange', function() {
       if (!document.hidden && typeof refreshQueueBlocks === 'function') {
@@ -4290,8 +4493,12 @@ JS;
 		}
 
 		try {
-			// Build existing payload for partial regen context
-			$existing_raw = EPV2_Review::get_payload( $item_id );
+			// Build existing payload for partial regen context.
+			// Decode the payload that's already attached to the queue row; we
+			// don't want ensure_payload() here because that may trigger a full
+			// rebuild via worker, which is exactly what the partial-regen
+			// caller is trying to scope down.
+			$existing_raw = EPV2_Review::decode_payload( (string) ( $item->ai_payload ?? '' ) );
 			$existing     = [];
 			if ( is_array( $existing_raw ) ) {
 				$de = $existing_raw['languages']['de'] ?? [];

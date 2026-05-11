@@ -203,7 +203,74 @@ final class EPV2_Jobs {
 	}
 
 	public static function next_collect_timestamp(): ?int {
-		return self::next_scheduled_timestamp(self::HOOK_COLLECT);
+		// Возвращаем next allowed slot ИЗ time-planner (collect_minutes
+		// окна), а не WP-cron interval. WP-cron срабатывает каждые 15 мин,
+		// но time-planner может разрешить только :00 (один сбор в час).
+		// Без этой синхронизации админский таймер показывал WP-cron next,
+		// который не совпадал с реальным временем работы collect'а.
+		$tp_next = self::next_collect_slot_from_time_planner();
+		$base = $tp_next !== null ? $tp_next : self::next_scheduled_timestamp(self::HOOK_COLLECT);
+		// Backpressure defer: если pipeline перегружен и backpressure
+		// отложил collect на N min — admin UI должен показать тот
+		// timestamp, не time-planner'овский. Иначе counter показывал
+		// «через 5 мин» а реально collect'а не было ещё 10 мин.
+		$deferred_until = (int) get_option('epv2_collect_deferred_until', 0);
+		if ($deferred_until > time() && ($base === null || $deferred_until > $base)) {
+			return $deferred_until;
+		}
+		return $base;
+	}
+
+	private static function next_collect_slot_from_time_planner(): ?int {
+		if (! class_exists('EPV2_Time_Planner')) {
+			return null;
+		}
+		try {
+			$tz = new DateTimeZone((string) (EPV2_Settings::get('time_schedule_profile', EPV2_Time_Planner::defaults())['timezone'] ?? 'Europe/Berlin'));
+		} catch (Throwable $e) {
+			return null;
+		}
+		$profile = EPV2_Settings::get('time_schedule_profile', EPV2_Time_Planner::defaults());
+		$windows = is_array($profile['windows'] ?? null) ? $profile['windows'] : [];
+		if ($windows === []) {
+			return null;
+		}
+		// Ищем next valid slot в течение 24 часов вперёд.
+		// Стартуем со СЛЕДУЮЩЕЙ полной минуты, иначе offset=0 при сейчас 21:00:30
+		// возвращал бы timestamp 21:00:00 — он уже в прошлом, и UI таймер
+		// получал отрицательный countdown / fallback на WP-cron.
+		$now = (new DateTimeImmutable('now', $tz))->setTime(
+			(int) (new DateTimeImmutable('now', $tz))->format('H'),
+			(int) (new DateTimeImmutable('now', $tz))->format('i'),
+			0
+		)->modify('+1 minute');
+		for ($offset_min = 0; $offset_min <= 24 * 60; $offset_min++) {
+			$candidate = $now->modify('+' . $offset_min . ' minute');
+			$candidate_hm = (int) $candidate->format('H') * 60 + (int) $candidate->format('i');
+			$candidate_minute = (int) $candidate->format('i');
+			foreach ($windows as $w) {
+				$start_parts = explode(':', (string) ($w['start'] ?? '00:00'));
+				$end_parts = explode(':', (string) ($w['end'] ?? '00:00'));
+				$start_hm = ((int) $start_parts[0]) * 60 + ((int) ($start_parts[1] ?? 0));
+				$end_hm = ((int) $end_parts[0]) * 60 + ((int) ($end_parts[1] ?? 0));
+				if ($end_hm === 0 && $start_hm > 0) {
+					$end_hm = 24 * 60; // 22:00-00:00 case
+				}
+				$in_window = $start_hm <= $candidate_hm && $candidate_hm < $end_hm;
+				if (! $in_window) continue;
+				// Если режим где collect off (night, wind_down_quiet) — skip
+				if (in_array((string) ($w['mode'] ?? ''), ['night_monitor', 'wind_down_quiet'], true)) {
+					break;
+				}
+				$collect_minutes = (array) ($w['collect_minutes'] ?? []);
+				if ($collect_minutes === []) break;
+				if (in_array($candidate_minute, array_map('intval', $collect_minutes), true)) {
+					return $candidate->setTime((int) $candidate->format('H'), $candidate_minute, 0)->getTimestamp();
+				}
+				break;
+			}
+		}
+		return null;
 	}
 
 	public static function next_process_timestamp(): ?int {

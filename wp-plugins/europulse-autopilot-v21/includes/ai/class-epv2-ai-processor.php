@@ -3014,6 +3014,21 @@ final class EPV2_AI_Processor {
 		if (! self::publish_ready_gate_media_contract_passes($payload)) {
 			return false;
 		}
+		// Hallucination re-check at publish moment (live-trace 2026-05-11):
+		// Stored ai_payload._meta.quality.score may be from BEFORE validator
+		// deploy. detect_invented_numbers added later doesn't retro-apply
+		// to stored scores. Item 2257 case: DE excerpt «DAX bei 24.350
+		// Punkten» — invented number, stored quality=100, would publish.
+		// Fresh check at gate ensures latest rules always apply.
+		if (class_exists('EPV2_AI_Response_Validator') && method_exists('EPV2_AI_Response_Validator', 'detect_invented_numbers')) {
+			$invented_nums = EPV2_AI_Response_Validator::detect_invented_numbers($payload);
+			// 1+ invented specific number (price/index/percent) at publish
+			// gate = block. -8 penalty в editorial_quality was insufficient
+			// для items с stored stale score. Strict block here.
+			if (count($invented_nums) >= 1) {
+				return false;
+			}
+		}
 		if (! self::publish_ready_gate_payload_integrity_passes($payload, $meta)) {
 			return false;
 		}

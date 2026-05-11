@@ -421,7 +421,7 @@ final class EPV2_AI_Response_Validator {
 	 * AI is most likely to invent. Years (2020-2030) и mass nouns are
 	 * filtered out as natural context.
 	 */
-	private static function detect_invented_numbers(array $payload): array {
+	public static function detect_invented_numbers(array $payload): array {
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 		$dossier = is_array($meta['source_dossier'] ?? null) ? $meta['source_dossier'] : [];
 		$haystack = '';

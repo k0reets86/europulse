@@ -325,6 +325,17 @@ final class EPV2_REST {
 		$cleanup['abandoned_started_runs'] = EPV2_Runs::cleanup_abandoned_started(120);
 		$cleanup['promoted_live_published_rows'] = EPV2_Queue::promote_live_published_rows(20);
 		$cleanup['reactivated_media_rows'] = EPV2_Queue::reactivate_media_recoverable_rows(5);
+		// P1.7 (audit-found order conflict): prune_new_stale + trim_new_queue
+		// run EARLY, перед reactivate/auto_route handlers. Если item over cap
+		// или TTL exceeded, removing it FIRST prevents downstream handlers
+		// from work on doomed items (auto_promote_complete on item that will
+		// be trim'нут, reactivate on item that will be pruned, etc.).
+		$ttl_hours = max(1, (int) EPV2_Settings::get('queue_new_ttl_hours', 12));
+		$cleanup['pruned_new_stale'] = EPV2_Queue::prune_new_stale($ttl_hours);
+		$cleanup['trimmed_new_queue'] = EPV2_Queue::trim_new_queue(
+			max(1, (int) EPV2_Settings::get('queue_new_max_per_category', 8)),
+			max(1, (int) EPV2_Settings::get('queue_new_max_per_source', 6))
+		);
 		$cleanup['reactivated_planner_soft_rejected_rows'] = EPV2_Queue::reactivate_planner_selected_soft_rejected_items(50);
 		$cleanup['rejected_non_publish_grade_new_rows'] = EPV2_Queue::sanitize_non_publish_grade_new_items(150);
 		$cleanup['rejected_low_grade_ready_publish_rows'] = EPV2_Queue::sanitize_low_grade_ready_publish_items(50);
@@ -357,21 +368,9 @@ final class EPV2_REST {
 		// каждым maintenance тиком — admin (heavy path лимитирован 80 items по
 		// created_at) больше не вытесняет manual_review/ready_publish из видимости.
 		$cleanup['trimmed_terminal_rows'] = EPV2_Queue::trim_old_terminal_items(80);
-		// Stale 'new' items prune (operator-feedback 2026-05-11): run в
-		// maintenance loop тоже, не только в collect cycle. Когда hard cap
-		// блокирует collect, stale items не pruned → backlog растёт. Now
-		// pruned regardless of collect status.
-		$ttl_hours = max(1, (int) EPV2_Settings::get('queue_new_ttl_hours', 12));
-		$cleanup['pruned_new_stale'] = EPV2_Queue::prune_new_stale($ttl_hours);
-		// trim_new_queue (operator-feedback 2026-05-11): run в maintenance loop
-		// тоже, чтобы queue cap (queue_new_max_per_category / per_source)
-		// держал steady-state. Раньше trim вызывался только из collect cycle
-		// → при hard-cap-blocked collect, items накапливались выше cap'ов
-		// без trim. Now trim в каждом maintenance tick.
-		$cleanup['trimmed_new_queue'] = EPV2_Queue::trim_new_queue(
-			max(1, (int) EPV2_Settings::get('queue_new_max_per_category', 8)),
-			max(1, (int) EPV2_Settings::get('queue_new_max_per_source', 6))
-		);
+		// prune_new_stale + trim_new_queue moved earlier in pipeline (P1.7
+		// reorder 2026-05-11) — runs перед reactivate/auto_route handlers
+		// to prevent work on doomed items.
 		// Phase 3 watchdogs (architecture audit section 3): three background
 		// safety nets — stuck-item release, Polylang link repair, dedup of
 		// published posts. All idempotent, all return small status arrays.

@@ -1092,7 +1092,10 @@ final class EPV2_Queue {
 			// «publishable» от «технически собранный мусор».
 			$story_card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
 			$ed_match = strtolower((string) ($story_card['editorial_match'] ?? ''));
-			if ($ed_match === '' || $ed_match === 'reject_low_value') {
+			// Strict allowlist (review feedback 2026-05-11): только match
+			// / borderline проходят. Empty, reject_low_value, или typos /
+			// unknown values блокируют auto-promote — operator решает.
+			if (! in_array($ed_match, ['match', 'borderline'], true)) {
 				continue;
 			}
 

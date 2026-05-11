@@ -15,13 +15,20 @@ final class EPV2_Collector {
 		if (EPV2_Runs::has_recent_started('collect', 300)) {
 			return;
 		}
+		// Backpressure-deferred until timestamp (set by previous over-
+		// capacity tick). Если сейчас < deferred_until — выходим, не
+		// триггерим should_defer повторно (иначе counter растёт каждый
+		// WP-cron tick за 15 мин а physical defer должен быть строго 10).
+		if (! $force) {
+			$deferred_until = (int) get_option('epv2_collect_deferred_until', 0);
+			if ($deferred_until > time()) {
+				return;
+			}
+		}
 		// Backpressure: if the queue already holds more pending items than
 		// the worker can plausibly drain in the next hour, defer this
-		// collect by 10 minutes so we don't pile fresh raw RSS on top of
-		// a backlog the worker still hasn't chewed through. Hard ceiling
-		// of 30 minutes total cumulative defer keeps us from skipping
-		// collects forever if the queue is stuck for a non-throughput
-		// reason (a stale lock, a bad story_card key, etc).
+		// collect by 10 minutes. Hard ceiling of 30 минут total cumulative
+		// defer prevents skipping collects forever если queue stuck.
 		if (! $force && self::should_defer_for_backpressure()) {
 			return;
 		}
@@ -39,6 +46,12 @@ final class EPV2_Collector {
 		EPV2_Queue::prune_new_stale((int) EPV2_Settings::get('queue_new_ttl_hours', 18));
 		EPV2_Trends::refresh($force);
 		$sources = EPV2_Sources::all(true);
+		// Source-diversity: внутри одной priority группы порядок shuffle'ится
+		// каждый collect cycle. Без этого источники с поздним alphabet ordering
+		// (ZEIT, ZDF, Tagesspiegel) ВСЕГДА проигрывали dup-precheck гонку
+		// раньше-staged'нутым (Süddeutsche, Spiegel, FAZ). Random в priority-
+		// bucket даёт всем top-tier источникам равный шанс зайти первыми.
+		$sources = self::shuffle_sources_within_priority((array) $sources);
 		$run = EPV2_Runs::start('collect', ['total_sources' => count($sources)]);
 		$count = 0;
 		$errors = 0;
@@ -233,20 +246,30 @@ final class EPV2_Collector {
 		$threshold = (int) ceil($capacity * 1.5);
 		if ($pending <= $threshold) {
 			delete_option('epv2_collect_backpressure_total_seconds');
+			delete_option('epv2_collect_deferred_until');
 			return false;
 		}
 		$deferred_total = (int) get_option('epv2_collect_backpressure_total_seconds', 0);
 		if ($deferred_total >= 30 * MINUTE_IN_SECONDS) {
-			// We've already deferred 30 minutes cumulatively. Force this
-			// collect to run, reset the counter so the next over-capacity
-			// situation gets its own deferral budget.
+			// 30 минут уже отложено суммарно. Force run, reset counters.
 			delete_option('epv2_collect_backpressure_total_seconds');
+			delete_option('epv2_collect_deferred_until');
 			return false;
 		}
-		// Defer 10 minutes — push next attempt forward.
+		// Physical defer: next attempt НЕ ранее чем now+10 мин. Это
+		// гарантирует что pipeline получит реальное окно на обработку
+		// backlog, а не просто skip'ает текущий tick (WP-cron всё равно
+		// fires every 15 мин — без deferred_until мы бы skipped только
+		// этот один tick, не давая backlog'у драенуться).
+		$defer_seconds = 10 * MINUTE_IN_SECONDS;
+		update_option(
+			'epv2_collect_deferred_until',
+			time() + $defer_seconds,
+			false
+		);
 		update_option(
 			'epv2_collect_backpressure_total_seconds',
-			$deferred_total + (10 * MINUTE_IN_SECONDS),
+			$deferred_total + $defer_seconds,
 			false
 		);
 		update_option(
@@ -255,7 +278,8 @@ final class EPV2_Collector {
 				'pending' => $pending,
 				'capacity' => $capacity,
 				'threshold' => $threshold,
-				'deferred_total_seconds' => $deferred_total + (10 * MINUTE_IN_SECONDS),
+				'deferred_total_seconds' => $deferred_total + $defer_seconds,
+				'deferred_until' => gmdate('Y-m-d H:i:s', time() + $defer_seconds),
 				'at' => current_time('mysql'),
 			],
 			false
@@ -275,6 +299,18 @@ final class EPV2_Collector {
 		if (! empty($duplicate['duplicate'])) {
 			EPV2_Stats::bump('duplicates');
 			self::audit_candidate($item, $source, [], 'stage', 'duplicate_precheck', ['duplicate' => $duplicate]);
+			// Sibling-enrichment: вместо простого drop'а регистрируем
+			// дропнутый кандидат как «sibling source» на existing item /
+			// post. Его URL / source / publication можно потом использовать
+			// в dossier'е как подтверждение от другого редактора. Для
+			// ZEIT/ZDF/ARD которые проигрывают первенство Süddeutsche/FAZ
+			// это сохраняет их вклад в attribution.
+			self::register_sibling_source(
+				(int) ($duplicate['duplicate_of'] ?? 0),
+				(string) ($duplicate['reason'] ?? ''),
+				$item,
+				$source
+			);
 			return;
 		}
 
@@ -356,21 +392,35 @@ final class EPV2_Collector {
 	private static function commit_staged_candidates(array $staged_candidates, array &$by_category): int {
 		$count = 0;
 		$collect_limit = self::effective_collect_per_category_limit();
+		// Per-hour rolling cap (replaces per-collect cap). Independence from
+		// collect frequency — operator может менять collect_interval_minutes
+		// без перекоса в распределении источников по рубрикам. Считаем
+		// сколько уже взяли с этого source_id в эту рубрику за последний
+		// час (created_at > now-1h, любые состояния включая rejected).
+		// Top-tier (priority >= 9): 3/час в одну рубрику.
+		// Остальные:               2/час в одну рубрику.
+		// breaking/top-story:       без капа.
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$existing_per_source_rubric = [];
+		$rows = $wpdb->get_results(
+			"SELECT source_id, category_proposed, COUNT(*) c
+			 FROM {$table}
+			 WHERE source_id > 0
+			   AND created_at >= DATE_SUB(NOW(), INTERVAL 60 MINUTE)
+			   AND state NOT IN ('duplicate','rejected','error')
+			 GROUP BY source_id, category_proposed"
+		);
+		foreach ((array) $rows as $r) {
+			$key = (int) $r->source_id . '|' . (string) $r->category_proposed;
+			$existing_per_source_rubric[$key] = (int) $r->c;
+		}
+
 		foreach ($staged_candidates as $category => $candidates) {
 			if ((string) $category === '' || $candidates === []) {
 				continue;
 			}
 			usort($candidates, static fn(array $a, array $b): int => (int) $b['score'] <=> (int) $a['score']);
-			// Per-source-per-rubric cap with priority gradation. One source
-			// can dominate a rubric otherwise (Reuters-like firehose pushes
-			// 5 politics in a single ingest, Welt-like specialists fill
-			// politics with 5 own pieces). Cap by source.priority:
-			//   top-tier  (priority >= 9): 3 per rubric
-			//   high      (priority >= 7): 2 per rubric
-			//   regular   (priority <  7): 2 per rubric
-			// breaking_candidate / top_story_candidate / decision=priority
-			// items bypass the cap — we never throttle the genuinely-top news.
-			$per_source_count = [];
 			foreach ($candidates as $candidate) {
 				$by_category[$category] = $by_category[$category] ?? 0;
 				if ((int) $by_category[$category] >= $collect_limit) {
@@ -384,17 +434,32 @@ final class EPV2_Collector {
 					|| (string) ($analysis['decision'] ?? '') === 'priority';
 				if (! $is_top_news && $source_id > 0) {
 					$priority = (int) ($source_obj->priority ?? 5);
-					$per_rubric_cap = $priority >= 9 ? 3 : 2;
-					$key = $source_id;
-					$per_source_count[$key] = $per_source_count[$key] ?? 0;
-					if ($per_source_count[$key] >= $per_rubric_cap) {
+					$per_hour_cap = $priority >= 9 ? 3 : 2;
+					$key = $source_id . '|' . (string) $category;
+					$already = (int) ($existing_per_source_rubric[$key] ?? 0);
+					if ($already >= $per_hour_cap) {
+						// Cap-hit logging (2026-05-10): silently filtered раньше,
+						// сейчас audit'им чтобы оператор видел почему items не
+						// queued от данного источника в этой рубрике.
+						self::audit_candidate(
+							(array) $candidate['item'], $source_obj, $analysis,
+							'ingest', 'per_source_per_rubric_cap',
+							[
+								'source_id' => $source_id,
+								'priority' => $priority,
+								'category' => (string) $category,
+								'already_in_hour' => $already,
+								'cap' => $per_hour_cap,
+							]
+						);
 						continue;
 					}
 				}
 				if (self::ingest_candidate((array) $candidate['item'], $source_obj, $by_category)) {
 					$count++;
 					if (! $is_top_news && $source_id > 0) {
-						$per_source_count[$source_id] = ($per_source_count[$source_id] ?? 0) + 1;
+						$key = $source_id . '|' . (string) $category;
+						$existing_per_source_rubric[$key] = ($existing_per_source_rubric[$key] ?? 0) + 1;
 					}
 					continue;
 				}
@@ -430,6 +495,36 @@ final class EPV2_Collector {
 		$analysis = EPV2_Budget_Manager::analyze_item($item, $source);
 		$category = sanitize_text_field((string) ($analysis['category'] ?? $source_category));
 		$item['category'] = $category !== '' ? $category : $source_category;
+		// Story Card primacy — AI voice BEFORE pre-AI rejection. When the
+		// score-only heuristic says decision ∈ {low, reject}, ask the AI
+		// directly (Story Card editorial_match) before dropping the item.
+		// If editorial_match='match' AND publishable_estimate='high', the
+		// score is wrong (heuristic missed the topic value); we upgrade
+		// decision to 'review' so the item gets a fair AI rebuild.
+		// Cost: ~$0.001 per item that would otherwise be rejected.
+		$story_card = [];
+		$pre_reject_decision = (string) ($analysis['decision'] ?? '');
+		if (
+			class_exists('EPV2_Story_Card_Builder')
+			&& self::automation_requires_publish_grade()
+			&& in_array($pre_reject_decision, ['low', 'reject'], true)
+		) {
+			$story_card = EPV2_Story_Card_Builder::build_from_array($item);
+			if (! empty($story_card['success'])) {
+				$ed_match = strtolower(trim((string) ($story_card['editorial_match'] ?? '')));
+				$est = strtolower(trim((string) ($story_card['publishable_estimate'] ?? '')));
+				if ($ed_match === 'match' && $est === 'high') {
+					$analysis['decision'] = 'review';
+					$analysis['reasons'][] = 'story_card_upvote: editorial=match, estimate=high (was: ' . $pre_reject_decision . ')';
+					self::audit_candidate($item, $source, $analysis, 'ingest', 'story_card_upvote', [
+						'editorial_match' => $ed_match,
+						'estimate' => $est,
+						'reason' => (string) ($story_card['editorial_reason'] ?? ''),
+						'previous_decision' => $pre_reject_decision,
+					]);
+				}
+			}
+		}
 		if (($analysis['decision'] ?? '') === 'reject') {
 			self::audit_candidate($item, $source, $analysis, 'ingest', 'selection_reject');
 			return false;
@@ -523,12 +618,61 @@ final class EPV2_Collector {
 			return false;
 		}
 		$event_key = sanitize_title((string) ($story_duplicate['event_key'] ?? EPV2_Deduplicator::event_key_for_candidate($item, $cluster)));
+
+		// Smart event-signature dedup на ingest: вместо crude hash или
+		// heuristic event_key — используем Story Card AI (entities + event
+		// keyword + date_day) для семантического distinguish'а двух статей
+		// про того же entity (Putin parade vs Putin meeting Zelensky).
+		// Story Card строится один раз здесь и сохраняется в payload — AI
+		// processor потом не пересчитывает (см. class-epv2-ai-processor.php
+		// line 112-114). Cost: ~1.5K tokens per ingested item ≈ $0.001.
+		$ai_payload_seed = ['_meta' => []];
+		if (class_exists('EPV2_Story_Card_Builder')) {
+			// Reuse the card we may have built earlier for the up-vote check;
+			// otherwise build fresh now (cost: ~$0.001 per item).
+			if (empty($story_card['success'])) {
+				$story_card = EPV2_Story_Card_Builder::build_from_array($item);
+			}
+			if (! empty($story_card['success'])) {
+				$ai_payload_seed = EPV2_Story_Card_Builder::attach_to_payload($ai_payload_seed, $story_card);
+				// Editorial signal от Story Card: «reject_low_value» = AI говорит
+				// что материал не публикуем. Раньше это поле игнорировалось,
+				// решения принимал только Budget Manager по score.
+				$editorial_match = (string) ($story_card['editorial_match'] ?? '');
+				if ($editorial_match === 'reject_low_value') {
+					self::audit_candidate($item, $source, $analysis, 'ingest', 'story_card_editorial_reject', [
+						'reason' => (string) ($story_card['editorial_reason'] ?? ''),
+						'estimate' => (string) ($story_card['publishable_estimate'] ?? ''),
+					]);
+					return false;
+				}
+				// Семантический event-signature dedup. current_id=0 (item ещё
+				// не save'нут), функция skip'ает self-check.
+				$event_dup = EPV2_Deduplicator::is_event_duplicate(0, $story_card, $ai_payload_seed);
+				if (! empty($event_dup['duplicate'])) {
+					self::audit_candidate($item, $source, $analysis, 'ingest', 'event_signature_duplicate', [
+						'duplicate_of' => (int) ($event_dup['duplicate_of'] ?? 0),
+						'reason' => (string) ($event_dup['reason'] ?? ''),
+						'age_seconds' => (int) ($event_dup['age_seconds'] ?? 0),
+						'signature' => (string) ($event_dup['signature'] ?? ''),
+					]);
+					return false;
+				}
+			}
+		}
+
 		$item['cluster_id'] = (int) ($cluster['id'] ?? 0);
 		$item['topic_label'] = (string) ($cluster['topic_label'] ?? '');
 		$item['story_score'] = (int) ($analysis['score'] ?? 0);
 		$item['story_format'] = '';
 		$item['state'] = 'new';
 		$item['admin_notes'] = wp_json_encode(['selection' => $analysis, 'ai_gate' => $ai_gate, 'cluster' => $cluster, 'planner' => $planner, 'event_key' => $event_key], JSON_UNESCAPED_UNICODE);
+		// Сохраняем Story Card в ai_payload — AI processor его reuse'нёт
+		// без повторного AI call (saves ~1.5K tokens на pickup).
+		// add_item() читает $item['payload'] (array) — не 'ai_payload' (string).
+		if (! empty($story_card['success'])) {
+			$item['payload'] = $ai_payload_seed;
+		}
 		$item_id = EPV2_Queue::add_item($item);
 		self::audit_candidate($item, $source, $analysis, 'ingest', $item_id > 0 ? 'queued' : 'queue_insert_failed', [
 			'ai_gate' => $ai_gate,
@@ -547,6 +691,151 @@ final class EPV2_Collector {
 		}
 		return $item_id > 0;
 	}
+
+	/**
+	 * Запись sibling-source на existing target после dup-precheck отказа.
+	 *
+	 * При dup-precheck'е target_id может ссылаться либо на active queue row
+	 * (state IN new/processing/...), либо на ID published WP post (через
+	 * reason=published_url/published_semantic/published_source_url).
+	 * В обоих случаях добавляем sibling в meta-поле для последующего
+	 * использования в dossier'е enrichment'а: title, url, source name,
+	 * source priority, reason, fetched_at.
+	 *
+	 * Сохраняем максимум 8 siblings (FIFO) — больше не имеет смысла,
+	 * dossier ограничен по токенам.
+	 */
+	private static function register_sibling_source(int $target_id, string $dup_reason, array $item, object $source): void {
+		if ($target_id <= 0) {
+			return;
+		}
+		$candidate = [
+			'title' => mb_substr((string) ($item['title'] ?? ''), 0, 250),
+			'url' => (string) ($item['url'] ?? ''),
+			'source_name' => (string) ($source->name ?? ''),
+			'source_id' => (int) ($source->id ?? 0),
+			'priority' => (int) ($source->priority ?? 5),
+			'language' => (string) ($source->language ?? ''),
+			'reason' => $dup_reason,
+			'recorded_at' => gmdate('Y-m-d H:i:s'),
+		];
+		if ($candidate['url'] === '') {
+			return;
+		}
+		// active-queue target: пишем в ai_payload._meta.dropped_siblings[]
+		// (для аудита) И в _meta.source_dossier.related[] (worker уже
+		// читает related для построения rewriter dossier'а — sibling
+		// автоматически попадает в синтез без изменений в Python).
+		global $wpdb;
+		$row = $wpdb->get_row($wpdb->prepare(
+			"SELECT id, ai_payload FROM {$wpdb->prefix}epv2_queue WHERE id=%d",
+			$target_id
+		));
+		if ($row) {
+			$payload = json_decode((string) $row->ai_payload, true);
+			$payload = is_array($payload) ? $payload : [];
+			if (! is_array($payload['_meta'] ?? null)) {
+				$payload['_meta'] = [];
+			}
+			$changed = false;
+
+			// 1) dropped_siblings — audit-trail
+			$siblings = is_array($payload['_meta']['dropped_siblings'] ?? null) ? $payload['_meta']['dropped_siblings'] : [];
+			$seen = [];
+			foreach ($siblings as $existing) {
+				$seen[(string) ($existing['url'] ?? '')] = true;
+			}
+			if (! isset($seen[$candidate['url']])) {
+				$siblings[] = $candidate;
+				$siblings = array_slice($siblings, -8);
+				$payload['_meta']['dropped_siblings'] = $siblings;
+				$changed = true;
+			}
+
+			// 2) source_dossier.related[] — что worker реально потребляет
+			if (! is_array($payload['_meta']['source_dossier'] ?? null)) {
+				$payload['_meta']['source_dossier'] = [];
+			}
+			$related = is_array($payload['_meta']['source_dossier']['related'] ?? null)
+				? $payload['_meta']['source_dossier']['related'] : [];
+			$rseen = [];
+			foreach ($related as $existing) {
+				$rseen[(string) ($existing['url'] ?? '')] = true;
+			}
+			if (! isset($rseen[$candidate['url']])) {
+				$domain = '';
+				if ($candidate['url'] !== '') {
+					$h = wp_parse_url($candidate['url'], PHP_URL_HOST);
+					$domain = is_string($h) ? preg_replace('/^www\./', '', $h) : '';
+				}
+				$related[] = [
+					'title' => $candidate['title'],
+					'url' => $candidate['url'],
+					'domain' => $domain,
+					'source_name' => $candidate['source_name'],
+					'priority' => $candidate['priority'],
+				];
+				$related = array_slice($related, -8);
+				$payload['_meta']['source_dossier']['related'] = $related;
+				$changed = true;
+			}
+
+			if ($changed) {
+				$wpdb->update(
+					$wpdb->prefix . 'epv2_queue',
+					['ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE)],
+					['id' => $target_id]
+				);
+			}
+			return;
+		}
+		// published-post target: _epv2_dropped_siblings post_meta
+		$post = get_post($target_id);
+		if ($post) {
+			$siblings = get_post_meta($target_id, '_epv2_dropped_siblings', true);
+			$siblings = is_array($siblings) ? $siblings : [];
+			$seen = [];
+			foreach ($siblings as $existing) {
+				$seen[(string) ($existing['url'] ?? '')] = true;
+			}
+			if (! isset($seen[$candidate['url']])) {
+				$siblings[] = $candidate;
+				$siblings = array_slice($siblings, -8);
+				update_post_meta($target_id, '_epv2_dropped_siblings', $siblings);
+			}
+		}
+	}
+
+
+	/**
+	 * Shuffle sources внутри одинаковой priority. Public API остаётся
+	 * priority DESC (top-tier раньше regular), но в одном бакете порядок
+	 * рандомизируется каждый collect — это даёт честное распределение
+	 * первенства в dedup-precheck гонке между равноценными источниками.
+	 */
+	private static function shuffle_sources_within_priority(array $sources): array {
+		if (count($sources) < 2) {
+			return $sources;
+		}
+		$buckets = [];
+		foreach ($sources as $s) {
+			$prio = (int) ($s->priority ?? 5);
+			$buckets[$prio] = $buckets[$prio] ?? [];
+			$buckets[$prio][] = $s;
+		}
+		krsort($buckets); // priority DESC
+		$out = [];
+		foreach ($buckets as $bucket) {
+			if (count($bucket) > 1) {
+				shuffle($bucket);
+			}
+			foreach ($bucket as $s) {
+				$out[] = $s;
+			}
+		}
+		return $out;
+	}
+
 
 	private static function audit_candidate(array $item, object $source, array $analysis, string $phase, string $outcome, array $context = [], int $queue_id = 0): void {
 		if (! class_exists('EPV2_Selection_Audit')) {
@@ -757,12 +1046,20 @@ final class EPV2_Collector {
 			$cap = 2;
 		}
 
-		// Freshness window — operator request: cap at 80 min globally so
-		// even sources with a 60-min fetch_interval don't pull stories
-		// older than 80 minutes. Per-source intervals shorter than 40 min
-		// keep their own 2× cutoff (e.g., 30-min interval → 60-min window).
-		$fetch_interval_seconds = max(900, (int) ($source->fetch_interval ?? 1800));
-		$cutoff_ts = time() - min(80 * MINUTE_IN_SECONDS, $fetch_interval_seconds * 2);
+		// Freshness window (operator spec 2026-05-11):
+		//   • base = 80 минут (НЕ выше для general slots)
+		//   • morning_catchup (06:00-09:00 Berlin) = 120 минут — ловим
+		//     overnight news которые могли просочиться позже на feed'ы
+		// Раньше было `min(80min, interval*2)` — для tagesschau (30-min
+		// interval) давало 60 мин окно → утренние items 78 мин старше
+		// → silent drop без audit'a. Pipeline терял весь утренний поток.
+		$is_morning_catchup = false;
+		if (class_exists('EPV2_Time_Planner')) {
+			$window = EPV2_Time_Planner::current_window();
+			$is_morning_catchup = (string) ($window['mode'] ?? '') === 'morning_catchup';
+		}
+		$cutoff_minutes = $is_morning_catchup ? 120 : 80;
+		$cutoff_ts = time() - ($cutoff_minutes * MINUTE_IN_SECONDS);
 
 		$indexed = [];
 		foreach ($items as $idx => $item) {

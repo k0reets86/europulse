@@ -16,9 +16,18 @@ final class EPV2_Feed_Reader {
 				$feed->set_timeout(8);
 			}
 		};
+		// WP/SimplePie default cache = 12h через transients (хранятся в
+		// Redis когда redis-cache active). Это блокирует свежие items:
+		// pipeline видит stale RSS из кеша часами. Cut до 5 мин — больше
+		// чем collect interval (15 мин), но мало для freshness.
+		$cache_lifetime_filter = static function (): int {
+			return 5 * MINUTE_IN_SECONDS;
+		};
+		add_filter('wp_feed_cache_transient_lifetime', $cache_lifetime_filter);
 		add_action('wp_feed_options', $timeout_filter, 10, 1);
 		$feed = fetch_feed($url);
 		remove_action('wp_feed_options', $timeout_filter, 10);
+		remove_filter('wp_feed_cache_transient_lifetime', $cache_lifetime_filter);
 		if (is_wp_error($feed)) {
 			throw new RuntimeException($feed->get_error_message());
 		}

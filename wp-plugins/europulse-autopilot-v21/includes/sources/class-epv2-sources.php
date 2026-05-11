@@ -80,14 +80,32 @@ final class EPV2_Sources {
 
 	public static function update_fetch(int $id, int $count = 0, ?string $error = null): void {
 		global $wpdb;
-		$wpdb->update(
-			$wpdb->prefix . 'epv2_sources',
-			[
-				'last_fetched' => current_time('mysql'),
-				'last_error' => $error,
-			],
-			['id' => $id]
-		);
+		$table = $wpdb->prefix . 'epv2_sources';
+		// fetch_failures: инкрементим при error, сбрасываем при success.
+		// Позволяет admin'у видеть какие источники постоянно ломаются
+		// (ранее эта инфа жила только в логах).
+		if ($error) {
+			$wpdb->query($wpdb->prepare(
+				"UPDATE {$table}
+				 SET last_fetched = %s,
+				     last_error = %s,
+				     fetch_failures = fetch_failures + 1
+				 WHERE id = %d",
+				current_time('mysql'),
+				$error,
+				$id
+			));
+		} else {
+			$wpdb->update(
+				$table,
+				[
+					'last_fetched' => current_time('mysql'),
+					'last_error' => '',
+					'fetch_failures' => 0,
+				],
+				['id' => $id]
+			);
+		}
 	}
 
 	public static function coverage(): array {

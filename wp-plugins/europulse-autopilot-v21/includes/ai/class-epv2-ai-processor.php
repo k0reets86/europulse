@@ -2722,6 +2722,9 @@ final class EPV2_AI_Processor {
 						$parsed['_meta'] = is_array($parsed['_meta'] ?? null) ? $parsed['_meta'] : [];
 						$parsed['_meta']['fallback_provider_used'] = (string) ($fallback_config['provider'] ?? '');
 						$parsed['_meta']['context_analysis'] = $context_analysis;
+						if (empty($parsed['_meta']['story_card']) && ! empty($fallback['_meta']['story_card'])) {
+							$parsed['_meta']['story_card'] = $fallback['_meta']['story_card'];
+						}
 						if (! empty($context_analysis['category'])) {
 							$parsed['categories'] = EPV2_Review::normalize_categories((string) $context_analysis['category'] . ',' . implode(',', (array) ($parsed['categories'] ?? [])));
 						}

@@ -262,10 +262,12 @@ final class EPV2_Collector {
 		$publish_interval = max(3, (int) EPV2_Settings::get('publish_interval_minutes', 5));
 		$capacity_floor = max(6, (int) floor(60 / $publish_interval));
 		$capacity = max($capacity_floor, $published_last_hour);
-		// Pending pool > capacity × 1.5 means even if we publish at
-		// max rate every slot for the next 60 min we still won't
-		// drain. Defer.
-		$threshold = (int) ceil($capacity * 1.5);
+		// Threshold = 1.0× capacity (operator spec 2026-05-11): pipeline
+		// может publish'ить максимум capacity items/h (12 для 5-мин slots).
+		// Если pending уже = capacity — это уже 1+ час работы. Дальше
+		// собирать = только наращивать backlog. Old 1.5× было too lax —
+		// разрешало pending до 18 при capacity 12, что 1.5h работы.
+		$threshold = $capacity;
 		if ($pending <= $threshold) {
 			delete_option('epv2_collect_backpressure_total_seconds');
 			delete_option('epv2_collect_deferred_until');
@@ -1078,19 +1080,24 @@ final class EPV2_Collector {
 			$cap = 2;
 		}
 
-		// Freshness window (operator spec 2026-05-11):
-		//   • base = 80 минут (НЕ выше для general slots)
-		//   • morning_catchup (06:00-09:00 Berlin) = 120 минут — ловим
-		//     overnight news которые могли просочиться позже на feed'ы
-		// Раньше было `min(80min, interval*2)` — для tagesschau (30-min
-		// interval) давало 60 мин окно → утренние items 78 мин старше
-		// → silent drop без audit'a. Pipeline терял весь утренний поток.
-		$is_morning_catchup = false;
+		// Freshness window (operator spec 2026-05-11 revised):
+		//   • morning_catchup (06-09 Berlin):      120 минут — overnight pickup
+		//   • daytime_active / daytime_peak:       40 минут — днём поток
+		//     большой, нужны только свежие items, не 80-минутный поток
+		//   • evening_prime / wind_down_final:     60 минут — moderate
+		//   • night / fallback:                    80 минут — base
+		// Раньше base везде был 80 — днём это собирало too much volume.
+		$mode = '';
 		if (class_exists('EPV2_Time_Planner')) {
 			$window = EPV2_Time_Planner::current_window();
-			$is_morning_catchup = (string) ($window['mode'] ?? '') === 'morning_catchup';
+			$mode = (string) ($window['mode'] ?? '');
 		}
-		$cutoff_minutes = $is_morning_catchup ? 120 : 80;
+		$cutoff_minutes = match ($mode) {
+			'morning_catchup' => 120,
+			'daytime_active', 'daytime_peak' => 40,
+			'evening_prime', 'wind_down_final' => 60,
+			default => 80,
+		};
 		$cutoff_ts = time() - ($cutoff_minutes * MINUTE_IN_SECONDS);
 
 		$indexed = [];

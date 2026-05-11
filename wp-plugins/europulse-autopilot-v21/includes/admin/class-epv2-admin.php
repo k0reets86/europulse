@@ -1353,6 +1353,17 @@ final class EPV2_Admin {
 				'/provider unavailable/iu',
 				'/cooldown active/iu',
 				'/rate.?limit/iu',
+				// Stale error_message from rejected→salvaged cycles.
+				// Items с этими сообщениями уже снова в pipeline (soft
+				// guard ранее salvage'нул). Operator-feedback 2026-05-11:
+				// показывать «pre-AI verdict reject» под item который
+				// сейчас обрабатывается — misleading. Root cause fixed
+				// (commit 6948fdc) — будущие items не resurrect'нутся.
+				'/снят после story-card/iu',
+				'/pre-ai verdict/iu',
+				// Pipeline retry artifacts — item moved on, message stale.
+				'/пакет снят из ready_publish/iu',
+				'/canonical publish gate не пройден/iu',
 			];
 			$is_infra_noise = false;
 			foreach ($infra_noise_patterns as $pat) {

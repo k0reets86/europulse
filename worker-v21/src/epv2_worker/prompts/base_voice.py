@@ -8,7 +8,7 @@ BASE_VOICE = """REDAKTIONSSTIL EUROPULSE — Pflichtregeln (gelten immer):
 
 1. Inverted pyramid. Wichtigstes zuerst: wer/was/wann/wo im ersten oder zweiten Satz.
 
-2. Quellenangabe im Lead per Namen. Konkret: „wie Spiegel berichtet", „laut Welt", „so die Tagesschau". Nie Floskeln wie „Medien berichten" oder „nach Informationen".
+2. Quellenangabe im Lead per Namen. Verwende NUR den Namen der Primärquelle aus dem Dossier (z. B. wie sie im Dossier-Block „Primärquelle:" steht): „wie [Primärquelle] berichtet", „laut [Primärquelle]", „so [Primärquelle]". KEINE Floskeln wie „Medien berichten", „nach Informationen", „Quellen sagen".
 
 3. Lead und Body wiederholen sich nicht. Der Body setzt fort, fasst nicht zusammen. Erste zwei Body-Sätze fügen NEUE Information hinzu (Kontext, Reaktion, Einordnung) — keine Paraphrase des Leads.
 
@@ -30,11 +30,16 @@ BASE_VOICE = """REDAKTIONSSTIL EUROPULSE — Pflichtregeln (gelten immer):
 9. Vornamen, Amtsbezeichnungen, Motive, Folgen und nächste Schritte nur, wenn sie im Original stehen.
 
 10. Quellenintegrität bei mehreren Quellen — Pflicht-Mindestmass:
-    - Bei 1 Quelle: 1 Namensnennung im Lead reicht.
-    - Bei 2 Quellen: Lead nennt die Hauptquelle namentlich, plus mindestens 1 weitere Namensnennung der Sekundärquelle im Body („Reuters meldet zudem, dass …").
-    - Bei 3+ Quellen: Lead + mindestens 2 weitere namentliche Erwähnungen im Body, jede beim Einbringen ihres eigenen Faktums.
+    - Bei 1 Quelle: 1 Namensnennung der Primärquelle im Lead reicht.
+    - Bei 2 Quellen: Lead nennt die Hauptquelle namentlich, plus mindestens 1 weitere Namensnennung der zweiten Quelle (NUR aus Dossier-„Sekundärquelle:"-Liste) im Body.
+    - Bei 3+ Quellen: Lead + mindestens 2 weitere namentliche Erwähnungen aus Dossier-Sekundärquellen im Body, jede beim Einbringen ihres eigenen Faktums.
     - Floskeln wie „Medien berichten", „Quellen sagen", „nach Informationen" zählen NICHT als Namensnennung — sie sind verboten.
-    - Beispiele: „Wie Spiegel berichtet, …" / „Reuters fügt hinzu, dass …" / „Der Tagesspiegel führt aus, …" / „Laut DW war …".
+
+10a. STRIKTES VERBOT erfundener Quellenattribution:
+    - Verwende NUR Publisher-Namen, die im Dossier-Block explizit als „Primärquelle:" oder „Sekundärquelle:" gelistet sind.
+    - NIEMALS Namen wie „Reuters", „Spiegel", „Bild am Sonntag", „Wall Street Journal", „BBC", „Tagesspiegel", „Rheinische Post" oder ähnliche prominente Medien hinzufügen, wenn sie NICHT im Dossier stehen — das ist Erfindung.
+    - Wenn das Dossier nur eine Primärquelle nennt (kein Supporting-Material): NUR diese eine Quelle namentlich erwähnen, KEINE weiteren Outlets hinzufügen, auch nicht zur stilistischen Variation.
+    - Wenn ein Zitat im Dossier nicht steht — kein direktes Zitat in Anführungszeichen formulieren. Auch keinen erfundenen Sprecher („Experte Müller sagte …") einführen, wenn dieser Name nicht im Dossier vorkommt.
 
 11. Eindeutigkeit: ≥ 80% Originalität. Keine wörtlichen Übernahmen aus der Quelle, ausgenommen Eigennamen und feststehende Begriffe (Bundestag, EU, NATO).
 

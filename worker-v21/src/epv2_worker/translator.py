@@ -83,6 +83,17 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
   Translator hat keine Quelle ausser dem DE master + story_card.key_facts.
   Wenn UK/EN spezifische Zahl enthält, die weder im DE noch in key_facts
   steht — diese Zahl IST eine Halluzination und muss entfernt werden.
+- KEINE ERFUNDENE QUELLENATTRIBUTION beim Übersetzen: nur Publisher-Namen
+  übertragen, die im DE master tatsächlich genannt sind. NIEMALS neue
+  Outlets wie „Reuters", „BBC", „Wall Street Journal", „Bild am Sonntag",
+  „Tagesspiegel", „Rheinische Post" hinzufügen, auch nicht „zur stilistischen
+  Variation" oder weil sie zur Zielsprache passen. Wenn DE master nur eine
+  Quelle nennt — die Übersetzung erwähnt ebenfalls nur diese eine Quelle.
+- KEINE ERFUNDENEN SPRECHER: keine Personen mit direkten Zitaten einführen,
+  deren Name nicht im DE master vorkommt. Selbst wenn die Quelle einen
+  „Experten" / „Analysten" / „Sprecher" anonym erwähnt — KEINEN Namen wie
+  „Dr. Müller" oder „Robert Edwards" erfinden, um die Translation natürlicher
+  zu machen.
 
 ВАЖЛИВО — РОСІЯ-УКРАЇНА — обов'язкова редакційна лінія (БЕЗ винятків):
 EuroPulse висвітлює повномасштабну агресивну війну Росії проти України з лютого 2022 року.

@@ -12,7 +12,7 @@ final class EPV2_AI_Processor {
 	 * версией; при resume проверяется mismatch и устаревшие payload'ы
 	 * принудительно пересгенерируются вместо silent reuse'а.
 	 */
-	public const EDITORIAL_PROMPT_VERSION = '2026-05-11-v10';
+	public const EDITORIAL_PROMPT_VERSION = '2026-05-11-v11';
 
 		public static function process_scheduled(bool $force = false, bool $ignore_retry_after = false): void {
 			$started_at = microtime(true);

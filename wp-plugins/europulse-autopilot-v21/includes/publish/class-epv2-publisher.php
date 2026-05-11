@@ -684,14 +684,20 @@ final class EPV2_Publisher {
 				$focus[] = (string) $category;
 			}
 		}
-		$focus_keyword = implode(', ', array_slice($focus, 0, 3));
+		// P1.4 fix 2026-05-11: Rank Math is the active SEO plugin; Yoast
+		// meta writes were dead writes consuming DB rows. Also: Rank Math's
+		// focus_keyword expects ONE primary term, не CSV. Storing primary
+		// в focus_keyword, secondary остальные в rank_math_secondary_focus_keywords.
+		$primary_focus = (string) ($focus[0] ?? '');
+		$secondary_focus = array_values(array_slice($focus, 1, 4));
 		$description = $excerpt !== '' ? $excerpt : wp_trim_words(wp_strip_all_tags($title), 20, '');
 		self::update_post_meta_if_changed($post_id, 'rank_math_title', $title);
 		self::update_post_meta_if_changed($post_id, 'rank_math_description', $description);
-		self::update_post_meta_if_changed($post_id, 'rank_math_focus_keyword', $focus_keyword);
-		self::update_post_meta_if_changed($post_id, '_yoast_wpseo_title', $title);
-		self::update_post_meta_if_changed($post_id, '_yoast_wpseo_metadesc', $description);
-		self::update_post_meta_if_changed($post_id, '_yoast_wpseo_focuskw', $focus_keyword !== '' ? array_slice(explode(',', $focus_keyword), 0, 1)[0] : '');
+		self::update_post_meta_if_changed($post_id, 'rank_math_focus_keyword', $primary_focus);
+		if ($secondary_focus !== []) {
+			self::update_post_meta_if_changed($post_id, 'rank_math_secondary_focus_keywords', implode(',', $secondary_focus));
+		}
+		// Internal mirror for non-SEO-plugin reads (mu-plugin, admin UI).
 		self::update_post_meta_if_changed($post_id, '_epv2_seo_title', $title);
 		self::update_post_meta_if_changed($post_id, '_epv2_meta_desc', $description);
 	}

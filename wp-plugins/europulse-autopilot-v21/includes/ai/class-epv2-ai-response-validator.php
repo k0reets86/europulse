@@ -5,6 +5,14 @@ if (! defined('ABSPATH')) {
 }
 
 final class EPV2_AI_Response_Validator {
+	// Bump when validator logic changes (new checks, threshold updates,
+	// detect_invented_numbers rules). Items с stored quality scores из
+	// версии до bump'а — invalidated, scores re-computed на publish gate.
+	// Prevents stale-score bypass — items с perfectly-scored payloads до
+	// validator update'а от gate'а проходят (item 2257 case: stored q=100
+	// до detect_invented_numbers deploy → publish без re-check).
+	public const VALIDATOR_VERSION = '2026-05-11-v2';
+
 	public static function validate(array $payload): array {
 		$errors = [];
 		if (empty($payload['languages']['de']['title'] ?? null)) {
@@ -27,6 +35,7 @@ final class EPV2_AI_Response_Validator {
 			'seo' => $seo,
 			'release' => $release,
 			'google' => $google,
+			'validator_version' => self::VALIDATOR_VERSION,
 		];
 	}
 

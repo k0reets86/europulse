@@ -3105,6 +3105,15 @@ final class EPV2_AI_Processor {
 	}
 
 	private static function publish_ready_gate_payload_integrity_passes(array $payload, array $meta): bool {
+		// NOTE: previous attempt to re-validate ALL 4 quality streams here
+		// on validator_version mismatch (reverted 2026-05-11 self-review)
+		// caused 5/5 random published items to fail — editorial_quality
+		// computes more warnings now than when scores were originally
+		// stored. Re-validation cascade-blocked legitimate items.
+		// Approach: targeted re-checks only (invented_numbers added at
+		// the gate in commit 3597fa6 caught actual bugs without false
+		// positives). Future validator bumps require explicit handling
+		// not broad re-evaluation.
 		$quality = is_array($meta['quality'] ?? null) ? $meta['quality'] : [];
 		$release_quality = is_array($meta['release_quality'] ?? null) ? $meta['release_quality'] : [];
 		$google_quality = is_array($meta['google_quality'] ?? null) ? $meta['google_quality'] : [];

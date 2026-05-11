@@ -38,20 +38,19 @@ final class EPV2_Collector {
 			return;
 		}
 		// Backpressure-deferred until timestamp (set by previous over-
-		// capacity tick). Если сейчас < deferred_until — выходим, не
-		// триггерим should_defer повторно (иначе counter растёт каждый
-		// WP-cron tick за 15 мин а physical defer должен быть строго 10).
-		if (! $force) {
-			$deferred_until = (int) get_option('epv2_collect_deferred_until', 0);
-			if ($deferred_until > time()) {
-				return;
-			}
+		// capacity tick). Apply regardless of $force (operator spec
+		// 2026-05-11): orchestrator вызывает run_scheduled(true) каждый
+		// tick, но backpressure — это safety contract, не overridable
+		// time-planner gate. Hard cap (200) тоже fires при force=true
+		// — same pattern.
+		$deferred_until = (int) get_option('epv2_collect_deferred_until', 0);
+		if ($deferred_until > time()) {
+			return;
 		}
-		// Backpressure: if the queue already holds more pending items than
-		// the worker can plausibly drain in the next hour, defer this
-		// collect by 10 minutes. Hard ceiling of 30 минут total cumulative
-		// defer prevents skipping collects forever если queue stuck.
-		if (! $force && self::should_defer_for_backpressure()) {
+		// Backpressure: defer 10 min when pending >= capacity (12 для
+		// 5-мин publish). Apply regardless of $force — same reason as
+		// deferred_until check above.
+		if (self::should_defer_for_backpressure()) {
 			return;
 		}
 		EPV2_Lock_Manager::cleanup();

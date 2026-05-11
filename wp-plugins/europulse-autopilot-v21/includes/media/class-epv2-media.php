@@ -1312,6 +1312,47 @@ if (! defined('ABSPATH')) {
 			// MDR image CDN.
 			'img.mdr.de'         => 'mdr',
 			'cdn.mdr.de'         => 'mdr',
+			// Major DE publishers CDNs (P1.5 added 2026-05-11):
+			// ZDF
+			'teaser.zdf.de'      => 'zdf',
+			'bilder.zdf.de'      => 'zdf',
+			'cdn.zdf.de'         => 'zdf',
+			// ARD / Tagesschau (extends existing tagesschau aliases)
+			'bilder.ardmediathek.de' => 'ardmediathek',
+			'images.ardmediathek.de' => 'ardmediathek',
+			'cdn.ardmediathek.de'    => 'ardmediathek',
+			// Bild
+			'bilder.bild.de'     => 'bild',
+			'images.bild.de'     => 'bild',
+			'cdn.bild.de'        => 'bild',
+			// Süddeutsche
+			'media.sz.de'        => 'sueddeutsche',
+			'cdn.sueddeutsche.de' => 'sueddeutsche',
+			'images.sueddeutsche.de' => 'sueddeutsche',
+			// NZZ
+			'img.nzz.ch'         => 'nzz',
+			'cdn.nzz.ch'         => 'nzz',
+			// Tagesspiegel
+			'images.tagesspiegel.de' => 'tagesspiegel',
+			'cdn.tagesspiegel.de' => 'tagesspiegel',
+			// Stern
+			'image.stern.de'     => 'stern',
+			'cdn.stern.de'       => 'stern',
+			// Focus
+			'b.fcs.de'           => 'focus',
+			'images.focus.de'    => 'focus',
+			// n-tv (multiple shards)
+			'bilder1.n-tv.de'    => 'n-tv',
+			'bilder2.n-tv.de'    => 'n-tv',
+			'bilder3.n-tv.de'    => 'n-tv',
+			'bilder4.n-tv.de'    => 'n-tv',
+			'cdn.n-tv.de'        => 'n-tv',
+			// taz
+			'static.taz.de'      => 'taz',
+			'taz.de'             => 'taz',
+			// Frankfurter Rundschau
+			'cdn.fr.de'          => 'fr',
+			'images.fr.de'       => 'fr',
 			// FAZ-Frankfurter Rundschau (fr.de) and BR share regional family
 			// nothing here — different publishers, NO alias. fr.de и mdr.de
 			// остаются separate. Cross-publisher mismatch остаётся flagged.

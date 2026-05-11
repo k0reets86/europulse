@@ -22,6 +22,11 @@ final class EPV2_Story_Card_Builder {
 
 	private const ENDPOINT_PATH = '/analyze_story';
 	private const REQUEST_TIMEOUT = 45;
+	// P1.8 (2026-05-11): bump when story_card.py prompt changes — invalidates
+	// cached cards с outdated editorial_match / per-rubric stop-lists.
+	// Cards без current version (или с stale version) treated as missing
+	// at process_scheduled upfront check → rebuild fresh on next tick.
+	public const STORY_CARD_PROMPT_VERSION = '2026-05-11-v1';
 
 	/**
 	 * Build a story card for a queue item.
@@ -83,6 +88,7 @@ final class EPV2_Story_Card_Builder {
 		// Stamp the wall-clock so consumers can age the card if they want to
 		// rebuild it after a long sleep.
 		$card['built_at'] = gmdate( 'Y-m-d H:i:s' );
+		$card['prompt_version'] = self::STORY_CARD_PROMPT_VERSION;
 		return $card;
 	}
 

@@ -109,6 +109,24 @@ final class EPV2_AI_Processor {
 					// inside existing_payload, so its rewrite prompt is
 					// grounded in the same semantic snapshot the categorizer
 					// used.
+					// Invalidate stale-version story_card (P1.8 2026-05-11):
+					// when STORY_CARD_PROMPT_VERSION bumps, old cards с
+					// outdated editorial_match / per-rubric stop-lists
+					// treated as missing → rebuild fresh on next tick.
+					if (
+						class_exists('EPV2_Story_Card_Builder')
+						&& ! empty($existing_payload['_meta']['story_card'])
+						&& defined('EPV2_Story_Card_Builder::STORY_CARD_PROMPT_VERSION')
+					) {
+						$card_version = (string) ($existing_payload['_meta']['story_card']['prompt_version'] ?? '');
+						if ($card_version !== '' && $card_version !== EPV2_Story_Card_Builder::STORY_CARD_PROMPT_VERSION) {
+							unset($existing_payload['_meta']['story_card']);
+							self::log_process_item_step('story_card_version_mismatch_dropped', (int) $item->id, [
+								'stored' => $card_version,
+								'current' => EPV2_Story_Card_Builder::STORY_CARD_PROMPT_VERSION,
+							]);
+						}
+					}
 					if (
 						class_exists('EPV2_Story_Card_Builder')
 						&& empty($existing_payload['_meta']['story_card'])

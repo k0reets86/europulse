@@ -2889,46 +2889,90 @@ final class EPV2_Queue {
 		return 0;
 	}
 
-	public static function prune_new_stale(int $hours = 18): int {
+	public static function prune_new_stale(int $hours = 5): int {
 		// Stale 'new' items: collected but never processed by orchestrator
-		// внутри TTL window — usually because heuristic skipped them
-		// (decision='low'), worker was unavailable when their turn came,
-		// or backpressure deferred collect long enough that they aged out.
+		// внутри TTL window — usually because heuristic skipped them,
+		// worker был недоступен в их очередь, backpressure deferred collect.
 		// Mark as rejected с hard-terminal reason так что soft_terminal_guard
-		// не resurrect'нет их в ready_review. Bug fix 2026-05-11:
-		// function was a no-op (return 0), allowing items to accumulate
-		// 50+ hours in 'new' forever.
+		// не resurrect'нет их в ready_review. Bug fix 2026-05-11: function
+		// was a no-op (return 0), позволяла items накапливаться 50+ часов.
+		//
+		// Operator-spec 2026-05-12: TTL default снижен с 18 до 5 часов.
+		// Логика: если новость не успела обработаться в течение 5 часов
+		// после сбора — она устарела для daily-news цикла. Exception:
+		// TOP/breaking stories pass — для них долгое окно ожидания оправдано,
+		// они могут ждать analysis-grade rewrite.
 		global $wpdb;
 		$hours = max(1, min(168, $hours));
-		// GREATEST(created_at, updated_at) — items returning к 'new' через
-		// retry_process keep original created_at, но updated_at refreshes.
-		// Без GREATEST recently-retried items pruned «as stale» сразу. Items
-		// действительно неактивные имеют оба timestamp старые.
-		$ids = $wpdb->get_col($wpdb->prepare(
-			"SELECT id FROM {$wpdb->prefix}epv2_queue
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id, ai_payload, admin_notes FROM {$wpdb->prefix}epv2_queue
 			 WHERE state = 'new'
 			   AND GREATEST(created_at, updated_at) < DATE_SUB(NOW(), INTERVAL %d HOUR)
 			 ORDER BY GREATEST(created_at, updated_at) ASC
 			 LIMIT 100",
 			$hours
 		));
-		if (! is_array($ids) || $ids === []) {
+		if (! is_array($rows) || $rows === []) {
 			return 0;
 		}
 		$pruned = 0;
-		foreach ($ids as $id) {
-			$id = (int) $id;
+		$kept_top = 0;
+		foreach ($rows as $row) {
+			$id = (int) ($row->id ?? 0);
 			if ($id <= 0) continue;
-			// hard_editorial token блокирует soft_terminal_state_guard salvage
+			// TOP / breaking exception — эти items имеют право ждать дольше.
+			// Сигналы: story_card.top_story_candidate / breaking_candidate,
+			// payload._meta.breaking / top_story / breaking_watch,
+			// admin_notes.selection.top_story_candidate / breaking_candidate.
+			if (self::row_is_top_story_or_breaking($row)) {
+				$kept_top++;
+				continue;
+			}
 			self::mark_state($id, 'rejected', [
-				'error_message' => 'hard_editorial — TTL exceeded: item collected but never processed within ' . $hours . 'h window',
+				'error_message' => 'hard_editorial — TTL exceeded: новость не обработана за ' . $hours . 'ч после сбора (устарела для daily cycle, не TOP-тема)',
 			]);
 			$pruned++;
 		}
-		if ($pruned > 0 && class_exists('EPV2_Logger')) {
-			EPV2_Logger::info('queue', "prune_new_stale: $pruned items rejected (>={$hours}h in 'new')");
+		if (class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "prune_new_stale: $pruned rejected (>={$hours}h в 'new'), $kept_top kept (TOP/breaking exception)");
 		}
 		return $pruned;
+	}
+
+	/**
+	 * Should this item escape stale-TTL pruning? TOP / breaking stories
+	 * deserve longer wait — они могут ждать analytical rewrite.
+	 */
+	private static function row_is_top_story_or_breaking(object $row): bool {
+		$payload = json_decode((string) ($row->ai_payload ?? ''), true);
+		if (is_array($payload)) {
+			$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			if (! empty($meta['breaking']) || ! empty($meta['top_story']) || ! empty($meta['breaking_watch'])) {
+				return true;
+			}
+			$card = is_array($meta['story_card'] ?? null) ? $meta['story_card'] : [];
+			if (! empty($card['breaking_candidate']) || ! empty($card['top_story_candidate'])) {
+				return true;
+			}
+			$selection = is_array($meta['selection'] ?? null) ? $meta['selection'] : [];
+			if (! empty($selection['breaking_candidate']) || ! empty($selection['top_story_candidate'])) {
+				return true;
+			}
+			// Высокий importance/story_score тоже даёт пощаду — дорогостоящее
+			// решение бросать редкие items с подтверждённой ценностью.
+			$importance = (int) ($meta['importance_score'] ?? 0);
+			if ($importance >= 65) {
+				return true;
+			}
+		}
+		$notes = json_decode((string) ($row->admin_notes ?? ''), true);
+		if (is_array($notes)) {
+			$sel = is_array($notes['selection'] ?? null) ? $notes['selection'] : [];
+			if (! empty($sel['breaking_candidate']) || ! empty($sel['top_story_candidate']) || ! empty($sel['breaking_watch'])) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public static function trim_new_queue(int $max_per_category = 8, int $max_per_source = 10): int {

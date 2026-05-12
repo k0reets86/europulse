@@ -87,7 +87,7 @@ final class EPV2_Settings {
 				'community' => 1,
 			],
 			'queue_retention_days' => 3,
-			'queue_new_ttl_hours' => 12,
+			'queue_new_ttl_hours' => 5,
 			'queue_new_max_per_category' => 8,
 			'queue_new_max_per_source' => 6,
 			'queue_state_new_hard_cap' => 10,

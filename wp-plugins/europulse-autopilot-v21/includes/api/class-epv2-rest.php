@@ -376,7 +376,7 @@ final class EPV2_REST {
 		// или TTL exceeded, removing it FIRST prevents downstream handlers
 		// from work on doomed items (auto_promote_complete on item that will
 		// be trim'нут, reactivate on item that will be pruned, etc.).
-		$ttl_hours = max(1, (int) EPV2_Settings::get('queue_new_ttl_hours', 12));
+		$ttl_hours = max(1, (int) EPV2_Settings::get('queue_new_ttl_hours', 5));
 		$cleanup['pruned_new_stale'] = EPV2_Queue::prune_new_stale($ttl_hours);
 		$cleanup['trimmed_new_queue'] = EPV2_Queue::trim_new_queue(
 			max(1, (int) EPV2_Settings::get('queue_new_max_per_category', 8)),

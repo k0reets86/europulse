@@ -351,6 +351,15 @@ final class EPV2_Collector {
 	}
 
 	private static function stage_candidate(array $item, object $source, array &$staged_candidates): void {
+		// URL pattern guard (operator-spec 2026-05-12, post 9421 Pydna case):
+		// Документальные фильмы / podcast / livestream-archive страницы — это
+		// НЕ news. Они проскакивают story_card empty category и попадают в
+		// random category. Skip на ingest stage.
+		$url = (string) ($item['url'] ?? '');
+		if ($url !== '' && self::url_is_non_news($url)) {
+			self::audit_candidate($item, $source, [], 'stage', 'url_pattern_non_news', ['url' => $url]);
+			return;
+		}
 		$source_category = (string) $source->category_bias;
 		$duplicate = EPV2_Deduplicator::is_duplicate((string) ($item['title'] ?? ''), (string) ($item['content'] ?? ''), (string) ($item['url'] ?? ''));
 		if (! empty($duplicate['duplicate'])) {
@@ -1260,6 +1269,36 @@ final class EPV2_Collector {
 	 * стоит дороже false-negative (мы не пропустим важное надолго — следующий
 	 * regular collect утром его подберёт).
 	 */
+	/**
+	 * URL pattern detector: документальные фильмы, video archives, podcasts,
+	 * livestream pages — это не news, AI пытается их «новостно» переработать
+	 * с предсказуемо плохим результатом. Skip на ingest.
+	 *
+	 * Caught examples от audit 2026-05-12:
+	 * - zdf.de/video/dokus/entscheidung-auf-dem-schlachtfeld/pydna (Pydna 168 v. Chr.
+	 *   опубликовано в category=sport)
+	 *
+	 * Conservative pattern list — добавлять при наблюдении новых паттернов.
+	 */
+	private static function url_is_non_news(string $url): bool {
+		$path = (string) wp_parse_url($url, PHP_URL_PATH);
+		if ($path === '') return false;
+		$path = mb_strtolower($path);
+		// Documentary archives, video-on-demand sections
+		if (preg_match('#/(dokus?|dokumentation|video/dokus?|video-archiv|terra-x|history-doku|geschichts-doku|kultur-doku)/#', $path)) {
+			return true;
+		}
+		// Podcast episodes (podcast main pages allowed, episodes are content not news)
+		if (preg_match('#/podcasts?/[^/]+/[^/]+\.html?$#', $path)) {
+			return true;
+		}
+		// Livestream / replay pages without dated news structure
+		if (preg_match('#/(livestream|tv-programm|sendung-verpasst|mediathek/sendung)/#', $path)) {
+			return true;
+		}
+		return false;
+	}
+
 	private static function is_breaking_item(array $item): bool {
 		$title    = (string) ($item['title'] ?? '');
 		$excerpt  = (string) ($item['excerpt'] ?? '');

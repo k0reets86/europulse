@@ -81,6 +81,25 @@ final class EPV2_Categorizer {
 		if (self::is_clearly_non_german_international($story_card) && in_array($refined, ['deutschland', 'bayern', 'muenchen'], true)) {
 			return $primary !== '' ? self::canonical_slug($primary) : 'welt';
 		}
+		// Geo-aware guard (operator-spec 2026-05-12, post 9531 case):
+		// BBC Ukrainian / pravda.com.ua / unian.ua source → НЕ может быть
+		// leben-in-deutschland/bayern/muenchen. Если category resolve дал
+		// German-local rubric для ukrainian-source — reroute в ukraine.
+		$primary_url = (string) ($dossier['primary']['url'] ?? '');
+		if ($primary_url !== '' && in_array($refined, ['leben-in-deutschland', 'bayern', 'muenchen', 'deutschland'], true)) {
+			$host = mb_strtolower((string) wp_parse_url($primary_url, PHP_URL_HOST));
+			$ukrainian_hosts = ['bbc.com', 'bbc.co.uk', 'pravda.com.ua', 'unian.ua', 'unian.net', 'kyivpost.com', 'kyivindependent.com', 'ukrinform', 'tsn.ua', 'censor.net', 'nv.ua', 'liga.net', 'epravda.com.ua', 'eurointegration.com.ua', '24tv.ua', 'gordonua.com', 'hromadske', 'suspilne.media'];
+			foreach ($ukrainian_hosts as $uh) {
+				if (str_contains($host, $uh)) {
+					$is_ukrainian_path = $uh === 'bbc.com' || $uh === 'bbc.co.uk'
+						? str_contains((string) wp_parse_url($primary_url, PHP_URL_PATH), '/ukrainian')
+						: true;
+					if ($is_ukrainian_path) {
+						return 'ukraine';
+					}
+				}
+			}
+		}
 		return $refined;
 	}
 

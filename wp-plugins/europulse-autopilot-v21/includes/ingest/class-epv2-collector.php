@@ -63,7 +63,6 @@ final class EPV2_Collector {
 			return;
 		}
 		EPV2_Queue::prune_stale((int) EPV2_Settings::get('queue_retention_days', 3));
-		EPV2_Queue::prune_rejected(1440);
 		EPV2_Queue::prune_new_stale((int) EPV2_Settings::get('queue_new_ttl_hours', 5));
 		EPV2_Trends::refresh($force);
 		$sources = EPV2_Sources::all(true);

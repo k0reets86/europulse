@@ -32,7 +32,6 @@ final class EPV2_Weekly_Analysis {
         if ( ! wp_next_scheduled( 'epv2_weekly_analysis' ) ) {
             wp_schedule_event( self::next_weekday( 0, 8 ), 'weekly', 'epv2_weekly_analysis' ); // Sunday
         }
-        wp_clear_scheduled_hook( 'epv2_weekly_analysis_thursday' );
     }
 
     /**

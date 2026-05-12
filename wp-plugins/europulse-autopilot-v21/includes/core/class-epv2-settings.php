@@ -152,7 +152,17 @@ final class EPV2_Settings {
 		];
 	}
 
+	/**
+	 * Static cache (2026-05-12 audit): EPV2_Settings::get() вызывается
+	 * десятками раз per request. Без cache каждый вызов: get_option +
+	 * merge + AES-256-CBC decrypt 7 секретов. Cache invalidates на set_all.
+	 */
+	private static ?array $cached_all = null;
+
 	public static function get_all(): array {
+		if (self::$cached_all !== null) {
+			return self::$cached_all;
+		}
 		$saved = get_option(self::OPTION_KEY, []);
 		$merged = self::merge(self::defaults(), is_array($saved) ? $saved : []);
 		$merged = self::decrypt_secrets($merged);
@@ -168,6 +178,7 @@ final class EPV2_Settings {
 		if (empty($merged['prompts']['seo_refine'])) {
 			$merged['prompts']['seo_refine'] = (string) self::defaults()['prompts']['seo_refine'];
 		}
+		self::$cached_all = $merged;
 		return $merged;
 	}
 
@@ -179,6 +190,8 @@ final class EPV2_Settings {
 	public static function set_all(array $data): array {
 		$clean = self::sanitize($data, self::get_all());
 		update_option(self::OPTION_KEY, self::encrypt_secrets(self::merge(self::defaults(), $clean)), false);
+		// Invalidate static cache — следующий get_all() пере-decrypt'нет fresh value
+		self::$cached_all = null;
 		return self::get_all();
 	}
 

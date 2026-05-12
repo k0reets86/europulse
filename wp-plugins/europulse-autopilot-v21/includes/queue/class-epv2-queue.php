@@ -2885,10 +2885,6 @@ final class EPV2_Queue {
 		return (int) $result;
 	}
 
-	public static function prune_rejected(int $minutes = 1440): int {
-		return 0;
-	}
-
 	public static function prune_new_stale(int $hours = 5): int {
 		// Stale 'new' items: collected but never processed by orchestrator
 		// внутри TTL window — usually because heuristic skipped them,

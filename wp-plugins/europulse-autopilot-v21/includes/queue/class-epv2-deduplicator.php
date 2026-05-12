@@ -337,14 +337,41 @@ final class EPV2_Deduplicator {
 	 * с «Борис Пісторіус» (UK) — обе нормализуются к "pistorius".
 	 */
 	public static function compute_event_signature(array $story_card, array $payload = []): string {
+		// 2026-05-12 (operator-feedback): EU policy stories часто без
+		// named person — entities_people=[], всё в entities_organizations.
+		// Прежняя версия signature='' → dedup skip → 4 publishes EU pharma
+		// reform за 19 мин. Fallback chain:
+		//   1) entities_people[0]  — preferred (politicians)
+		//   2) entities_organizations[0] — для policy / institutional news
+		//   3) topics[0] — semantic fallback, для events без концретного актора
+		// Без этой широкой fallback dedup пропускает целые классы дубликатов.
 		$entity = '';
-		$people = (array) ($story_card['entities_people'] ?? []);
-		foreach ($people as $person) {
+		foreach ((array) ($story_card['entities_people'] ?? []) as $person) {
 			if (is_array($person)) {
 				$name = trim((string) ($person['name'] ?? ''));
 				if ($name !== '') { $entity = $name; break; }
 			} elseif (is_string($person) && trim($person) !== '') {
 				$entity = trim($person); break;
+			}
+		}
+		if ($entity === '') {
+			foreach ((array) ($story_card['entities_organizations'] ?? []) as $org) {
+				if (is_array($org)) {
+					$name = trim((string) ($org['name'] ?? ''));
+					if ($name !== '') { $entity = $name; break; }
+				} elseif (is_string($org) && trim($org) !== '') {
+					$entity = trim($org); break;
+				}
+			}
+		}
+		if ($entity === '') {
+			foreach ((array) ($story_card['topics'] ?? []) as $topic) {
+				if (is_array($topic)) {
+					$text = trim((string) ($topic['text'] ?? $topic['name'] ?? ''));
+					if ($text !== '') { $entity = $text; break; }
+				} elseif (is_string($topic) && trim($topic) !== '') {
+					$entity = trim($topic); break;
+				}
 			}
 		}
 		if ($entity === '') {
@@ -386,6 +413,16 @@ final class EPV2_Deduplicator {
 		$name = trim($name);
 		if ($name === '') {
 			return '';
+		}
+		// All-uppercase acronyms 2-6 chars — EU, UN, EU-Kommission, AfD, CDU,
+		// CSU, SPD, FDP, NATO. Keep as-is (lowercased), don't apply word
+		// extraction. 2026-05-12: без этого EU policy stories had empty signature.
+		if (preg_match('/^[A-ZÄÖÜ]{2,6}([-\s].*)?$/u', $name)) {
+			$bare = preg_replace('/[^a-zA-Z]/u', '', explode(' ', explode('-', $name)[0])[0]) ?? '';
+			$bare = mb_strtolower($bare);
+			if (mb_strlen($bare) >= 2) {
+				return $bare;
+			}
 		}
 		// Strip common political role prefixes that some entries bake in.
 		$name = preg_replace(

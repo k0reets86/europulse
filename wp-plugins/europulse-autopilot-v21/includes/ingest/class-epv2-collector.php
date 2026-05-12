@@ -1173,12 +1173,17 @@ final class EPV2_Collector {
 		$state_new = (int) $wpdb->get_var(
 			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue WHERE state = 'new'"
 		);
-		$hard_cap = max(5, (int) EPV2_Settings::get('queue_state_new_hard_cap', 10));
-		if ($state_new >= $hard_cap) {
+		// Breaking-scan имеет privilege bypass: breaking важнее routine,
+		// relax cap до 3× regular (default 30). Routine collect стопает на
+		// 10, но breaking всё ещё может пройти если backlog меньше 30 —
+		// то есть pipeline не катастрофически забит.
+		$regular_cap = max(5, (int) EPV2_Settings::get('queue_state_new_hard_cap', 10));
+		$breaking_cap = $regular_cap * 3;
+		if ($state_new >= $breaking_cap) {
 			return [
-				'skipped'   => 'backpressure_hard_cap',
+				'skipped'   => 'backpressure_catastrophic',
 				'state_new' => $state_new,
-				'hard_cap'  => $hard_cap,
+				'breaking_cap' => $breaking_cap,
 			];
 		}
 		if (EPV2_Lock_Manager::is_active('collect')) {

@@ -375,16 +375,14 @@ def main() -> int:
                 log("collect executed", result=result)
                 last_collect = time.time()
 
-            # Night-quiet breaking scan: at :00 and :30 of every hour during
-            # is_night_window. Fetches top-tier sources only, stages items
-            # с breaking-маркерами. Publish loop ниже подберёт их via
-            # has_breaking_watch override.
-            is_night = bool(state.get("is_night_window"))
+            # Breaking-scan: каждые :00 и :30 каждого часа — днём и ночью.
+            # 2026-05-12 operator-feedback: если regular collect отфильтровал
+            # breaking слабо (backpressure отложил, hard cap на новые), scan
+            # подберёт его. Runs 24/7 with privilege bypass (looser cap).
             breaking_minutes = state.get("breaking_watch_minutes") or [0, 30]
             current_minute = now.minute
             if (
-                is_night
-                and current_minute in breaking_minutes
+                current_minute in breaking_minutes
                 and current_minute != last_breaking_scan_minute
                 and now_ts - last_breaking_scan >= 120  # safety debounce
             ):

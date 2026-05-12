@@ -16,10 +16,10 @@ final class EPV2_Time_Planner {
 		// The night window has zero allowed slots: only breaking_alert
 		// items override the schedule (handled in
 		// EPV2_Time_Planner::should_publish via has_breaking_watch()).
-		// Operator-агреемент 2026-05-09 (вечерняя сессия) + 2026-05-12 (утренний slot 1/час):
+		// Operator-агреемент 2026-05-09 (вечерняя сессия) + 2026-05-12 (1/час morning + daytime_peak):
 		//   06–09  collect 1/час (на :00)               publish каждые 5 мин
 		//   09–16  collect 1/час (на :00)               publish каждые 5 мин
-		//   16–19  collect 2/час (на :00 и :30)         publish каждые 5 мин
+		//   16–19  collect 1/час (на :00)               publish каждые 5 мин
 		//   19–22  collect 1/час (на :00)               publish каждые 5 мин
 		//   22–23  collect 1× (на :00 в 22:00)          publish каждые 5 мин
 		//   23–00  collect OFF                          publish каждые 5 мин (очередь дорабатывается)
@@ -33,8 +33,8 @@ final class EPV2_Time_Planner {
 				['start' => '06:00', 'end' => '09:00', 'mode' => 'morning_catchup',  'collect_minutes' => [0],     'publish_minutes' => $timer_5],
 				// Daytime active (один сбор в час)
 				['start' => '09:00', 'end' => '16:00', 'mode' => 'daytime_active',   'collect_minutes' => [0],     'publish_minutes' => $timer_5],
-				// Daytime peak: 2 сбора в час
-				['start' => '16:00', 'end' => '19:00', 'mode' => 'daytime_peak',     'collect_minutes' => [0, 30], 'publish_minutes' => $timer_5],
+				// Daytime peak (2026-05-12: 2/час → 1/час по operator-feedback — backlog в «новых»)
+				['start' => '16:00', 'end' => '19:00', 'mode' => 'daytime_peak',     'collect_minutes' => [0],     'publish_minutes' => $timer_5],
 				// Evening prime: один сбор в час
 				['start' => '19:00', 'end' => '22:00', 'mode' => 'evening_prime',    'collect_minutes' => [0],     'publish_minutes' => $timer_5],
 				// Last collect of the day at 22:00, publish продолжается

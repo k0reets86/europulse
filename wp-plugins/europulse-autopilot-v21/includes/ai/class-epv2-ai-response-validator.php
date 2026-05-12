@@ -11,7 +11,7 @@ final class EPV2_AI_Response_Validator {
 	// Prevents stale-score bypass — items с perfectly-scored payloads до
 	// validator update'а от gate'а проходят (item 2257 case: stored q=100
 	// до detect_invented_numbers deploy → publish без re-check).
-	public const VALIDATOR_VERSION = '2026-05-11-v4';
+	public const VALIDATOR_VERSION = '2026-05-12-v5';
 
 	public static function validate(array $payload): array {
 		$errors = [];
@@ -562,6 +562,84 @@ final class EPV2_AI_Response_Validator {
 	}
 
 	/**
+	 * Detect cross-language entity substitution в title field.
+	 *
+	 * Operator-found bug (post 9478, queue_id 2614, 2026-05-12): UK title
+	 * сказал «Зеленський, Вуст і Райн» вместо «Зедер, Вуст і Райн». DE
+	 * title корректно содержал «Söder», body тоже корректно «Зедер», но
+	 * TITLE-specific translation pass подменил имя. Root cause — prompt
+	 * poisoning в translator (literal token «Зеленський» в forbidden
+	 * example block). Prompt fixed в 590faf8, но guard как safety net.
+	 *
+	 * Pattern: UK/EN title contains «Зеленський/Zelensky» (или другой
+	 * high-frequency Ukraine-bias name), DE title НЕ содержит соответствия
+	 * И source_dossier тоже НЕ содержит. → name swap.
+	 *
+	 * Returns list of detected swaps; soft penalty в editorial_quality
+	 * pushes item к manual_review без hard publish block.
+	 */
+	public static function detect_cross_lang_title_substitution(array $payload): array {
+		$de_title = (string) ($payload['languages']['de']['title'] ?? '');
+		$uk_title = (string) ($payload['languages']['uk']['title'] ?? '');
+		$en_title = (string) ($payload['languages']['en']['title'] ?? '');
+		if ($de_title === '' && $uk_title === '' && $en_title === '') return [];
+
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$dossier = is_array($meta['source_dossier'] ?? null) ? $meta['source_dossier'] : [];
+		$source_text = (string) ($dossier['primary']['title'] ?? '')
+			. ' ' . (string) ($dossier['primary']['excerpt'] ?? '')
+			. ' ' . (string) ($dossier['primary']['content'] ?? '');
+
+		// High-attractor political surnames (Ukrainian / Russian context).
+		// Если они появляются в UK или EN title, но НЕ в DE title и НЕ в
+		// source — это substitution. Список интенционально узкий: только
+		// слишком частые «магниты» которые AI пихает при коротком title.
+		$attractors = [
+			'uk' => ['Зеленський', 'Зеленського', 'Зеленському', 'Путін', 'Путіна', 'Путіну'],
+			'en' => ['Zelensky', 'Zelenskyy', 'Zelenskyj', 'Selenskyj', 'Putin'],
+		];
+		// Build cross-lang map: if UK has «Зеленський», DE should have «Selenskyj»/«Selenskyy»/«Zelensky».
+		$de_equivalents = [
+			'Зеленський' => ['Selenskyj', 'Selenskyy', 'Zelensky', 'Zelenskyj', 'Selensky'],
+			'Зеленського' => ['Selenskyj', 'Selenskyy', 'Zelensky'],
+			'Зеленському' => ['Selenskyj', 'Selenskyy', 'Zelensky'],
+			'Путін' => ['Putin'],
+			'Путіна' => ['Putin'],
+			'Путіну' => ['Putin'],
+			'Zelensky' => ['Selenskyj', 'Selenskyy', 'Zelensky', 'Zelenskyj'],
+			'Zelenskyy' => ['Selenskyj', 'Selenskyy', 'Zelensky', 'Zelenskyj'],
+			'Zelenskyj' => ['Selenskyj', 'Selenskyy', 'Zelensky', 'Zelenskyj'],
+			'Selenskyj' => ['Selenskyj', 'Selenskyy', 'Zelensky', 'Zelenskyj'],
+			'Putin' => ['Putin'],
+		];
+
+		$detected = [];
+		foreach ($attractors as $lang => $names) {
+			$translated_title = $lang === 'uk' ? $uk_title : $en_title;
+			if ($translated_title === '') continue;
+			foreach ($names as $name) {
+				if (mb_stripos($translated_title, $name) === false) continue;
+				// Check if a DE equivalent appears in DE title or source.
+				$equivalents = $de_equivalents[$name] ?? [];
+				$found = false;
+				foreach ($equivalents as $eq) {
+					if (mb_stripos($de_title, $eq) !== false || mb_stripos($source_text, $eq) !== false) {
+						$found = true; break;
+					}
+				}
+				if (! $found) {
+					$detected[] = [
+						'lang' => $lang,
+						'name' => $name,
+						'title' => mb_substr($translated_title, 0, 120),
+					];
+				}
+			}
+		}
+		return $detected;
+	}
+
+	/**
 	 * Detect publisher/outlet attributions в DE content которые не подтверждены
 	 * source_dossier. AI часто добавляет «wie Reuters berichtet» / «in einem
 	 * Interview mit Bild am Sonntag» при thin source — закрытие пустоты
@@ -736,6 +814,19 @@ final class EPV2_AI_Response_Validator {
 		if (self::source_dossier_thin_signal($payload)) {
 			$warnings['de'][] = 'тонкий source dossier (primary < 300, supporting empty) — повышенный риск hallucination';
 			$score -= 10;
+		}
+		// Cross-lang title entity substitution (post 9478 case 2026-05-12):
+		// Söder → Зеленський в UK title. Heavy penalty — это серьёзная
+		// translation error которая прошла publish gate. Должна push к
+		// manual_review даже на одиночный hit.
+		$title_subs = self::detect_cross_lang_title_substitution($payload);
+		if (count($title_subs) >= 1) {
+			$lines = [];
+			foreach (array_slice($title_subs, 0, 3) as $sub) {
+				$lines[] = $sub['lang'] . ': «' . $sub['name'] . '» в title, но не в DE/source';
+			}
+			$warnings['de'][] = 'подмена entity в title: ' . implode('; ', $lines);
+			$score -= 35;
 		}
 		$primary_url = (string) ($meta['source_dossier']['primary']['url'] ?? '');
 		$has_strong_primary = self::looks_like_official_primary($primary_url);

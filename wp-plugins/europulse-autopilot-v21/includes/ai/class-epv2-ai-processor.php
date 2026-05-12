@@ -3079,6 +3079,50 @@ final class EPV2_AI_Processor {
 				return false;
 			}
 		}
+		// Thin-source HARD gate (operator-spec 2026-05-12, post 9486 case):
+		// Items с primary<300 chars + supporting=0 — главный источник
+		// fabrications (32% всех публикаций, 3 confirmed fab cases в audit).
+		// Soft -10 penalty не блокировал; теперь — hard block, route в
+		// manual_review через retry_process loop. Operator принимает
+		// финальное решение по каждому такому item'у.
+		if (class_exists('EPV2_AI_Response_Validator') && method_exists('EPV2_AI_Response_Validator', 'source_dossier_thin_signal')) {
+			if (EPV2_AI_Response_Validator::source_dossier_thin_signal($payload)) {
+				// Breaking / TOP / high-importance items exempted —
+				// у них долгое окно ожидания operator review допустимо,
+				// но не authoritative auto-publish при thin source.
+				$is_top = ! empty($meta['breaking'])
+					|| ! empty($meta['top_story'])
+					|| ! empty($meta['breaking_watch']);
+				if (! $is_top) {
+					return false;
+				}
+			}
+		}
+		// Invented quote attributions HARD gate (operator-spec 2026-05-12,
+		// post 9486 case): -15 penalty не блокировал. Теперь invented
+		// speaker => block.
+		if (class_exists('EPV2_AI_Response_Validator') && method_exists('EPV2_AI_Response_Validator', 'detect_invented_quote_attributions')) {
+			$invented_quotes = EPV2_AI_Response_Validator::detect_invented_quote_attributions($payload);
+			if (count($invented_quotes) >= 1) {
+				return false;
+			}
+		}
+		// Invented publisher attributions HARD gate (operator-spec 2026-05-12,
+		// post 2545 BBC/Guardian case): -25 penalty был insufficient.
+		if (class_exists('EPV2_AI_Response_Validator') && method_exists('EPV2_AI_Response_Validator', 'detect_invented_publishers')) {
+			$invented_pubs = EPV2_AI_Response_Validator::detect_invented_publishers($payload);
+			if (count($invented_pubs) >= 1) {
+				return false;
+			}
+		}
+		// Cross-lang title substitution HARD gate (operator-spec 2026-05-12,
+		// post 9478 Söder→Зеленський case).
+		if (class_exists('EPV2_AI_Response_Validator') && method_exists('EPV2_AI_Response_Validator', 'detect_cross_lang_title_substitution')) {
+			$title_subs = EPV2_AI_Response_Validator::detect_cross_lang_title_substitution($payload);
+			if (count($title_subs) >= 1) {
+				return false;
+			}
+		}
 		if (! self::publish_ready_gate_payload_integrity_passes($payload, $meta)) {
 			return false;
 		}

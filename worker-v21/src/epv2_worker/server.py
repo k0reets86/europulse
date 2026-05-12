@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from .pipeline import run_pipeline, build_normalized_payload
 from .contracts import WorkerRequest
 from .story_card import build_story_card
+from .embeddings import compute_embedding
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="EPV2 Worker", version="2.1")
@@ -84,7 +85,13 @@ async def analyze_story(
     if expected_token and provided_token != expected_token:
         raise HTTPException(status_code=403, detail="Invalid worker token")
     try:
-        card = await build_story_card(
+        # Phase 1 (2026-05-12): compute story_card и semantic embedding в
+        # параллель. Embedding отдельный OpenAI вызов (text-embedding-3-small),
+        # latency ~200-500ms — параллельно не замедляет card pass. Embedding
+        # пишется в payload._meta.semantic_embedding на PHP side для future
+        # similarity-based dedup. Phase 1 = generate + store only (no usage).
+        import asyncio
+        card_task = build_story_card(
             title=req.title,
             excerpt=req.excerpt,
             body=req.content,
@@ -96,10 +103,20 @@ async def analyze_story(
             deepseek_api_key=req.deepseek_api_key,
             openai_model=req.openai_model or "gpt-5-mini",
         )
+        emb_task = compute_embedding(
+            title=req.title,
+            excerpt=req.excerpt,
+            content=req.content,
+            openai_api_key=req.openai_api_key,
+        )
+        card, embedding = await asyncio.gather(card_task, emb_task)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Story card error for queue_id=%s", req.queue_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return JSONResponse(content={"queue_id": req.queue_id, "card": card.to_dict()})
+    response_body = {"queue_id": req.queue_id, "card": card.to_dict()}
+    if embedding:
+        response_body["embedding"] = embedding
+    return JSONResponse(content=response_body)
 
 
 @app.post("/process")

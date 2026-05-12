@@ -89,6 +89,22 @@ final class EPV2_Story_Card_Builder {
 		// rebuild it after a long sleep.
 		$card['built_at'] = gmdate( 'Y-m-d H:i:s' );
 		$card['prompt_version'] = self::STORY_CARD_PROMPT_VERSION;
+		// Phase 1 (2026-05-12): semantic embedding piggy-backed on
+		// /analyze_story call. Worker возвращает в response.embedding
+		// если OpenAI key есть и call успешен. PHP сохраняет в card
+		// под отдельным ключом — downstream может read'ить через
+		// from_payload + payload._meta.story_card.semantic_embedding.
+		$embedding = is_array( $decoded['embedding'] ?? null ) ? $decoded['embedding'] : [];
+		if ( ! empty( $embedding ) && is_array( $embedding['vector'] ?? null ) ) {
+			$card['semantic_embedding'] = [
+				'model' => (string) ( $embedding['model'] ?? '' ),
+				'dim'   => (int) ( $embedding['dim'] ?? 0 ),
+				'vector' => $embedding['vector'],
+				'input_chars' => (int) ( $embedding['input_chars'] ?? 0 ),
+				'tokens' => (int) ( $embedding['tokens'] ?? 0 ),
+				'computed_at' => gmdate( 'Y-m-d H:i:s' ),
+			];
+		}
 		return $card;
 	}
 

@@ -87,10 +87,36 @@ final class EPV2_Stats {
 	 * and `_meta.tokens` total. Each WP-side stage transition that persists
 	 * a worker payload should call this helper once.
 	 */
+	/**
+	 * Static cache to prevent double-recording within single PHP process.
+	 * mark_state() в EPV2_Queue вызывается несколько раз за один request
+	 * (state transitions processing_de → retry_process → ready_publish →
+	 * publishing → published). Тот же ai_payload может приехать с extra
+	 * на каждый transition, и без idempotency tokens списываются 4-5 раз.
+	 * Operator-feedback 2026-05-12 audit: ai_daily_token_soft_limit лгал.
+	 */
+	private static array $recorded_payload_fingerprints = [];
+
 	public static function record_payload_ai_usage(array $payload): void {
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 		$runtime = is_array($meta['ai_runtime'] ?? null) ? $meta['ai_runtime'] : [];
 		$payload_total = (int) ($meta['tokens'] ?? 0);
+		// Idempotency check: fingerprint of runtime + total. Same payload
+		// repeatedly mark_state'нутый получает same fingerprint → skip.
+		$fingerprint = md5(wp_json_encode([
+			'runtime' => $runtime,
+			'tokens' => $payload_total,
+		], JSON_UNESCAPED_UNICODE));
+		if (isset(self::$recorded_payload_fingerprints[$fingerprint])) {
+			return;
+		}
+		self::$recorded_payload_fingerprints[$fingerprint] = true;
+		// Cap cache size — после 200 entries clear oldest 100.
+		if (count(self::$recorded_payload_fingerprints) > 200) {
+			self::$recorded_payload_fingerprints = array_slice(
+				self::$recorded_payload_fingerprints, -100, null, true
+			);
+		}
 		$runtime_total = 0;
 		foreach ($runtime as $entry) {
 			if (! is_array($entry)) {

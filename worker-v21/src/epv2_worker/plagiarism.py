@@ -84,12 +84,13 @@ def check_uniqueness(
     source_text: str,
     language: str = "de",
     named_entities: list[str] | None = None,
-    threshold_pct: float = 80.0,
+    threshold_pct: float = 85.0,
 ) -> PlagiarismResult:
     """Compare ``generated_text`` to ``source_text`` and return the verdict.
 
-    The threshold is on **uniqueness** (not overlap) so 80.0 means we require
-    at least 80% of significant trigrams in the generated text to be original.
+    The threshold is on **uniqueness** (not overlap) so 85.0 means we require
+    at least 85% of significant trigrams in the generated text to be original.
+    Operator-spec 2026-05-12: bumped 80 → 85 for legal-grade rewrite quality.
     """
     gen_trigrams = _build_trigram_set(generated_text, language, named_entities or [])
     src_trigrams = _build_trigram_set(source_text, language, named_entities or [])

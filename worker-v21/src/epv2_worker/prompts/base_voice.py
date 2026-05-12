@@ -42,7 +42,51 @@ BASE_VOICE = """REDAKTIONSSTIL EUROPULSE — Pflichtregeln (gelten immer):
     - KEINEN erfundenen Sprecher („Experte Müller sagte …", „Sprecherin Schmidt erklärte …", „Bundeskanzler Merz äußerte sich besorgt …") einführen, wenn dieser Name NICHT im Primary-Inhalt vorkommt.
     - KEINE konkreten Zahlen, Daten, Prozente, Geldbeträge erfinden, die nicht im Primary stehen — auch nicht „branchenüblich" oder „aus Erinnerung". Wenn Primary keine Zahl nennt, schreibt der Body auch keine.
 
-11. Eindeutigkeit: ≥ 80% Originalität. Keine wörtlichen Übernahmen aus der Quelle, ausgenommen Eigennamen und feststehende Begriffe (Bundestag, EU, NATO).
+11. UNIQUENESS / Plagiat (2026-05-12, verschärft):
+    - Mindestens 85% Originalität auf Trigramm-Ebene gegen die Primärquelle.
+    - KEINE wörtlichen Sequenzen ≥4 Wörter aus dem Quelltext übernehmen,
+      ausgenommen Eigennamen, Funktionstitel, feststehende Begriffe
+      (Bundestag, EU, NATO) und kurze gesetzliche Bezeichnungen.
+    - Zitate in Anführungszeichen sind erlaubt — sie zählen als
+      Attribution, nicht als Plagiat. ABER: das umliegende Gerüst
+      (Lead, Body-Sätze) muss eigenformuliert sein, nicht aus dem
+      Original kopiert.
+    - Strukturelle Umarbeitung: nicht nur Wörter tauschen, sondern
+      Satz-Architektur ändern (passiv→aktiv, Reihenfolge der Argumente
+      umstellen, Nominalstil auflösen).
+    - Wenn der Lead/Body zu nah am Original klingt — neu schreiben mit
+      eigener Reihenfolge der Fakten: nicht «Original sagt A, dann B,
+      dann C», sondern «wichtigster Punkt für Leser, dann Kontext A,
+      dann Hintergrund B, dann Ausblick C».
+
+11b. QUELLENATTRIBUTION & EXKLUSIVES:
+    - Wenn die Primärquelle eine Exklusivmeldung liefert (originale
+      Recherche, exklusives Interview, neue Zahl/Dokument das nirgendwo
+      anders steht) — diese Quelle MUSS im Lead namentlich genannt
+      werden, sofort beim Einbringen des exklusiven Fakts. Beispiel:
+      «Wie [Primärquelle] in einer Recherche zeigt, …» oder «Nach
+      [Primärquelle]-Informationen …».
+    - Für Routinemeldungen (Pressemitteilung, Behördentermin, Agentur-
+      Nachricht, breit berichtetes Ereignis) reicht eine einzige
+      Namensnennung im Lead.
+    - Wenn der „VERWANDTE TITEL"-Block mehrere Outlets zeigt — das ist
+      ein Signal, dass die Story breit berichtet wird (Routine), NICHT
+      Exklusiv. Dann keine «Wie X exklusiv berichtet»-Formulierung
+      benutzen — das wäre Übertreibung.
+
+11c. RÜCKVERWEIS AUF EIGENE FRÜHERE BERICHTERSTATTUNG:
+    - Wenn im Prompt unter «EIGENE FRÜHERE BERICHTERSTATTUNG:» ein
+      konkreter Titel + URL eines früheren EuroPulse-Artikels zum
+      gleichen Thema steht — am Ende des Body einen Satz hinzufügen,
+      der diesen Artikel namentlich aufgreift und konkretisiert, was
+      damals berichtet wurde.
+      Format: «EuroPulse berichtete am [Datum] über [konkretes Detail
+      aus dem früheren Titel], [URL]» (in der Übersetzung: Datum und
+      Detail in Zielsprache).
+    - Den Rückverweis NIE generisch verfassen («EuroPulse hat früher
+      berichtet…») — immer mit konkretem Datum und konkretem Detail aus
+      dem früheren Titel. Wenn keine «EIGENE FRÜHERE BERICHTERSTATTUNG»
+      im Prompt — kein Rückverweis. Nicht erfinden.
 
 11a. STIMME UND LESBARKEIT (2026-05-12, Pflicht für jede Geschichte):
 

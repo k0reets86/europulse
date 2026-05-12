@@ -320,6 +320,33 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
                 if len(lines) > 7:  # header lines + at least one entry
                     rewrite_dossier_block = "\n".join(lines)
 
+            # Prior coverage block (2026-05-12 operator-feedback): если у нас
+            # уже есть свежий пост на ту же тему — передаём его rewriter'у,
+            # чтобы в хвост body добавился конкретный backlink с датой и
+            # title. PHP-side find_prior_coverage уже отфильтровал по entity +
+            # category + 7-day window, так что блок появляется ТОЛЬКО когда
+            # match реален.
+            prior_coverage = meta.get("prior_coverage") if isinstance(meta, dict) else None
+            if isinstance(prior_coverage, list) and prior_coverage:
+                prior_lines = [
+                    'EIGENE FRÜHERE BERICHTERSTATTUNG (nutze für einen konkreten Rückverweis im letzten Body-Absatz):'
+                ]
+                for entry in prior_coverage[:2]:
+                    if not isinstance(entry, dict):
+                        continue
+                    title = str(entry.get("title") or "").strip()
+                    url = str(entry.get("url") or "").strip()
+                    date = str(entry.get("post_date") or "").strip()
+                    if not title or not url:
+                        continue
+                    prior_lines.append(f"  • {date} — {title} ({url})")
+                if len(prior_lines) > 1:
+                    prior_block = "\n".join(prior_lines)
+                    rewrite_dossier_block = (
+                        (rewrite_dossier_block + "\n\n" + prior_block).strip()
+                        if rewrite_dossier_block else prior_block
+                    )
+
     # Phase 2.3: rubric_slug — prefer category_final, fall back to category_proposed.
     rewrite_rubric = (req.category_final or req.category_proposed or "").strip().lower()
 
@@ -349,7 +376,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     # warning to decide on regeneration within its 2-attempts budget.
     if not rewrite.uniqueness_passed:
         ctx.warnings.append(
-            f"plagiarism_gate_de: uniqueness {rewrite.uniqueness_pct:.1f}% < 80%"
+            f"plagiarism_gate_de: uniqueness {rewrite.uniqueness_pct:.1f}% < 85%"
             + (f" ({rewrite.uniqueness_reason})" if rewrite.uniqueness_reason else "")
         )
 
@@ -412,7 +439,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         _record_ai_runtime(ctx, "translate_uk", uk_result.provider, uk_result.model, getattr(uk_result, "tokens", 0))
         if not uk_result.uniqueness_passed:
             ctx.warnings.append(
-                f"plagiarism_gate_uk: uniqueness {uk_result.uniqueness_pct:.1f}% < 80%"
+                f"plagiarism_gate_uk: uniqueness {uk_result.uniqueness_pct:.1f}% < 85%"
             )
     if not en_result.success:
         ctx.blockers.append(f"EN translation failed: {en_result.error}")
@@ -420,7 +447,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         _record_ai_runtime(ctx, "translate_en", en_result.provider, en_result.model, getattr(en_result, "tokens", 0))
         if not en_result.uniqueness_passed:
             ctx.warnings.append(
-                f"plagiarism_gate_en: uniqueness {en_result.uniqueness_pct:.1f}% < 80%"
+                f"plagiarism_gate_en: uniqueness {en_result.uniqueness_pct:.1f}% < 85%"
             )
     for lang, package in {"de": ctx.german_master, "uk": ctx.ukrainian, "en": ctx.english}.items():
         if not _language_package_complete(package):

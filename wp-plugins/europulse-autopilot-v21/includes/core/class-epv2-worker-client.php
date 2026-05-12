@@ -122,6 +122,18 @@ final class EPV2_Worker_Client {
 					$existing = EPV2_Dossier_Enricher::enrich( (int) ( $item->id ?? 0 ), $existing );
 				}
 			}
+
+			// Prior-coverage backlink (2026-05-12 operator-feedback): найти
+			// недавние EuroPulse posts на ту же тему, передать worker'у. Он
+			// добавит конкретный rückverweis в хвост body. Pass-through —
+			// если не нашли, поле остаётся пустым и rewriter ничего не
+			// рендерит, gradient'ный degradation.
+			if ( empty( $existing['_meta']['prior_coverage'] ) ) {
+				$prior = self::find_prior_coverage( $item, $existing );
+				if ( ! empty( $prior ) ) {
+					$existing['_meta']['prior_coverage'] = $prior;
+				}
+			}
 		}
 
 		$editorial_flags = [
@@ -352,5 +364,99 @@ final class EPV2_Worker_Client {
 			'payload' => $payload,
 			'error' => $ok ? '' : wp_strip_all_tags( mb_substr( $body, 0, 220 ) ),
 		];
+	}
+
+	/**
+	 * Найти недавние EuroPulse posts на ту же тему — для backlink в хвост.
+	 *
+	 * Стратегия match (intentionally narrow, чтобы не выдумывать связь):
+	 *   1. Story-card дает entities_people[0] (главный фигурант) ИЛИ
+	 *      entities_organizations[0]. Берём первый ≥4 символа.
+	 *   2. Категория поста — из item->category_proposed/final.
+	 *   3. Ищем posts с post_title LIKE '%entity%' AND term.slug=category
+	 *      AND post_date >= -7 days AND post.ID != current.
+	 *   4. Top 1 по post_date DESC.
+	 *
+	 * Возвращает массив (max 1 entry для v1):
+	 *   [ { 'title' => DE-headline, 'url' => permalink, 'post_date' => 'YYYY-MM-DD' } ]
+	 *
+	 * Empty array если nothing matched — worker ничего не рендерит.
+	 * Polylang: post_id может быть в любой language; для v1 берём ID как
+	 * есть и доверяем get_permalink определить URL в текущем lang context.
+	 */
+	private static function find_prior_coverage( object $item, array $existing ): array {
+		global $wpdb;
+		$story_card = is_array( $existing['_meta']['story_card'] ?? null ) ? $existing['_meta']['story_card'] : [];
+		$entity_candidates = [];
+		foreach ( (array) ( $story_card['entities_people'] ?? [] ) as $person ) {
+			$name = is_array( $person ) ? trim( (string) ( $person['name'] ?? '' ) ) : trim( (string) $person );
+			if ( mb_strlen( $name ) >= 4 ) {
+				$entity_candidates[] = $name;
+			}
+		}
+		foreach ( (array) ( $story_card['entities_organizations'] ?? [] ) as $org ) {
+			$name = is_array( $org ) ? trim( (string) ( $org['name'] ?? '' ) ) : trim( (string) $org );
+			if ( mb_strlen( $name ) >= 4 ) {
+				$entity_candidates[] = $name;
+			}
+		}
+		if ( empty( $entity_candidates ) ) {
+			return [];
+		}
+		$category = trim( (string) ( $item->category_final ?? $item->category_proposed ?? '' ) );
+		if ( $category === '' ) {
+			return [];
+		}
+		// Multi-category items сохраняют CSV в category_final — берём первую.
+		if ( str_contains( $category, ',' ) ) {
+			$category = trim( explode( ',', $category )[0] );
+		}
+		$current_post_id = (int) ( $item->post_id ?? 0 );
+		$cutoff = gmdate( 'Y-m-d H:i:s', time() - 7 * DAY_IN_SECONDS );
+
+		// Try entities в порядке появления. Берём first matching.
+		foreach ( $entity_candidates as $entity ) {
+			// Surname-only match (last token) для лучшего recall —
+			// "Markus Söder" → match по "Söder", чтобы поймать
+			// previous "Söder kündigt an" посты.
+			$parts = preg_split( '/\s+/u', $entity ) ?: [];
+			$surname = end( $parts );
+			$surname = is_string( $surname ) ? $surname : $entity;
+			if ( mb_strlen( $surname ) < 4 ) {
+				$surname = $entity;
+			}
+			$like = '%' . $wpdb->esc_like( $surname ) . '%';
+			$rows = $wpdb->get_results( $wpdb->prepare(
+				"SELECT p.ID, p.post_title, p.post_date
+				 FROM {$wpdb->posts} p
+				 INNER JOIN {$wpdb->term_relationships} tr ON tr.object_id = p.ID
+				 INNER JOIN {$wpdb->term_taxonomy} tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
+				 INNER JOIN {$wpdb->terms} t ON t.term_id = tt.term_id
+				 WHERE p.post_status = 'publish'
+				   AND p.post_type = 'post'
+				   AND tt.taxonomy = 'category'
+				   AND t.slug = %s
+				   AND p.post_title LIKE %s
+				   AND p.post_date >= %s
+				   AND p.ID <> %d
+				 ORDER BY p.post_date DESC
+				 LIMIT 1",
+				$category, $like, $cutoff, $current_post_id
+			) );
+			if ( ! empty( $rows ) ) {
+				$row = $rows[0];
+				$url = get_permalink( (int) $row->ID );
+				if ( ! is_string( $url ) || $url === '' ) {
+					continue;
+				}
+				return [ [
+					'title'     => (string) $row->post_title,
+					'url'       => $url,
+					'post_date' => substr( (string) $row->post_date, 0, 10 ),
+					'entity'    => $surname,
+				] ];
+			}
+		}
+		return [];
 	}
 }

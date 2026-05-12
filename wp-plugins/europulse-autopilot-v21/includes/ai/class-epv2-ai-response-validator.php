@@ -473,6 +473,49 @@ final class EPV2_AI_Response_Validator {
 			// Also try with decimal — «24,338» might be «24338,00»
 			$invented[] = $cand;
 		}
+
+		// Word-form numbers (operator-spec 2026-05-12, post 9034 Jermak case):
+		// AI пишет «fast neun Millionen Euro» / «über zwei Milliarden» — числа
+		// в словах обходили digit regex. Map word → numeric, check normalized
+		// haystack для соответствующих digit'ов ИЛИ слова в источнике.
+		$word_num_map = [
+			'eine'=>1, 'einer'=>1, 'einem'=>1, 'einen'=>1, 'einem'=>1,
+			'zwei'=>2, 'drei'=>3, 'vier'=>4, 'fünf'=>5,
+			'sechs'=>6, 'sieben'=>7, 'acht'=>8, 'neun'=>9, 'zehn'=>10,
+			'elf'=>11, 'zwölf'=>12, 'zwanzig'=>20, 'dreißig'=>30, 'vierzig'=>40,
+			'fünfzig'=>50, 'sechzig'=>60, 'siebzig'=>70, 'achtzig'=>80, 'neunzig'=>90,
+			'hundert'=>100, 'tausend'=>1000,
+		];
+		$scale_map = [
+			'million' => 1_000_000, 'millionen' => 1_000_000,
+			'milliarde' => 1_000_000_000, 'milliarden' => 1_000_000_000,
+			'billion' => 1_000_000_000_000, 'billionen' => 1_000_000_000_000,
+		];
+		$haystack_lc = mb_strtolower($haystack);
+		$de_lc = mb_strtolower($de_content);
+		// Match phrase: optional modifier + number-word + scale-word + optional unit
+		// modifier examples: über, fast, knapp, rund, etwa, mehr als, weniger als
+		$pattern = '/\b(?:über|fast|knapp|rund|etwa|mehr\s+als|weniger\s+als)?\s*(eine[mnrs]?|zwei|drei|vier|fünf|sechs|sieben|acht|neun|zehn|elf|zwölf|zwanzig|dreißig|vierzig|fünfzig|sechzig|siebzig|achtzig|neunzig|hundert|tausend)\s+(million|millionen|milliarde|milliarden|billion|billionen)(?:\s+(?:Euro|Dollar|EUR|USD|UAH|Hrywnja))?\b/iu';
+		preg_match_all($pattern, $de_content, $word_matches, PREG_SET_ORDER);
+		foreach ((array) $word_matches as $wm) {
+			$full = trim($wm[0]);
+			$num_word = mb_strtolower($wm[1]);
+			$scale_word = mb_strtolower($wm[2]);
+			$num = $word_num_map[$num_word] ?? null;
+			$scale = $scale_map[$scale_word] ?? null;
+			if (! $num || ! $scale) continue;
+			$digit_repr = (string) ($num * $scale);
+			// Check 1: digit form in source haystack ("9000000" / "9.000.000")
+			if (str_contains($haystack_norm, $digit_repr)) continue;
+			// Check 2: same word-form in source haystack ("neun Millionen")
+			$word_combo = $num_word . ' ' . $scale_word;
+			if (str_contains($haystack_lc, $word_combo)) continue;
+			// Check 3: abbreviated form "9 Mio" / "9 Mrd"
+			$abbr_million = $num . ' Mio';
+			$abbr_milliard = $num . ' Mrd';
+			if (str_contains($haystack, $abbr_million) || str_contains($haystack, $abbr_milliard)) continue;
+			$invented[] = $full;
+		}
 		return $invented;
 	}
 

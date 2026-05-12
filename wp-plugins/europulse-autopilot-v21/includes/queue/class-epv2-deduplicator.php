@@ -190,6 +190,14 @@ final class EPV2_Deduplicator {
 		if (is_array($url_or_title)) {
 			return $url_or_title;
 		}
+		// Phase 2 semantic embedding dedup (2026-05-12, threshold 0.70 calibrated):
+		// Catches same-event paraphrased reporting that token-Jaccard misses —
+		// Gas-Speicher case (token jaccard 0.10, cosine 0.85). Runs ПОСЛЕ
+		// URL/title fallback (быстрее) и ДО story_card signature logic.
+		$semantic = self::find_semantic_duplicate($current_id, $story_card, $payload);
+		if (is_array($semantic)) {
+			return $semantic;
+		}
 		if ($story_card === []) {
 			return ['duplicate' => false, 'reason' => 'no_story_card'];
 		}
@@ -1301,5 +1309,114 @@ final class EPV2_Deduplicator {
 			$out[$t] = true;
 		}
 		return array_keys($out);
+	}
+
+	/**
+	 * Semantic embedding-based dedup (Phase 2, 2026-05-12).
+	 *
+	 * Threshold 0.70 calibrated empirically on 14 known-dup/control pairs:
+	 *   - Hamburg DPA-wire (2465/2468):     cosine 0.925 ✓
+	 *   - Gas-Speicher (2635/2652):         cosine 0.853 ✓ (token-jaccard было 0.10)
+	 *   - EU pharma (2655/2658):            cosine 0.834 ✓
+	 *   - EU pharma (2656/2658):            cosine 0.786 ✓
+	 *   - EU pharma (2655/2656):            cosine 0.754 ✓
+	 *   - Mykolajiw zoo (2486/2487):        cosine 0.734 ✓
+	 *   - EU Taliban cross-lang (2649/2657): cosine 0.474 ✗ (миссится, cross-lang
+	 *     слабый сигнал; но и token-jaccard 0% — net improvement)
+	 *   - Unrelated max:                    cosine 0.418 (Söder vs Bürokratie)
+	 *   - Unrelated median:                 cosine ~0.20
+	 * Margin between dup floor (0.73) и unrelated max (0.42) = 0.31 — safe.
+	 *
+	 * Returns same shape as is_event_duplicate: {duplicate, reason, duplicate_of, similarity}.
+	 * Returns null если signal недостаточно (нет embedding'а у current item).
+	 */
+	private static function find_semantic_duplicate(int $current_id, array $story_card, array $payload): ?array {
+		$current_vec = $story_card['semantic_embedding']['vector']
+			?? $payload['_meta']['story_card']['semantic_embedding']['vector']
+			?? null;
+		if (! is_array($current_vec) || count($current_vec) < 100) {
+			return null;  // no embedding for this item — fallback to other dedup paths
+		}
+		$candidates = self::load_recent_embeddings($current_id);
+		if (empty($candidates)) {
+			return null;
+		}
+		$threshold = 0.70;
+		$best_sim = 0.0;
+		$best_id = 0;
+		foreach ($candidates as $cand_id => $cand_vec) {
+			$sim = self::cosine_similarity($current_vec, $cand_vec);
+			if ($sim > $best_sim) {
+				$best_sim = $sim;
+				$best_id = $cand_id;
+			}
+		}
+		if ($best_sim >= $threshold) {
+			if (class_exists('EPV2_Logger')) {
+				EPV2_Logger::info('dedup', 'semantic_embedding drop', [
+					'item' => $current_id,
+					'duplicate_of' => $best_id,
+					'cosine' => round($best_sim, 3),
+					'threshold' => $threshold,
+				]);
+			}
+			return [
+				'duplicate'    => true,
+				'reason'       => 'semantic_embedding_overlap',
+				'duplicate_of' => $best_id,
+				'similarity'   => round($best_sim, 3),
+				'matched_via'  => 'embedding',
+			];
+		}
+		return null;
+	}
+
+	/**
+	 * Static cache для recent embeddings в текущем request. Single query
+	 * + in-memory dot product. ~200 candidates × 1536-dim ≈ 1-2s, acceptable
+	 * for ingest stage. Cache invalidates on next request (no persistent
+	 * storage — fresh query каждый PHP process).
+	 */
+	private static array $cached_recent_embeddings = [];
+
+	private static function load_recent_embeddings(int $exclude_id): array {
+		global $wpdb;
+		$cache_key = (string) $exclude_id;
+		if (isset(self::$cached_recent_embeddings[$cache_key])) {
+			return self::$cached_recent_embeddings[$cache_key];
+		}
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id, ai_payload FROM {$wpdb->prefix}epv2_queue
+			 WHERE id <> %d
+			   AND updated_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
+			   AND state IN ('new','reserve','processing_de','retry_process','ready_review','ready_publish','publishing','published')
+			 ORDER BY updated_at DESC LIMIT 200",
+			$exclude_id
+		));
+		$out = [];
+		foreach ((array) $rows as $row) {
+			$payload = json_decode((string) ($row->ai_payload ?? ''), true);
+			if (! is_array($payload)) continue;
+			$vec = $payload['_meta']['story_card']['semantic_embedding']['vector'] ?? null;
+			if (! is_array($vec) || count($vec) < 100) continue;
+			$out[(int) $row->id] = $vec;
+		}
+		self::$cached_recent_embeddings[$cache_key] = $out;
+		return $out;
+	}
+
+	private static function cosine_similarity(array $a, array $b): float {
+		$n = min(count($a), count($b));
+		if ($n < 100) return 0.0;
+		$dot = 0.0; $na = 0.0; $nb = 0.0;
+		for ($i = 0; $i < $n; $i++) {
+			$av = (float) $a[$i];
+			$bv = (float) $b[$i];
+			$dot += $av * $bv;
+			$na += $av * $av;
+			$nb += $bv * $bv;
+		}
+		$denom = sqrt($na) * sqrt($nb);
+		return $denom > 0 ? $dot / $denom : 0.0;
 	}
 }

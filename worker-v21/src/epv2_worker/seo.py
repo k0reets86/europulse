@@ -13,6 +13,35 @@ from openai import AsyncOpenAI
 
 from .openai_compat import completion_debug, completion_text, completion_total_tokens, reasoning_extra_body
 
+
+_SENTENCE_TERMINAL_RE = re.compile(r"[.!?»\"…]\s*$", re.UNICODE)
+_LAST_SENTENCE_RE = re.compile(r"^(.*[.!?»\"…])[^.!?»\"…]*$", re.UNICODE | re.DOTALL)
+
+
+def _ensure_complete_sentence(text: str, max_len: int = 160) -> str:
+    """Trim text к последнему complete sentence ≤ max_len chars.
+
+    Catches AI output которое generated past max_len и был бы порублен
+    [:max_len] на полуслове. Возвращает meta_desc заканчивающийся на
+    .!?»"… либо с … fallback'ом если sentence boundary не нашли.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if len(text) <= max_len and _SENTENCE_TERMINAL_RE.search(text):
+        return text
+    if len(text) > max_len:
+        text = text[:max_len]
+    m = _LAST_SENTENCE_RE.match(text)
+    if m:
+        candidate = m.group(1).strip()
+        if len(candidate) >= 50:
+            return candidate
+    cut = text.rfind(" ")
+    if cut != -1 and cut > 60:
+        return text[:cut].rstrip() + "…"
+    return text.rstrip() + "…"
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,7 +127,7 @@ Erstelle SEO-Metadaten."""
     slug = _slugify(title_de)
     return SEOResult(
         seo_title=title_de[:60],
-        meta_description=lead_de[:155],
+        meta_description=_ensure_complete_sentence(lead_de, 155),
         slug=slug,
         keywords=key_phrases[:6],
         success=True,
@@ -133,9 +162,12 @@ async def _call(user_prompt: str, api_key: str, provider: str, model: str) -> SE
         data = json.loads(raw)
         seo_title = _strip_unsupported_person_expansions(str(data.get("seo_title", "")), user_prompt)
         meta_description = _strip_unsupported_person_expansions(str(data.get("meta_description", "")), user_prompt)
+        # 2026-05-12: sentence-aware truncate. Прежде meta_description[:170]
+        # обрезало на полуслове в 48% постов (translator output variable
+        # length). Trim к последнему terminal (.!?»"…) в окне ≤170 chars.
         return SEOResult(
             seo_title=seo_title[:70],
-            meta_description=meta_description[:170],
+            meta_description=_ensure_complete_sentence(meta_description, 160),
             slug=_slugify(str(data.get("slug", ""))),
             keywords=[str(k) for k in data.get("keywords", [])[:10]],
             success=True,

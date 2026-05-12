@@ -672,6 +672,45 @@ final class EPV2_Publisher {
 		};
 	}
 
+	/**
+	 * Trim text к последнему complete sentence ≤ $max_len chars (2026-05-12).
+	 *
+	 * Audit нашёл 1396 / 2888 posts с rank_math_description обрезанным на
+	 * середине слова (DE 389, UK 672, EN 724 — concentration в UK/EN excerpt
+	 * fallback). Truncation source: translator не гарантирует sentence boundary,
+	 * publisher принимал excerpt as-is.
+	 *
+	 * Logic:
+	 *  - Если text уже ≤ max_len и заканчивается терминалом → возвращаем.
+	 *  - Иначе trim к max_len, find последний терминал (.!?»"…) → trim там.
+	 *  - Если в trimmed диапазоне нет терминала — последний space + ellipsis,
+	 *    но не короче 60 chars (иначе слишком обрубленно — отдаём текст с …).
+	 */
+	private static function ensure_complete_sentence(string $text, int $max_len = 160): string {
+		$text = trim($text);
+		if ($text === '') return '';
+		$ends_terminal = preg_match('/[.!?»"…]\s*$/u', $text) === 1;
+		if (mb_strlen($text) <= $max_len && $ends_terminal) {
+			return $text;
+		}
+		if (mb_strlen($text) > $max_len) {
+			$text = mb_substr($text, 0, $max_len);
+		}
+		// Find last sentence terminator within the trimmed range
+		if (preg_match('/^(.*[.!?»"…])[^.!?»"…]*$/u', $text, $m)) {
+			$candidate = trim($m[1]);
+			if (mb_strlen($candidate) >= 50) {
+				return $candidate;
+			}
+		}
+		// Fallback: last space + ellipsis (avoid mid-word cut)
+		$cut = mb_strrpos($text, ' ');
+		if ($cut !== false && $cut > 60) {
+			return trim(mb_substr($text, 0, $cut)) . '…';
+		}
+		return trim($text) . '…';
+	}
+
 	private static function apply_seo_meta(int $post_id, string $title, string $excerpt, array $categories, $focus_keywords = []): void {
 		$focus = [];
 		if (is_array($focus_keywords) && ! empty($focus_keywords)) {
@@ -691,6 +730,7 @@ final class EPV2_Publisher {
 		$primary_focus = (string) ($focus[0] ?? '');
 		$secondary_focus = array_values(array_slice($focus, 1, 4));
 		$description = $excerpt !== '' ? $excerpt : wp_trim_words(wp_strip_all_tags($title), 20, '');
+		$description = self::ensure_complete_sentence($description, 160);
 		self::update_post_meta_if_changed($post_id, 'rank_math_title', $title);
 		self::update_post_meta_if_changed($post_id, 'rank_math_description', $description);
 		self::update_post_meta_if_changed($post_id, 'rank_math_focus_keyword', $primary_focus);

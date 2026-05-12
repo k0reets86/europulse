@@ -1612,7 +1612,35 @@ final class EPV2_Queue {
 			// not, downstream logic правильно route'нет (manual_review для
 			// rescued / rejected для non-rescued).
 			$short_circuit_selection_low = $ai_selection_low && $attempts >= 1;
-			if (! $selection_blocked && ! $retry_exhausted && ! $stale_retry && ! $short_circuit_selection_low) {
+			// Short-circuit (2026-05-12 operator-feedback): hard gate signals
+			// stable между AI retries. Если thin_source / invented_quotes /
+			// invented_publishers / cross_lang_title_subs срабатывают и item
+			// уже attempt'нул >=2 раза — AI не вылечит, нужно operator
+			// review. Caught case: item 2719 сделал 13 attempts через
+			// publish_ready_gate → жгло токены.
+			$short_circuit_hard_gate = false;
+			if ($attempts >= 2 && class_exists('EPV2_AI_Response_Validator')) {
+				$thin = method_exists('EPV2_AI_Response_Validator', 'source_dossier_thin_signal')
+					? EPV2_AI_Response_Validator::source_dossier_thin_signal($payload) : false;
+				$is_top_signal = ! empty($payload['_meta']['breaking'])
+					|| ! empty($payload['_meta']['top_story'])
+					|| ! empty($payload['_meta']['breaking_watch']);
+				$inv_quotes = method_exists('EPV2_AI_Response_Validator', 'detect_invented_quote_attributions')
+					? count(EPV2_AI_Response_Validator::detect_invented_quote_attributions($payload)) : 0;
+				$inv_pubs = method_exists('EPV2_AI_Response_Validator', 'detect_invented_publishers')
+					? count(EPV2_AI_Response_Validator::detect_invented_publishers($payload)) : 0;
+				$inv_titles = method_exists('EPV2_AI_Response_Validator', 'detect_cross_lang_title_substitution')
+					? count(EPV2_AI_Response_Validator::detect_cross_lang_title_substitution($payload)) : 0;
+				if (
+					($thin && ! $is_top_signal)
+					|| $inv_quotes >= 1
+					|| $inv_pubs >= 1
+					|| $inv_titles >= 1
+				) {
+					$short_circuit_hard_gate = true;
+				}
+			}
+			if (! $selection_blocked && ! $retry_exhausted && ! $stale_retry && ! $short_circuit_selection_low && ! $short_circuit_hard_gate) {
 				continue;
 			}
 			// Rescue path: an item that already passes every publish-gate

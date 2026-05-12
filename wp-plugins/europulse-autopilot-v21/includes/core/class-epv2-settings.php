@@ -90,6 +90,7 @@ final class EPV2_Settings {
 			'queue_new_ttl_hours' => 12,
 			'queue_new_max_per_category' => 8,
 			'queue_new_max_per_source' => 6,
+			'queue_state_new_hard_cap' => 10,
 			'trend_signal_enabled' => true,
 			'trend_regions' => ['DE', 'FR', 'IT', 'ES', 'PL', 'NL'],
 			'trend_min_hits' => 2,
@@ -210,6 +211,7 @@ final class EPV2_Settings {
 		$clean['queue_new_ttl_hours'] = max(1, min(168, (int) ($data['queue_new_ttl_hours'] ?? $current['queue_new_ttl_hours'])));
 		$clean['queue_new_max_per_category'] = max(1, min(50, (int) ($data['queue_new_max_per_category'] ?? $current['queue_new_max_per_category'])));
 		$clean['queue_new_max_per_source'] = max(1, min(50, (int) ($data['queue_new_max_per_source'] ?? $current['queue_new_max_per_source'])));
+		$clean['queue_state_new_hard_cap'] = max(5, min(100, (int) ($data['queue_state_new_hard_cap'] ?? $current['queue_state_new_hard_cap'])));
 		$clean['trend_signal_enabled'] = ! empty($data['trend_signal_enabled']);
 		$clean['trend_regions'] = array_values(array_filter(array_map(static fn($v) => strtoupper(trim((string) $v)), is_array($data['trend_regions'] ?? null) ? $data['trend_regions'] : $current['trend_regions'])));
 		$clean['trend_min_hits'] = max(2, min(6, (int) ($data['trend_min_hits'] ?? $current['trend_min_hits'])));

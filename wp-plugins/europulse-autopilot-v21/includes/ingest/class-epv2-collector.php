@@ -246,6 +246,30 @@ final class EPV2_Collector {
 	 */
 	private static function should_defer_for_backpressure(): bool {
 		global $wpdb;
+		// Hard cap на state='new' (2026-05-12 operator-spec): если в «новых»
+		// уже больше N items — collect skip без escape hatch'а. Это жёсткий
+		// предохранитель отдельно от capacity-based threshold ниже. Capacity-
+		// based logic считает new+retry+processing_de вместе и допускает
+		// force-run после 30 мин deferral. Operator же хочет: «больше N в
+		// новых = стоп», точка. Defaults to 10, configurable via setting.
+		$state_new_count = (int) $wpdb->get_var(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue WHERE state = 'new'"
+		);
+		$state_new_hard_cap = max(5, (int) EPV2_Settings::get('queue_state_new_hard_cap', 10));
+		if ($state_new_count >= $state_new_hard_cap) {
+			if (class_exists('EPV2_Logger')) {
+				EPV2_Logger::info('collect', 'collect deferred — state=new hard cap', [
+					'state_new'  => $state_new_count,
+					'hard_cap'   => $state_new_hard_cap,
+				]);
+			}
+			// Persist physical defer для следующих 10 мин чтобы орxестратор
+			// не пробовал в каждый WP-cron tick. Без неё мы skip'ем только
+			// текущий tick, и следующий через 1 мин опять fire'ит.
+			update_option('epv2_collect_deferred_until', time() + 10 * MINUTE_IN_SECONDS, false);
+			return true;
+		}
+
 		$pending = (int) $wpdb->get_var(
 			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue
 			 WHERE state IN ('new', 'retry_process', 'processing_de')"

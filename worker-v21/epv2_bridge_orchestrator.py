@@ -337,6 +337,8 @@ def main() -> int:
     last_process = 0.0
     last_publish = 0.0
     last_maintenance = 0.0
+    last_breaking_scan = 0.0
+    last_breaking_scan_minute = -1  # track which minute we already fired in
 
     while True:
         now = utc_now()
@@ -358,10 +360,41 @@ def main() -> int:
             collect_every = max(300, int(state.get("collect_interval_minutes", 60)) * 60)
             process_every = max(60, int(state.get("process_interval_minutes", 5)) * 60)
 
-            if (not state.get("collect_paused")) and now_ts - last_collect >= collect_every:
+            # 2026-05-12 operator-spec: respect time_planner windows. Прежде
+            # orchestrator вызывал collect с force=true каждые collect_every
+            # сек, обходя night_monitor mode. Это нарушало контракт «ночью не
+            # собираем». Теперь учитываем collect_window_open флаг из state
+            # (computed PHP-side via EPV2_Time_Planner::should_collect(false)).
+            collect_window_open = state.get("collect_window_open", True)
+            if (
+                (not state.get("collect_paused"))
+                and collect_window_open
+                and now_ts - last_collect >= collect_every
+            ):
                 result = run_collect_job()
                 log("collect executed", result=result)
                 last_collect = time.time()
+
+            # Night-quiet breaking scan: at :00 and :30 of every hour during
+            # is_night_window. Fetches top-tier sources only, stages items
+            # с breaking-маркерами. Publish loop ниже подберёт их via
+            # has_breaking_watch override.
+            is_night = bool(state.get("is_night_window"))
+            breaking_minutes = state.get("breaking_watch_minutes") or [0, 30]
+            current_minute = now.minute
+            if (
+                is_night
+                and current_minute in breaking_minutes
+                and current_minute != last_breaking_scan_minute
+                and now_ts - last_breaking_scan >= 120  # safety debounce
+            ):
+                try:
+                    result = request_json("/bridge/breaking_scan", method="POST", payload={})
+                    log("breaking scan executed", minute=current_minute, result=result.get("result", {}))
+                    last_breaking_scan = now_ts
+                    last_breaking_scan_minute = current_minute
+                except Exception as exc:
+                    log("breaking scan error", error=str(exc))
 
             if should_publish(state, utc_now()) and now_ts - last_publish >= PUBLISH_RETRY_COOLDOWN_SECONDS:
                 result = request_json("/bridge/publish", method="POST", payload={})

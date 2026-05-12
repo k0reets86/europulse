@@ -92,6 +92,12 @@ final class EPV2_REST {
 			'permission_callback' => [self::class, 'can_bridge'],
 		]);
 
+		register_rest_route('epv2/v1', '/bridge/breaking_scan', [
+			'methods' => 'POST',
+			'callback' => [self::class, 'bridge_breaking_scan'],
+			'permission_callback' => [self::class, 'can_bridge'],
+		]);
+
 		register_rest_route('epv2/v1', '/bridge/server-orchestrator', [
 			'methods' => 'POST',
 			'callback' => [self::class, 'bridge_server_orchestrator'],
@@ -234,7 +240,47 @@ final class EPV2_REST {
 			],
 			'recent_runs' => $recent_runs,
 		];
+		// Time-window flags для orchestrator (2026-05-12 operator-spec:
+		// night-quiet должен быть real, не только декларативный). Orchestrator
+		// читает эти флаги вместо force=true bypass'а.
+		if (class_exists('EPV2_Time_Planner')) {
+			$window = EPV2_Time_Planner::current_window();
+			$mode = (string) ($window['mode'] ?? '');
+			$is_night = in_array($mode, ['night_monitor', 'wind_down_quiet'], true);
+			$summary['current_window_mode'] = $mode;
+			$summary['is_night_window'] = $is_night;
+			$summary['collect_window_open'] = EPV2_Time_Planner::should_collect(false);
+			$summary['publish_window_open'] = EPV2_Time_Planner::should_publish(false);
+			$summary['has_breaking_watch'] = EPV2_Time_Planner::has_breaking_watch();
+			// Breaking watch minutes — orchestrator calls /bridge/breaking_scan
+			// only at these minute marks during night, regardless of overall
+			// collect window status.
+			$summary['breaking_watch_minutes'] = (array) ($window['breaking_watch_minutes']
+				?? EPV2_Settings::get('time_schedule_profile', EPV2_Time_Planner::defaults())['breaking_watch_minutes']
+				?? [0, 30]);
+		}
 		return rest_ensure_response($summary);
+	}
+
+	public static function bridge_breaking_scan(WP_REST_Request $request): WP_REST_Response {
+		// Night-safe collect: только items с breaking-маркерами (BREAKING /
+		// Eilmeldung / Срочно / RSS category=breaking). Bypass'ит time_planner
+		// window guards (force=true) НО фильтрует на breaking heuristic в
+		// stage_candidate. См. EPV2_Collector::run_breaking_scan().
+		if (! class_exists('EPV2_Collector')) {
+			return rest_ensure_response([
+				'ok' => false,
+				'error' => 'collector not available',
+			]);
+		}
+		$started = microtime(true);
+		$result = EPV2_Collector::run_breaking_scan();
+		return rest_ensure_response([
+			'ok' => true,
+			'action' => 'breaking_scan',
+			'duration_ms' => (int) round((microtime(true) - $started) * 1000),
+			'result' => $result,
+		]);
 	}
 
 	public static function bridge_pause(WP_REST_Request $request): WP_REST_Response {

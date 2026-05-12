@@ -1157,4 +1157,112 @@ final class EPV2_Collector {
 		$indexed = array_slice($indexed, 0, $cap);
 		return array_map(static fn (array $row) => $row['item'], $indexed);
 	}
+
+	/**
+	 * Night-safe breaking-only scan (2026-05-12 operator-spec):
+	 * Ночью (01:00-06:00 Berlin) regular collect off. Этот метод вызывается
+	 * orchestrator'ом на :00 и :30 каждого часа, fetches top-tier sources
+	 * и stages ТОЛЬКО items с breaking-маркерами (BREAKING / Eilmeldung /
+	 * Срочно / RSS category=breaking|live).
+	 *
+	 * Hard cap state_new всё ещё применяется — если очередь уже забита,
+	 * даже breaking не добавляем.
+	 */
+	public static function run_breaking_scan(): array {
+		global $wpdb;
+		$state_new = (int) $wpdb->get_var(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue WHERE state = 'new'"
+		);
+		$hard_cap = max(5, (int) EPV2_Settings::get('queue_state_new_hard_cap', 10));
+		if ($state_new >= $hard_cap) {
+			return [
+				'skipped'   => 'backpressure_hard_cap',
+				'state_new' => $state_new,
+				'hard_cap'  => $hard_cap,
+			];
+		}
+		if (EPV2_Lock_Manager::is_active('collect')) {
+			return ['skipped' => 'collect_lock_active'];
+		}
+		$lock = EPV2_Lock_Manager::acquire('collect', 180);
+		if (! $lock) {
+			return ['skipped' => 'lock_acquire_failed'];
+		}
+		try {
+			$sources = (array) $wpdb->get_results(
+				"SELECT * FROM {$wpdb->prefix}epv2_sources
+				 WHERE is_active = 1 AND priority >= 9
+				 ORDER BY priority DESC LIMIT 20"
+			);
+			$found   = 0;
+			$staged  = 0;
+			$errors  = 0;
+			$skipped = 0;
+			$staged_candidates = [];
+			foreach ($sources as $source) {
+				if (! is_object($source)) continue;
+				if (EPV2_Resilience_Manager::source_on_cooldown((int) $source->id)) {
+					$skipped++;
+					continue;
+				}
+				try {
+					$items = self::collect_source($source);
+					foreach ($items as $item) {
+						if (! self::is_breaking_item($item)) continue;
+						$found++;
+						$before = count($staged_candidates);
+						self::stage_candidate($item, $source, $staged_candidates);
+						if (count($staged_candidates) > $before) {
+							$staged++;
+						}
+					}
+					EPV2_Sources::update_fetch((int) $source->id, $staged, null);
+					EPV2_Resilience_Manager::register_source_success((int) $source->id);
+				} catch (Throwable $e) {
+					$errors++;
+					EPV2_Resilience_Manager::register_source_failure((int) $source->id, $e->getMessage());
+					EPV2_Logger::warning('collect', 'breaking source failed', [
+						'source_id' => (int) $source->id,
+						'error'     => $e->getMessage(),
+					]);
+				}
+			}
+			$report = [
+				'sources_scanned' => count($sources),
+				'breaking_found'  => $found,
+				'staged'          => $staged,
+				'errors'          => $errors,
+				'skipped_cooldown'=> $skipped,
+			];
+			EPV2_Logger::info('collect', 'breaking_scan completed', $report);
+			return $report;
+		} finally {
+			EPV2_Lock_Manager::release('collect', $lock);
+		}
+	}
+
+	/**
+	 * Heuristic: is this RSS item flagged as breaking?
+	 * Catches: title regex (BREAKING / Eilmeldung / EIL / Срочно / Терміново
+	 * / LIVE UPDATES) и RSS-категория содержит breaking/live/eilmeldung.
+	 * Намеренно narrow чтобы не routine items не проходили — false-positive
+	 * стоит дороже false-negative (мы не пропустим важное надолго — следующий
+	 * regular collect утром его подберёт).
+	 */
+	private static function is_breaking_item(array $item): bool {
+		$title    = (string) ($item['title'] ?? '');
+		$excerpt  = (string) ($item['excerpt'] ?? '');
+		$categories = (array) ($item['categories'] ?? []);
+		$combined = $title . ' ' . $excerpt . ' ' . implode(' ', array_map('strval', $categories));
+		if (preg_match('/\b(?:BREAKING(?:\s+NEWS)?|EILMELDUNG|\+\+\+\s*EIL\s*\+\+\+|EIL\b|СРОЧНО|ТЕРМІНОВО|LIVE\s+UPDATES?)\b/iu', $combined)) {
+			return true;
+		}
+		foreach ($categories as $cat) {
+			$c = mb_strtolower((string) $cat);
+			if (str_contains($c, 'breaking') || str_contains($c, 'eilmeldung') || str_contains($c, 'срочн') || str_contains($c, 'термін')) {
+				return true;
+			}
+		}
+		return false;
+	}
 }

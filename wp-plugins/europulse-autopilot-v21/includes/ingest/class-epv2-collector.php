@@ -705,7 +705,13 @@ final class EPV2_Collector {
 				}
 				// Семантический event-signature dedup. current_id=0 (item ещё
 				// не save'нут), функция skip'ает self-check.
-				$event_dup = EPV2_Deduplicator::is_event_duplicate(0, $story_card, $ai_payload_seed);
+				$event_dup = EPV2_Deduplicator::is_event_duplicate(
+					0,
+					$story_card,
+					$ai_payload_seed,
+					(string) ($item['url'] ?? ''),
+					(string) ($item['title'] ?? '')
+				);
 				if (! empty($event_dup['duplicate'])) {
 					self::audit_candidate($item, $source, $analysis, 'ingest', 'event_signature_duplicate', [
 						'duplicate_of' => (int) ($event_dup['duplicate_of'] ?? 0),

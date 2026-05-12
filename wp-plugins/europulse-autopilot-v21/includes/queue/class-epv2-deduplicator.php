@@ -178,7 +178,18 @@ final class EPV2_Deduplicator {
 	 *
 	 * Returns ['duplicate' => bool, 'reason' => string, 'duplicate_of' => int]
 	 */
-	public static function is_event_duplicate(int $current_id, array $story_card, array $payload = []): array {
+	public static function is_event_duplicate(int $current_id, array $story_card, array $payload = [], string $current_url = '', string $current_title = ''): array {
+		// 2026-05-12 (operator-feedback): items без story_card или с empty
+		// signature не deduplicated. URL slug + title-token Jaccard fallback
+		// ловит дубли по разным сигналам: substring совпадение в URL slug
+		// (cross-source: tagesschau.de + ndr.de same article slug) и
+		// Jaccard на title tokens (cross-source same wording, no story_card
+		// needed). Runs FIRST как safety net — если ловит, return сразу.
+		// Если pass — текущая story-card logic продолжает.
+		$url_or_title = self::find_url_or_title_duplicate($current_id, $current_url, $current_title);
+		if (is_array($url_or_title)) {
+			return $url_or_title;
+		}
 		if ($story_card === []) {
 			return ['duplicate' => false, 'reason' => 'no_story_card'];
 		}
@@ -1155,5 +1166,140 @@ final class EPV2_Deduplicator {
 			$query = http_build_query($query_parts);
 		}
 		return strtolower($parts['host']) . $path . ($query !== '' ? '?' . $query : '');
+	}
+
+	/**
+	 * URL slug substring + title-token Jaccard fallback (2026-05-12).
+	 *
+	 * Two complementary signals that catch dubli where story_card-based
+	 * signature не помогает:
+	 *
+	 *   1) URL slug substring match — два source-host'а часто публикуют
+	 *      article с одинаковым slug (DPA/AP/Reuters wire syndication).
+	 *      Hamburg-terror case: tagesschau.de и ndr.de оба имели URL
+	 *      ending '/terrorverdacht-17-jaehriger-in-hamburg-festgenommen,
+	 *      terror-158.html' — extract longest meaningful slug-token,
+	 *      substring match детектирует.
+	 *
+	 *   2) Title-token Jaccard ≥ 0.30 — same-language items с похожим
+	 *      wording. Empirical threshold: 0.30 ловит EU pharma (jaccard 0.50),
+	 *      Hamburg terror (0.33), без false positives на real different stories
+	 *      (Söder vs Bürokratie vs Scooter все 0.00).
+	 *
+	 * Runs ДО story_card-based signature logic — если ловит, return
+	 * immediately. False-positive risk низкий, threshold tuned эмпирически.
+	 */
+	private static function find_url_or_title_duplicate(int $current_id, string $current_url, string $current_title): ?array {
+		$current_url = trim($current_url);
+		$current_title = trim($current_title);
+		if ($current_url === '' && $current_title === '') {
+			return null;
+		}
+		$current_slug = self::extract_slug_token($current_url);
+		$current_tokens = self::tokenize_title_for_dedup($current_title);
+		if ($current_slug === '' && count($current_tokens) < 3) {
+			return null;  // недостаточно signal
+		}
+		global $wpdb;
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id, original_url, original_title FROM {$wpdb->prefix}epv2_queue
+			 WHERE id <> %d
+			   AND updated_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 12 HOUR)
+			   AND state IN ('new','reserve','processing_de','retry_process','ready_review','ready_publish','publishing','published')
+			 ORDER BY updated_at DESC LIMIT 200",
+			$current_id
+		));
+		if (! is_array($rows) || $rows === []) {
+			return null;
+		}
+		foreach ($rows as $row) {
+			$other_id = (int) ($row->id ?? 0);
+			$other_url = (string) ($row->original_url ?? '');
+			$other_title = (string) ($row->original_title ?? '');
+
+			// URL slug substring (требует обоих ≥ 20 chars чтобы избежать
+			// false-positives на generic slugs like '/article' / '/news').
+			if ($current_slug !== '' && mb_strlen($current_slug) >= 20) {
+				$other_slug = self::extract_slug_token($other_url);
+				if ($other_slug !== '' && mb_strlen($other_slug) >= 20) {
+					if (str_contains($other_slug, $current_slug) || str_contains($current_slug, $other_slug)) {
+						return [
+							'duplicate'    => true,
+							'reason'       => 'url_slug_overlap',
+							'duplicate_of' => $other_id,
+							'matched_via'  => 'slug',
+							'slug'         => mb_substr($current_slug, 0, 80),
+						];
+					}
+				}
+			}
+
+			// Title-token Jaccard. Threshold 0.30 эмпирически calibrated.
+			if (count($current_tokens) >= 3) {
+				$other_tokens = self::tokenize_title_for_dedup($other_title);
+				if (count($other_tokens) >= 3) {
+					$inter = count(array_intersect($current_tokens, $other_tokens));
+					$union = count(array_unique(array_merge($current_tokens, $other_tokens)));
+					$jaccard = $union > 0 ? $inter / $union : 0.0;
+					if ($jaccard >= 0.30) {
+						if (class_exists('EPV2_Logger')) {
+							EPV2_Logger::info('dedup', 'title_token_overlap drop', [
+								'item' => $current_id,
+								'duplicate_of' => $other_id,
+								'jaccard' => round($jaccard, 2),
+								'common_tokens' => array_values(array_intersect($current_tokens, $other_tokens)),
+							]);
+						}
+						return [
+							'duplicate'    => true,
+							'reason'       => 'title_token_overlap',
+							'duplicate_of' => $other_id,
+							'similarity'   => round($jaccard, 2),
+							'matched_via'  => 'title',
+						];
+					}
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Извлекает наиболее значимый chunk URL slug — последний path-сегмент,
+	 * stripped extension и cleaned. Used as substring match для cross-source
+	 * dup detection (same wire article на разных outlets).
+	 */
+	private static function extract_slug_token(string $url): string {
+		if ($url === '') return '';
+		$path = (string) wp_parse_url($url, PHP_URL_PATH);
+		$path = trim($path, '/');
+		if ($path === '') return '';
+		$parts = explode('/', $path);
+		$last = (string) end($parts);
+		// Strip extension и common ID suffixes
+		$last = preg_replace('/\.(html?|php|aspx?)$/i', '', $last) ?? $last;
+		$last = preg_replace('/,[a-z0-9-]+\.html?$/i', '', $last) ?? $last;
+		// Если slug содержит ID-like trailing tail (",terror-158"), отрезаем
+		$last = preg_replace('/,[a-z0-9-]+$/i', '', $last) ?? $last;
+		return mb_strtolower(trim($last));
+	}
+
+	private static function tokenize_title_for_dedup(string $title): array {
+		$title = mb_strtolower(wp_strip_all_tags($title));
+		$title = html_entity_decode($title, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+		$title = preg_replace('/[^\p{L}\p{N}\s]+/u', ' ', $title) ?? '';
+		$tokens = preg_split('/\s+/u', $title) ?: [];
+		$stopwords = [
+			'der','die','das','und','mit','von','für','wird','sind','aus','dem','den','ein','eine','einer','beim','nach','auf','vor','über','unter','zwischen','während','gegen','ohne',
+			'this','that','for','the','and','with','was','were','will','have','has','about','into','over','under','from','their','what','when','where','their',
+			'що','та','для','про','це','який','яка','яке','які','коли','куди','цей','ця','цю','щодо','після','перед','через','поза','під','над','між',
+		];
+		$out = [];
+		foreach ($tokens as $t) {
+			if (mb_strlen($t) < 4) continue;
+			if (in_array($t, $stopwords, true)) continue;
+			$out[$t] = true;
+		}
+		return array_keys($out);
 	}
 }

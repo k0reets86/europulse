@@ -273,7 +273,13 @@ final class EPV2_AI_Processor {
 										$dup_payload = $row_payload;
 									}
 								}
-								$event_dup = EPV2_Deduplicator::is_event_duplicate((int) $item->id, $story_card, $dup_payload);
+								$event_dup = EPV2_Deduplicator::is_event_duplicate(
+									(int) $item->id,
+									$story_card,
+									$dup_payload,
+									(string) ($item->original_url ?? ''),
+									(string) ($item->original_title ?? '')
+								);
 								if (! empty($event_dup['duplicate'])) {
 									$dup_of = (int) ($event_dup['duplicate_of'] ?? 0);
 									$age_min = (int) round((int) ($event_dup['age_seconds'] ?? 0) / 60);

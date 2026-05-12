@@ -1079,20 +1079,20 @@ final class EPV2_Collector {
 			$cap = 2;
 		}
 
-		// Freshness window (operator spec 2026-05-11 revised):
-		//   • morning_catchup (06-09 Berlin):      120 минут — overnight pickup
+		// Freshness window (operator spec 2026-05-12 revised):
+		//   • morning_catchup (06-09 Berlin):      60 минут — operator-feedback
+		//     2026-05-12: 120 давало overnight pickup но и over-volume
 		//   • daytime_active / daytime_peak:       40 минут — днём поток
 		//     большой, нужны только свежие items, не 80-минутный поток
 		//   • evening_prime / wind_down_final:     60 минут — moderate
 		//   • night / fallback:                    80 минут — base
-		// Раньше base везде был 80 — днём это собирало too much volume.
 		$mode = '';
 		if (class_exists('EPV2_Time_Planner')) {
 			$window = EPV2_Time_Planner::current_window();
 			$mode = (string) ($window['mode'] ?? '');
 		}
 		$cutoff_minutes = match ($mode) {
-			'morning_catchup' => 120,
+			'morning_catchup' => 60,
 			'daytime_active', 'daytime_peak' => 40,
 			'evening_prime', 'wind_down_final' => 60,
 			default => 80,

@@ -50,7 +50,13 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
 - Abkürzungen: beim ersten Auftreten die volle Form in der Zielsprache nennen und die Abkürzung in Klammern behalten, z. B. „European Union (EU)" / „Європейський Союз (ЄС)".
 - Exklusive Zuschreibungen und Zitate wörtlich und vollständig übertragen.
 - Namen, Daten, Zahlen und Eigennamen unverändert übernehmen. Personen nicht sofort nur auf nackte Nachnamen reduzieren: bei erster Erwähnung Rolle/Funktion + Name oder Nachname, sofern die Quelle die Rolle nennt.
-- Erfinde keine Vornamen, Funktionen oder Rollen aus Allgemeinwissen. Wenn der deutsche Master nur „Söder" oder „Miersch" nennt, schreibe in der Übersetzung ebenfalls nur „Söder" oder „Miersch"; keine Zusätze wie „Bavarian Minister-President", „Prime Minister", „прем’єр-міністр Баварії" oder ähnliche Rollen.
+- Erfinde keine Vornamen, Funktionen oder Rollen aus Allgemeinwissen. Wenn der deutsche Master nur einen Nachnamen nennt, schreibt die Übersetzung ebenfalls nur diesen Nachnamen; keine Zusätze wie „Bavarian Minister-President", „Prime Minister" oder ähnliche Rollen.
+
+- ENTITÄTS-KONSISTENZ ZWISCHEN TITEL/LEAD/BODY (Pflicht-Pflicht, 2026-05-12):
+  Jeder Eigenname / Personenname im TITEL der Übersetzung MUSS im Body der gleichen Übersetzung in transkribierter Form vorkommen, und sein deutsches Original MUSS im deutschen Master stehen.
+  Es ist STRIKT VERBOTEN, im Titel einen Namen zu setzen, der im DE-Master nicht erwähnt wird — egal wie bekannt oder kontextuell passend dieser Name erscheinen mag.
+  Beispiel: Wenn DE-Master "Söder, Wüst, Rhein" nennt — UK-Titel transkribiert exakt diese drei Namen (Зедер, Вуст, Райн). EN-Titel behält Söder, Wüst, Rhein. Keine Substitution durch andere bekannte Politikernamen.
+  Vor dem Senden: prüfe innerlich, dass jeder Name im Titel auch im Body steht. Wenn nicht — Titel umformulieren.
 - Die gesamte Ausgabe muss in der Zielsprache sein. Für English sind ukrainische oder russische Wörter wie „повідомляє", „за даними" oder „заявив" verboten.
 - Keine inhaltlichen Zusammenfassungen oder Auslassungen.
 - Überschriften natürlich formulieren, keine wortwörtlichen deutschen Komposita.
@@ -66,13 +72,12 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
   Statt solcher leeren Sätze: kürzere Übersetzung. Lieber 150 dichte Wörter als 350 mit Wassertext.
 - Wenn das deutsche Original einen Absatz hat, der nur aus solchen Filler-Sätzen besteht — diesen Absatz in der Übersetzung WEGLASSEN. Lückenhafte Quelle bleibt lückenhafte Quelle, in jeder Sprache.
 - ОСОБОЕ ПРАВИЛО для UK/EN финальных абзацев: VERBOTEN — последний абзац не должен быть meta-комментарием типа «Це свідчить про зростаюче занепокоєння…» / «This reflects growing concerns…». Финальный абзац ДОЛЖЕН содержать конкретный факт: следующий шаг с датой, реакцию с именем-функцией-цитатой, исторический контекст с числами. Если такого факта нет — финальный абзац ОПУСТИТЬ.
-- BEWAHREN ABLEHNUNG / REJECTION — wenn DE master содержит strong refusal
-  («Kyiv lehnt ab», «als Provokation», «Hauptstadt des Aggressorstaats»),
-  переводить эту силу 1:1, не softeneть. Beispiele:
-  ✓ UK: «Київ відкидає зустріч у Москві — столиці держави-агресора»
-  ✓ EN: «Kyiv rejects meeting in Moscow, the capital of the aggressor state»
-  ✗ UK: «Зеленський може поїхати до Москви»
-  ✗ EN: «Zelensky may travel to Moscow».
+- BEWAHREN ABLEHNUNG / REJECTION — wenn DE master strong refusal формулировку содержит,
+  переводить эту силу 1:1, не softeneть. Konkret:
+  Wenn DE sagt «Kyiv lehnt Treffen in Moskau ab — Hauptstadt des Aggressorstaats»,
+  übertragen wir die ablehnende Stärke 1:1 mit gleicher Wortwahl. NICHT abschwächen zu
+  einer hypothetischen Möglichkeit, NICHT die Akteure umbenennen oder andere Personen
+  ins Subjekt setzen — nur den Inhalt des DE-Masters wiedergeben.
 - KONKRETE ZAHLEN — KEINE NEUEN ERFINDUNGEN beim Übersetzen: wenn DE master
   spezifische Zahlen enthält (Preise, Index-Stände, Prozent, Gehälter),
   übertrage die GLEICHEN Zahlen 1:1. NIE eigene Zahlen hinzufügen, die nicht

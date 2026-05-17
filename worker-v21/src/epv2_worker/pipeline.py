@@ -28,6 +28,15 @@ from .seo import generate_seo
 logger = logging.getLogger(__name__)
 
 
+def _get_prompt_version() -> str:
+    """Lazy import to avoid prompts/__init__ circular at module load."""
+    try:
+        from .prompts import PROMPT_VERSION
+        return PROMPT_VERSION
+    except ImportError:
+        return ""
+
+
 @dataclass
 class PipelineContext:
     request: WorkerRequest
@@ -369,16 +378,59 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     if not rewrite.success:
         ctx.blockers.append(f"Rewrite failed: {rewrite.error}")
         return
-    _record_ai_runtime(ctx, "rewrite_de", rewrite.provider, rewrite.model, getattr(rewrite, "tokens", 0))
+    _record_ai_runtime(
+        ctx,
+        "rewrite_de",
+        rewrite.provider,
+        rewrite.model,
+        getattr(rewrite, "tokens", 0),
+        getattr(rewrite, "cached_tokens", 0),
+    )
 
-    # Anti-plagiarism gate (architecture phase 3) — surface the score.
-    # Failure does not block the pipeline yet; the WP-side gate uses the
-    # warning to decide on regeneration within its 2-attempts budget.
+    # Anti-plagiarism gate (architecture phase 3).
+    # R9 2026-05-14: bumped warning → BLOCKER. Items с <85% uniqueness теперь
+    # routed в ready_review (auto mode → rejected per policy). Legal Zitatrecht
+    # требует ≥30% own creation; threshold 85% даёт строгий запас. Baseline
+    # 6.8% items за 24h were near-copies (75-81% uniqueness) — теперь не публикуем.
     if not rewrite.uniqueness_passed:
-        ctx.warnings.append(
+        ctx.blockers.append(
             f"plagiarism_gate_de: uniqueness {rewrite.uniqueness_pct:.1f}% < 85%"
             + (f" ({rewrite.uniqueness_reason})" if rewrite.uniqueness_reason else "")
         )
+
+    # B3 (2026-05-12): Surface soft validator warnings (date / name) as
+    # blockers ONLY for severity=hard. Severity=soft warnings become ctx.warnings,
+    # PHP gate решает на основе importance / source / category. Раньше worker
+    # REJECT'ил весь rewrite на одно invented date или name → item терял retry
+    # budget на edge cases (Boris Pistorius, current-year dates).
+    for w in getattr(rewrite, "warnings", []) or []:
+        if not isinstance(w, dict):
+            continue
+        kind = str(w.get("kind", "unknown"))
+        value = str(w.get("value", ""))
+        severity = str(w.get("severity", "soft"))
+        msg = f"rewriter_{kind}: {value}"
+        if severity == "hard":
+            ctx.blockers.append(msg + " (severity=hard, явная фабрикация)")
+        else:
+            ctx.warnings.append(msg + " (severity=soft, PHP gate decides)")
+
+    # 2026-05-13 v21: title↔body numeric consistency check.
+    # ESC-style case 10906 — title "753 дронів", body "800 дронів". AI hallucinated
+    # title number или body number. Если title содержит число которого нет в body
+    # (3+ digit, чтобы не ловить даты/years) → soft warning.
+    title_text = (rewrite.title_de or "") + " " + (rewrite.lead_de or "")
+    body_text = rewrite.body_de or ""
+    title_numbers = set(re.findall(r"\b(\d{3,})\b", title_text))
+    body_numbers = set(re.findall(r"\b(\d{3,})\b", body_text))
+    if title_numbers:
+        missing_in_body = title_numbers - body_numbers
+        if missing_in_body:
+            sample = next(iter(missing_in_body))
+            ctx.warnings.append(
+                f"rewriter_title_body_number_drift: {sample} в title, нет в body "
+                f"(severity=soft, возможная фабрикация в заголовке)"
+            )
 
     ctx.german_master = LanguagePackage(
         lang="de",
@@ -388,12 +440,26 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         content=rewrite.body_de,
     )
 
+    # R20 2026-05-14: skip translations если rewrite_de produced hard blockers.
+    # Item уже routed → ready_review (auto mode → rejected), translations
+    # бы только сожгли 10-12K tokens впустую. Empty stub packages для downstream
+    # contract. Estimate 5-15% AI cost reduction в зависимости от reject rate.
+    if ctx.blockers:
+        ctx.ukrainian = LanguagePackage(lang="uk", title="", excerpt="", card_lead="", content="")
+        ctx.english = LanguagePackage(lang="en", title="", excerpt="", card_lead="", content="")
+        ctx.warnings.append(
+            "translations_skipped_rewrite_de_blocked: item routed to review/reject by DE master blockers, translations would burn tokens пустую"
+        )
+        return
+
     # 4. Translate to UK + EN in parallel.
     # Pass the upfront Story Card so the translator carries entity names,
     # geography, key facts and editorial verdict as invariants — UK/EN
     # framing must mirror the DE master 1:1, no softening of refusal /
     # aggressor framing across the language jump.
     _story_card_for_translate = _story_card_init if isinstance(_story_card_init, dict) else None
+    _original_lang_for_xlate = (getattr(ctx.request, "source_language", "") or "").strip().lower()
+    _original_text_for_xlate = getattr(ctx.request, "original_content", "") or getattr(ctx.request, "original_excerpt", "") or ""
     uk_task = asyncio.create_task(
         translate_from_german(
             rewrite.title_de, rewrite.lead_de, rewrite.body_de,
@@ -403,6 +469,8 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             provider_order=ctx.provider_order,
             card_lead_de=getattr(rewrite, "card_lead_de", "") or "",
             story_card=_story_card_for_translate,
+            original_text=_original_text_for_xlate,
+            original_lang=_original_lang_for_xlate,
         )
     )
     en_task = asyncio.create_task(
@@ -414,6 +482,8 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             provider_order=ctx.provider_order,
             card_lead_de=getattr(rewrite, "card_lead_de", "") or "",
             story_card=_story_card_for_translate,
+            original_text=_original_text_for_xlate,
+            original_lang=_original_lang_for_xlate,
         )
     )
     uk_result, en_result = await asyncio.gather(uk_task, en_task)
@@ -436,17 +506,41 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     if not uk_result.success:
         ctx.blockers.append(f"UK translation failed: {uk_result.error}")
     else:
-        _record_ai_runtime(ctx, "translate_uk", uk_result.provider, uk_result.model, getattr(uk_result, "tokens", 0))
+        _record_ai_runtime(
+            ctx,
+            "translate_uk",
+            uk_result.provider,
+            uk_result.model,
+            getattr(uk_result, "tokens", 0),
+            getattr(uk_result, "cached_tokens", 0),
+        )
+        # R9 2026-05-14: blocker (was warning) — see DE branch comment above.
         if not uk_result.uniqueness_passed:
-            ctx.warnings.append(
+            ctx.blockers.append(
                 f"plagiarism_gate_uk: uniqueness {uk_result.uniqueness_pct:.1f}% < 85%"
+            )
+        # 2026-05-13: filler phrase detector. 3+ filler фраз = soft warning → PHP gate routes.
+        filler_n = int(getattr(uk_result, "style_filler_count", 0) or 0)
+        if filler_n >= 3:
+            samples = getattr(uk_result, "style_filler_samples", []) or []
+            ctx.warnings.append(
+                f"uk_filler_phrases: {filler_n} штук "
+                f"({', '.join(samples[:3])}) — meta-комментарии без фактов"
             )
     if not en_result.success:
         ctx.blockers.append(f"EN translation failed: {en_result.error}")
     else:
-        _record_ai_runtime(ctx, "translate_en", en_result.provider, en_result.model, getattr(en_result, "tokens", 0))
+        _record_ai_runtime(
+            ctx,
+            "translate_en",
+            en_result.provider,
+            en_result.model,
+            getattr(en_result, "tokens", 0),
+            getattr(en_result, "cached_tokens", 0),
+        )
+        # R9 2026-05-14: blocker (was warning) — see DE branch comment above.
         if not en_result.uniqueness_passed:
-            ctx.warnings.append(
+            ctx.blockers.append(
                 f"plagiarism_gate_en: uniqueness {en_result.uniqueness_pct:.1f}% < 85%"
             )
     for lang, package in {"de": ctx.german_master, "uk": ctx.ukrainian, "en": ctx.english}.items():
@@ -479,7 +573,14 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     ctx.german_master.slug = seo.slug
     ctx.german_master.focus_keywords = seo.keywords
     if seo.success:
-        _record_ai_runtime(ctx, "seo_de", seo.provider, seo.model, getattr(seo, "tokens", 0))
+        _record_ai_runtime(
+            ctx,
+            "seo_de",
+            seo.provider,
+            seo.model,
+            getattr(seo, "tokens", 0),
+            getattr(seo, "cached_tokens", 0),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -901,6 +1002,11 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
         "warnings": list(response.warnings or []),
         "blockers": list(response.blockers or []),
         "canonical_language": "de",
+        # 2026-05-13: server-emitted prompt version. PHP сравнивает с
+        # EDITORIAL_PROMPT_VERSION константой — drift detection (worker prompt
+        # change без bump PHP константы → stale payloads keep passing through
+        # OR vice versa). Имеется приоритет над переписыванием PHP'ом.
+        "worker_prompt_version": _get_prompt_version(),
     }
 
     return {
@@ -915,16 +1021,32 @@ def build_normalized_payload(response: WorkerResponse) -> dict:
     }
 
 
-def _record_ai_runtime(ctx: PipelineContext, stage: str, provider: str, model: str, tokens: int = 0) -> None:
+def _record_ai_runtime(
+    ctx: PipelineContext,
+    stage: str,
+    provider: str,
+    model: str,
+    tokens: int = 0,
+    cached_tokens: int = 0,
+) -> None:
     provider = (provider or "").strip()
     model = (model or "").strip()
     if not provider and not model:
         return
-    entry = {"stage": stage, "provider": provider, "model": model}
+    entry: dict[str, Any] = {"stage": stage, "provider": provider, "model": model}
     try:
         tokens_int = max(0, int(tokens))
     except (TypeError, ValueError):
         tokens_int = 0
     if tokens_int:
         entry["tokens"] = tokens_int
+    try:
+        cached_int = max(0, int(cached_tokens))
+    except (TypeError, ValueError):
+        cached_int = 0
+    if cached_int:
+        # R5 2026-05-14: OpenAI prompt caching applies 50% discount on
+        # cached_tokens portion of prompt. Surface so daily cost analysis
+        # (R22) видит реальную картину savings.
+        entry["cached_tokens"] = cached_int
     ctx.ai_runtime.append(entry)

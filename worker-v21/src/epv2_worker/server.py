@@ -65,7 +65,7 @@ class AnalyzeStoryRequest(BaseModel):
     category_bias: str = ""
     openai_api_key: str = ""
     deepseek_api_key: str = ""
-    openai_model: str = "gpt-5-mini"
+    openai_model: str = "gpt-4o-mini"
     worker_token: str = ""
 
 
@@ -101,7 +101,7 @@ async def analyze_story(
             category_bias=req.category_bias,
             openai_api_key=req.openai_api_key,
             deepseek_api_key=req.deepseek_api_key,
-            openai_model=req.openai_model or "gpt-5-mini",
+            openai_model=req.openai_model or "gpt-4o-mini",
         )
         emb_task = compute_embedding(
             title=req.title,

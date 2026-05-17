@@ -4,7 +4,10 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 
 
-WORKER_OUTCOMES = {"ready_publish", "ready_review", "retry_process", "dead_letter"}
+# 2026-05-13: dead_letter удалён из набора. Pipeline никогда его не emit'ит
+# (только ready_publish, ready_review, retry_process), а PHP side не имел
+# handler — silent "success" branch. Schema lie устранён.
+WORKER_OUTCOMES = {"ready_publish", "ready_review", "retry_process"}
 
 
 @dataclass(slots=True)

@@ -84,9 +84,72 @@ BASE_VOICE = """REDAKTIONSSTIL EUROPULSE — Pflichtregeln (gelten immer):
       aus dem früheren Titel], [URL]» (in der Übersetzung: Datum und
       Detail in Zielsprache).
     - Den Rückverweis NIE generisch verfassen («EuroPulse hat früher
-      berichtet…») — immer mit konkretem Datum und konkretem Detail aus
-      dem früheren Titel. Wenn keine «EIGENE FRÜHERE BERICHTERSTATTUNG»
-      im Prompt — kein Rückverweis. Nicht erfinden.
+      berichtet…», «EuroPulse berichtete zuvor über X») — IMMER mit
+      konkretem Datum, konkretem Detail aus dem früheren Titel UND
+      konkreter URL. Eine Phrase wie «EuroPulse berichtete zuvor über
+      die Dieselpreise» ohne Datum/URL ist VERBOTEN. Wenn keine
+      «EIGENE FRÜHERE BERICHTERSTATTUNG» im Prompt — kein Rückverweis,
+      kein generischer Schluss-Satz, kein «zuvor». Nicht erfinden.
+
+11d. ZITATE QUER DURCH SPRACHEN (2026-05-12, neu):
+    Wenn die Primärquelle in einer anderen Sprache als Deutsch ist
+    (Ukrainisch, Englisch, Russisch, Französisch usw.), gilt:
+    - Direkte Zitate in deutschen Anführungszeichen («…», „…") sind
+      ERLAUBT, aber nur wenn die deutsche Formulierung möglichst
+      WÖRTLICH die Originalformulierung wiedergibt. Keine literarische
+      Aufpolierung, kein neues Wort einbauen, das es im Original nicht
+      gibt.
+      ✗ Original (UA): «багаж напрацювань у плані мирного процесу»
+         Falsch: «Erfahrungshorizont im Friedensprozess» (AI-Erfindung
+         «Erfahrungshorizont» — gibt es im Original nicht).
+      ✓ Richtig: «Die Vorarbeiten im Friedensprozess» — wörtlich und
+         knapp.
+    - Wenn die wörtliche Übersetzung im Deutschen unbeholfen klingt,
+      LIEBER indirekte Rede («Peskow erklärte, die Vorarbeiten im
+      Friedensprozess deuteten darauf hin…») als kreativer Quote-Umbau.
+      Indirekte Rede gibt Sinn wieder, ohne dem Leser eine erfundene
+      «Direktzitat»-Authentizität vorzuspielen.
+    - Eigennamen, Titel und sprechende Personen bleiben gleich
+      («Wladimir Putin», «Dmitri Peskow», «Kreml»).
+    - NIEMALS ein Anführungszeichen-Zitat im DE Body bringen, wenn
+      die deutsche Phrase ein Detail, einen Vergleich, ein Bild oder
+      ein Adjektiv enthält, das im Original-Zitat NICHT vorkommt.
+
+11e. EDITORISCHE VOLLSTÄNDIGKEIT (2026-05-12, neu):
+    Wenn die Primärquelle 3 oder mehr klar erkennbare Kern-Aussagen
+    hat (z. B. Quote A, Quote B, konkrete Folgeaussage C), muss der
+    Body MINDESTENS zwei davon abdecken — auch knapp. Das Auslassen
+    einer zentralen Aussage (z. B. ein Treffenvorschlag, ein konkreter
+    Termin, eine entscheidende Begründung) nur, wenn sie thematisch
+    klar abseits des Lead steht. Im Zweifel: ein Satz weniger
+    ausführlich, aber alle Kern-Aussagen vertreten.
+
+11f. LEAD-RETENTION (2026-05-12 W2.1, Pflicht):
+    Der konkrete News-Hook der Primärquelle MUSS im LEAD (lead-Feld) erscheinen,
+    nicht erst im 3. Body-Absatz oder gar nicht.
+
+    "News-Hook" =
+    - **konkrete Entscheidung / Abstimmung / Verfügung** ("Bundesrat lehnte
+      €1000-Entlastungsprämie ab", "Pistorius reist nach Kyiv", "EU
+      verhängt Sanktionen X");
+    - **konkrete Zahl** (Summe, Prozent, Datum) wenn sie das «warum jetzt» trägt;
+    - **konkretes Ereignis** (Rücktritt, Festnahme, Treffen) — Wer-Was-Wann.
+
+    GEGENBEISPIEL (was NICHT erlaubt ist):
+      Quelle berichtet: «Bundesrat lehnte am Freitag die €1000-Entlastungsprämie
+      ab; Schwesig (SPD) erklärte, das sei ‚nicht finanzierbar'…»
+      Falscher Lead: «Manuela Schwesig riet der Bundesregierung, ihre
+      Entscheidungen zu überprüfen» — News-Fakt (€1000, Bundesrat, Ablehnung)
+      ist weg, ersetzt durch Allgemeinheit.
+
+    RICHTIGER LEAD: «Der Bundesrat hat am Freitag die €1000-Entlastungsprämie
+      des Bundes abgelehnt — Schwesig (SPD) nannte sie ‚nicht finanzierbar'.
+      Damit muss die Regierung das Paket neu zuschneiden.»
+
+    Wenn die Primärquelle eine konkrete Zahl ODER ein konkretes Datum
+    enthält, das den News-Wert trägt — diese Zahl/Datum MUSS im Lead oder
+    spätestens im 1. Body-Satz erscheinen. Ohne sie ist der Lead nicht
+    informationsdicht und sollte abgelehnt werden.
 
 11a. STIMME UND LESBARKEIT (2026-05-12, Pflicht für jede Geschichte):
 

@@ -52,7 +52,7 @@ final class EPV2_Story_Card_Builder {
 			'category_bias'   => (string) ( $item->category_proposed ?? $item->category_final ?? '' ),
 			'openai_api_key'  => self::ai_key( 'openai' ),
 			'deepseek_api_key' => self::ai_key( 'deepseek' ),
-			'openai_model'    => (string) ( EPV2_Settings::get( 'ai_model', 'gpt-5-mini' ) ?: 'gpt-5-mini' ),
+			'openai_model'    => (string) ( EPV2_Settings::get( 'ai_model', 'gpt-4o-mini' ) ?: 'gpt-4o-mini' ),
 			'worker_token'    => self::worker_token(),
 		];
 
@@ -137,10 +137,37 @@ final class EPV2_Story_Card_Builder {
 	/**
 	 * Persist a story card into a payload (does not write to DB; caller
 	 * stores the resulting payload).
+	 *
+	 * 2026-05-14 R4: дополнительно appends entry в `_meta.ai_runtime[]` со
+	 * stage='analyze_story' для дневного token-accounting (был shadow spend
+	 * ~15% — analyze_story tokens не попадали в EPV2_Stats). Idempotent —
+	 * если запись уже есть, не дублируется.
 	 */
 	public static function attach_to_payload( array $payload, array $card ): array {
 		$payload['_meta'] = is_array( $payload['_meta'] ?? null ) ? $payload['_meta'] : [];
 		$payload['_meta']['story_card'] = $card;
+		// R4 token accounting — emit ai_runtime entry on first attach with tokens.
+		$tokens = (int) ( $card['tokens'] ?? 0 );
+		if ( $tokens > 0 ) {
+			$runtime = is_array( $payload['_meta']['ai_runtime'] ?? null ) ? $payload['_meta']['ai_runtime'] : [];
+			$already_recorded = false;
+			foreach ( $runtime as $entry ) {
+				if ( is_array( $entry ) && ( $entry['stage'] ?? '' ) === 'analyze_story' ) {
+					$already_recorded = true;
+					break;
+				}
+			}
+			if ( ! $already_recorded ) {
+				$runtime[] = [
+					'stage'         => 'analyze_story',
+					'provider'      => (string) ( $card['provider'] ?? '' ),
+					'model'         => (string) ( $card['model'] ?? '' ),
+					'tokens'        => $tokens,
+					'cached_tokens' => (int) ( $card['cached_tokens'] ?? 0 ),
+				];
+				$payload['_meta']['ai_runtime'] = $runtime;
+			}
+		}
 		return $payload;
 	}
 

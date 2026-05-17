@@ -20,7 +20,12 @@ if (! defined('ABSPATH')) {
 final class EPV2_Importance_Score {
 
 	/** Items at/above this score on quarantine go to manual_review; below go to rejected. */
-	const DEFAULT_THRESHOLD = 30;
+	// 2026-05-12 quality-first bump: 30 → 40. Operator таргет 40-60 master/день,
+	// 109 manual_review каждый день не успеть разгребать. Items с importance 30-39
+	// — это в основном second-tier материалы которые либо AI не построит, либо
+	// operator всё равно rejected. Бамп переводит их сразу в rejected, освобождая
+	// operator capacity для items 40+ где есть реальный шанс.
+	const DEFAULT_THRESHOLD = 40;
 
 	/**
 	 * Compute the score for a queue row + payload.

@@ -119,6 +119,10 @@ final class EPV2_Publish_Gate {
 			&& $schedule_publishable
 			&& ! $already_published;
 
+		// R16 2026-05-14: extension filter — third-party может override allowed
+		// decision based на business rules (e.g. manual hold, embargo, A/B test).
+		$allowed = (bool) apply_filters('epv2_publish_gate_decision', $allowed, $item, $payload, $context);
+
 		return [
 			'allowed' => $allowed,
 			'blockers' => $blockers,

@@ -245,6 +245,16 @@ final class EPV2_Publisher {
 		self::assert_multilingual_payload_ready($payload, $item);
 		$log_step('multilingual_ready');
 		$categories = self::normalize_categories((string) (implode(',', $payload['categories'] ?? []) ?: $item->category_proposed ?: $item->category_final ?: 'deutschland'));
+		// 2026-05-12: hierarchical augmentation. Если AI вернул только 'wirtschaft'
+		// но контент про Tesla/Rechenzentrum — добавляем 'auto'/'technologie' как
+		// подкатегорию (term_id 31377 / 31389). Аналогично для muenchen/bayern
+		// добавляется 'deutschland' parent.
+		if (class_exists('EPV2_Categorizer')) {
+			$de_lang = $payload['languages']['de'] ?? [];
+			$cat_title = (string) ($de_lang['title'] ?? $item->original_title ?? '');
+			$cat_body = (string) ($de_lang['content'] ?? $item->original_content ?? '');
+			$categories = EPV2_Categorizer::expand_with_subcategories($categories, $cat_title, $cat_body);
+		}
 		$existing_posts = self::extract_existing_posts($item);
 		$post_ids = [];
 		$post_term_ids = [];
@@ -433,6 +443,10 @@ final class EPV2_Publisher {
 			self::cleanup_stale_queue_posts((int) $item->id, $post_ids);
 			$log_step('finish', ['primary_post_id' => $primary_post_id]);
 
+			// R16 2026-05-14: extension hook для third-party integrations
+			// (analytics, search index, archive, etc.) после успешной publication.
+			do_action('epv2_after_publish', (int) $primary_post_id, $payload, (int) $item->id);
+
 		return $primary_post_id;
 	}
 
@@ -524,6 +538,14 @@ final class EPV2_Publisher {
 		}
 
 		$categories = self::normalize_categories((string) (implode(',', (array) ($payload['categories'] ?? [])) ?: $item->category_final ?: $item->category_proposed ?: 'deutschland'));
+		if (class_exists('EPV2_Categorizer')) {
+			$de_lang_r = $payload['languages']['de'] ?? [];
+			$categories = EPV2_Categorizer::expand_with_subcategories(
+				$categories,
+				(string) ($de_lang_r['title'] ?? $item->original_title ?? ''),
+				(string) ($de_lang_r['content'] ?? $item->original_content ?? '')
+			);
+		}
 		$source_dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? $payload['_meta']['source_dossier'] : [];
 		$source_url = EPV2_Source_Enricher::best_source_url($source_dossier, (string) $item->original_url);
 		$shared_media_url = trim((string) ($payload['featured_media_url'] ?? $payload['media_url'] ?? ''));
@@ -644,7 +666,11 @@ final class EPV2_Publisher {
 		if ($parts === []) {
 			return ['deutschland'];
 		}
-		return array_slice($parts, 0, 1);
+		// 2026-05-12 W2.3: keep up to 3 categories (was: array_slice 0,1 — drop'ало
+		// все кроме первой). expand_with_subcategories добавляет parent+child;
+		// если ограничивать до 1 — теряем sub-category. Limit 3 разумно для
+		// большинства items (primary + secondary + subcategory).
+		return array_slice($parts, 0, 3);
 	}
 
 	private static function term_ids_for_language(array $categories, string $lang): array {
@@ -776,11 +802,86 @@ final class EPV2_Publisher {
 		}
 	}
 
+	/**
+	 * Strip generic "EuroPulse berichtete zuvor über X" sentences that the AI
+	 * sometimes invents even when no prior_coverage entry was supplied. The
+	 * rule (base_voice.py 11c): such a backlink phrase is only allowed when
+	 * an actual prior coverage URL/date exists in the payload AND is included
+	 * in the sentence. Without a URL — strip the entire sentence.
+	 *
+	 * Сделано 2026-05-12 после audit'а: 4 из 4 sample-статей содержали
+	 * unbacked phrase «EuroPulse berichtete zuvor über X.» AI игнорирует
+	 * prompt rule 11c, нужен hard cleanup.
+	 */
+	public static function strip_unbacked_backlinks(string $content): string {
+		if ($content === '') return $content;
+		// Markers: phrase variations across DE/UK/EN. If none present → fast return.
+		// 2026-05-13 hotfix: добавлены "EuroPulse раніше" (catches "EuroPulse раніше повідомляв"),
+		// "EuroPulse has " (EN aux verb form), "EuroPulse hatte" (DE perfect). Старые markers
+		// были substring-only и не ловили variations с adverbs между "EuroPulse" и глаголом.
+		$markers = ['EuroPulse berichtete', 'EuroPulse hat ', 'EuroPulse hatte', 'EuroPulse повідом', 'EuroPulse раніше', 'EuroPulse писав', 'EuroPulse reported', 'EuroPulse previously', 'EuroPulse earlier', 'EuroPulse has '];
+		$has_any = false;
+		foreach ($markers as $m) {
+			if (stripos($content, $m) !== false) { $has_any = true; break; }
+		}
+		if (! $has_any) return $content;
+		// Split into paragraphs / sentences; drop any paragraph that contains a
+		// EuroPulse-self-reference phrase but has no <a href=...> inside.
+		// (A legitimate 11c-format backlink includes an URL — Source_Linker
+		// would have left the <a> already, or the AI was instructed to embed
+		// it. Without URL → it's the unbacked generic form.)
+		$paragraphs = preg_split('/(<\/p>|<\/li>|<br\s*\/?>(?:\s*<br\s*\/?>)?|\n\s*\n)/iu', $content, -1, PREG_SPLIT_DELIM_CAPTURE);
+		if (! is_array($paragraphs)) return $content;
+		$out = [];
+		foreach ($paragraphs as $chunk) {
+			$lower = mb_strtolower($chunk);
+			$hit = false;
+			foreach ($markers as $m) {
+				if (mb_stripos($lower, mb_strtolower($m)) !== false) { $hit = true; break; }
+			}
+			if ($hit) {
+				// Has the chunk a real URL? Then it's a legit backlink — keep.
+				if (preg_match('/<a\s[^>]*href=|https?:\/\//iu', $chunk)) {
+					$out[] = $chunk;
+					continue;
+				}
+				// Strip just the offending sentence inside the chunk (keep surrounding text).
+				// 2026-05-13: regex симметричен — opening/closing character classes
+				// синхронизированы [^.!?\n<>], чтобы не зацепить HTML attributes если
+				// AI вставил backlink внутри тега. Также non-greedy не съест соседние
+				// предложения между двумя markers подряд.
+				$cleaned = preg_replace(
+					'/[^.!?\n<>]*?(' . implode('|', array_map(static fn($m) => preg_quote($m, '/'), $markers)) . ')[^.!?\n<>]*[.!?]/iu',
+					'',
+					$chunk
+				);
+				if (is_string($cleaned)) {
+					// Collapse any double-space / orphan <p></p>.
+					$cleaned = preg_replace('/\s{2,}/u', ' ', $cleaned);
+					$cleaned = preg_replace('/<p>\s*<\/p>/iu', '', (string) $cleaned);
+					$out[] = $cleaned;
+				} else {
+					$out[] = $chunk;
+				}
+				continue;
+			}
+			$out[] = $chunk;
+		}
+		$joined = implode('', $out);
+		// Final cleanup after reassembly — split delimiter (e.g. </p>) lives in
+		// a separate array element, so empty paragraph shells only surface
+		// once the chunks are re-joined. Strip them now.
+		$joined = preg_replace('/<p[^>]*>\s*<\/p>/iu', '', $joined);
+		$joined = preg_replace('/(\n\s*){3,}/u', "\n\n", (string) $joined);
+		return (string) $joined;
+	}
+
 	private static function build_post_content(string $content, string $excerpt, string $media_url, array $inline_media_urls, string $source_url, string $lang, array $categories, int $post_id = 0, array $link_sources = []): string {
 		$prefix = EPV2_Media::content_prefix($media_url, $lang);
 		$inline_media_urls = array_values(array_filter(EPV2_Media::normalize_media_list($inline_media_urls), static function (string $url) use ($media_url): bool {
 			return $url !== '' && $url !== $media_url;
 		}));
+		$content = self::strip_unbacked_backlinks($content);
 		$clean_content = self::strip_duplicate_lead($content, $excerpt);
 		// Source-linking: первое упоминание каждого источника оборачиваем
 		// в <a>...</a> для legal-attribution. Применяется ДО media-инжекции

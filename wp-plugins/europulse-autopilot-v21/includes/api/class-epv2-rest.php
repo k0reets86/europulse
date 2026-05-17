@@ -103,6 +103,14 @@ final class EPV2_REST {
 			'callback' => [self::class, 'bridge_server_orchestrator'],
 			'permission_callback' => [self::class, 'can_bridge'],
 		]);
+
+		// R7 2026-05-14: publish_thread heartbeat — orchestrator POSTs after
+		// each watchdog cycle, PHP records in WP option для admin notice.
+		register_rest_route('epv2/v1', '/bridge/heartbeat', [
+			'methods' => 'POST',
+			'callback' => [self::class, 'bridge_heartbeat'],
+			'permission_callback' => [self::class, 'can_bridge'],
+		]);
 	}
 
 	public static function can_manage(): bool {
@@ -386,6 +394,20 @@ final class EPV2_REST {
 		$cleanup['rejected_non_publish_grade_new_rows'] = EPV2_Queue::sanitize_non_publish_grade_new_items(150);
 		$cleanup['rejected_low_grade_ready_publish_rows'] = EPV2_Queue::sanitize_low_grade_ready_publish_items(50);
 		$cleanup['workflow_quarantine'] = EPV2_Queue::quarantine_pathological_workflow_loops(100);
+		// 2026-05-12 B4 lifetime cap: chronic recyclers (>=25 process runs / 24h)
+		// — permanent reject. Защита от items которые крутятся через все salvage
+		// paths (auto_promote, watchdog_legacy_reset, selector pickup) и жгут AI
+		// без публикации (item 2530 ranger today).
+		$cleanup['force_rejected_chronic_recyclers'] = EPV2_Queue::force_reject_chronic_recyclers(20, 25);
+		// 2026-05-12 operator feedback: ready_review items застревают 25+ часов
+		// без auto-cleanup. Operator видит «готовые» в админ UI, но publish_gate
+		// их блокирует (payload_contract issues). Через 6h sanitize routes их
+		// в правильное terminal состояние.
+		$cleanup['sanitized_stale_ready_review'] = EPV2_Queue::sanitize_stale_ready_review_items(6, 50);
+		// 2026-05-12 critical bug fix: orphaned workflow_owner_token on state='new'
+		// items блокировал selector (item 2203, 38h old, держал «active» slot
+		// resume'ом каждый цикл → 11 fresh items не processed 81+ min).
+		$cleanup['cleared_orphaned_workflow_owners'] = EPV2_Watchdog::clear_orphaned_workflow_owners(30, 50);
 		$cleanup['promoted_ready_like_rows'] = EPV2_Queue::promote_ready_like_rows(50);
 		// Auto-router: state='new' items с готовым payload → ready_publish;
 		// state='new' items с manual_confirmation_required / terminal_reason
@@ -414,6 +436,18 @@ final class EPV2_REST {
 		// каждым maintenance тиком — admin (heavy path лимитирован 80 items по
 		// created_at) больше не вытесняет manual_review/ready_publish из видимости.
 		$cleanup['trimmed_terminal_rows'] = EPV2_Queue::trim_old_terminal_items(80);
+		// 2026-05-13 operator-spec: age-based cleanup для rejected items.
+		// Items в rejected/error/duplicate старше 2 часов удаляются из БД
+		// (diagnostic info остаётся в ep_epv2_log с 14-day retention).
+		// Освобождает админку от visual noise — оператор видит только свежий
+		// контекст работы pipeline (то что произошло за последние 2 часа).
+		$cleanup['trimmed_rejected_aged'] = EPV2_Queue::trim_rejected_older_than_hours(2);
+		// 2026-05-13 operator-spec: то же для review queue (manual_review +
+		// ready_review). Operator honestly: 99% этих items не будут вручную
+		// обработаны, поэтому через 2 часа они тоже удаляются. Items с
+		// активным manual_override stamp (оператор явно начал правку) — не
+		// удаляются, защита in-progress работы.
+		$cleanup['trimmed_review_queue_aged'] = EPV2_Queue::trim_review_queue_older_than_hours(2);
 		// prune_new_stale + trim_new_queue moved earlier in pipeline (P1.7
 		// reorder 2026-05-11) — runs перед reactivate/auto_route handlers
 		// to prevent work on doomed items.
@@ -425,6 +459,10 @@ final class EPV2_REST {
 			$cleanup['watchdog_polylang']        = EPV2_Watchdog::repair_polylang_links(30);
 			$cleanup['watchdog_dedupe']          = EPV2_Watchdog::dedupe_published_posts(20);
 			$cleanup['watchdog_legacy_reset']    = EPV2_Watchdog::auto_reset_legacy_quarantine(20);
+		}
+		// R13 2026-05-14: Tier 1 alerts через Notifier (Telegram).
+		if (class_exists('EPV2_Alerts')) {
+			$cleanup['alerts_fired'] = EPV2_Alerts::check_and_alert();
 		}
 		return rest_ensure_response([
 			'ok' => true,
@@ -454,5 +492,31 @@ final class EPV2_REST {
 			return null;
 		}
 		return gmdate('Y-m-d H:i:s', $timestamp);
+	}
+
+	/**
+	 * R7 2026-05-14: publish_thread heartbeat endpoint.
+	 *
+	 * Orchestrator POSTs after each publish_thread watchdog cycle (~60s).
+	 * Body: `{thread_alive: bool, last_beat_age_s: int}`.
+	 * Side effect: WP option `epv2_publish_thread_heartbeat` updated with
+	 * `{ts: UTC, thread_alive: bool, last_beat_age_s: int}` JSON.
+	 *
+	 * Admin notice в dashboard рендеринге: если `now - ts > 90s` ИЛИ
+	 * `thread_alive=false` → notice "Publisher inactive".
+	 */
+	public static function bridge_heartbeat(WP_REST_Request $request): WP_REST_Response {
+		$params = $request->get_json_params();
+		$thread_alive = ! empty($params['thread_alive']);
+		$last_beat_age_s = isset($params['last_beat_age_s']) ? max(0, (int) $params['last_beat_age_s']) : 0;
+		update_option('epv2_publish_thread_heartbeat', [
+			'ts' => gmdate('Y-m-d H:i:s'),
+			'thread_alive' => $thread_alive,
+			'last_beat_age_s' => $last_beat_age_s,
+		], false);
+		return rest_ensure_response([
+			'ok' => true,
+			'action' => 'heartbeat',
+		]);
 	}
 }

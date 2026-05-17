@@ -123,6 +123,32 @@ final class EPV2_Worker_Client {
 				}
 			}
 
+			// B1 (2026-05-12): flag thin dossier post-enrichment в payload.
+			// Process_item читает _meta.thin_dossier_blocker и роутит item
+			// в manual_review БЕЗ AI вызова. Раньше item шёл в rewrite с
+			// thin source, AI fabrication'ил детали → manual_review через
+			// build_de_master cap. 59% manual_review сегодня имели thin
+			// dossier как root cause.
+			if ( class_exists( 'EPV2_Content_Kinds' ) ) {
+				$spec_for_check = EPV2_Content_Kinds::spec_for( $kind );
+				$required_sources = (int) ( $spec_for_check['sources_min'] ?? 1 );
+				$actual_sources = (int) ( $existing['_meta']['source_count'] ?? 1 );
+				$enrichment_ran = ! empty( $existing['_meta']['enrichment']['ran'] );
+				if (
+					$required_sources >= 2
+					&& $actual_sources < $required_sources
+					&& $enrichment_ran
+					&& ! empty( $spec_for_check['enrichment_required'] )
+				) {
+					$existing['_meta']['thin_dossier_blocker'] = [
+						'kind'             => $kind,
+						'required_sources' => $required_sources,
+						'actual_sources'   => $actual_sources,
+						'flagged_at'       => gmdate( 'Y-m-d H:i:s' ),
+					];
+				}
+			}
+
 			// Prior-coverage backlink (2026-05-12 operator-feedback): найти
 			// недавние EuroPulse posts на ту же тему, передать worker'у. Он
 			// добавит конкретный rückverweis в хвост body. Pass-through —

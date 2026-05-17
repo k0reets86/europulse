@@ -711,6 +711,42 @@ final class EPV2_Collector {
 					]);
 					return false;
 				}
+				// 2026-05-12 — quality-first tightening (operator request target 40-60 master/day):
+				// publishable_estimate='low' от Story Card означает «этот материал
+				// слабый — спам/листикл/clickbait». До сих pipeline пускал такие
+				// items в AI rewrite и они в 70% случаев заканчивались rejected
+				// после ~5K токенов сожжённых. Теперь блокируем pre-AI.
+				// Исключение: breaking news signal (operator manually flagged
+				// breaking, OR source_priority=10 top-tier) — пропускаем т.к.
+				// breaking может быть «низкий estimate но высокая срочность».
+				$pre_ai_estimate = strtolower((string) ($story_card['publishable_estimate'] ?? ''));
+				$is_breaking_candidate = ! empty($analysis['breaking']) || ! empty($analysis['top_story'])
+					|| ! empty($story_card['breaking_candidate']) || ! empty($story_card['breaking_watch']);
+				$source_priority = isset($source->priority) ? (int) $source->priority : 5;
+				if ($pre_ai_estimate === 'low' && ! $is_breaking_candidate && $source_priority < 9) {
+					self::audit_candidate($item, $source, $analysis, 'ingest', 'story_card_pub_estimate_low', [
+						'reason' => (string) ($story_card['publishable_estimate_reason'] ?? $story_card['publishable_reason'] ?? ''),
+						'editorial_match' => $editorial_match,
+						'source_priority' => $source_priority,
+					]);
+					return false;
+				}
+				// Borderline editorial_match с medium/low pub_est без breaking → тоже cut.
+				// Освобождает manual_review queue для items которые реально стоят
+				// operator review.
+				if (
+					$editorial_match === 'borderline'
+					&& in_array($pre_ai_estimate, ['low', 'medium'], true)
+					&& ! $is_breaking_candidate
+					&& $source_priority < 9
+				) {
+					self::audit_candidate($item, $source, $analysis, 'ingest', 'story_card_borderline_low_quality', [
+						'editorial_match' => $editorial_match,
+						'estimate' => $pre_ai_estimate,
+						'source_priority' => $source_priority,
+					]);
+					return false;
+				}
 				// Семантический event-signature dedup. current_id=0 (item ещё
 				// не save'нут), функция skip'ает self-check.
 				$event_dup = EPV2_Deduplicator::is_event_duplicate(
@@ -888,13 +924,28 @@ final class EPV2_Collector {
 		if (count($sources) < 2) {
 			return $sources;
 		}
+		// C1 (2026-05-12): source success feedback loop. Adjust effective
+		// priority by 7-day success ratio (published / collected). Топ-20%
+		// sources получают +1 priority (бамп вверх), bottom-20% -1 (вниз).
+		// Если bottom источник имеет prio=3, его effective prio становится 2,
+		// и shuffle ставит его ниже. Pipeline постепенно self-tune'ится на
+		// best-performing источники без manual operator интервенции.
+		$ratios = self::source_success_ratios();
 		$buckets = [];
 		foreach ($sources as $s) {
 			$prio = (int) ($s->priority ?? 5);
-			$buckets[$prio] = $buckets[$prio] ?? [];
-			$buckets[$prio][] = $s;
+			$src_id = (int) ($s->id ?? 0);
+			$ratio_bonus = 0;
+			if ($src_id > 0 && isset($ratios[$src_id])) {
+				$tier = (string) $ratios[$src_id]['tier'];
+				if ($tier === 'top') $ratio_bonus = 1;
+				elseif ($tier === 'bottom') $ratio_bonus = -1;
+			}
+			$effective_prio = $prio + $ratio_bonus;
+			$buckets[$effective_prio] = $buckets[$effective_prio] ?? [];
+			$buckets[$effective_prio][] = $s;
 		}
-		krsort($buckets); // priority DESC
+		krsort($buckets); // effective priority DESC
 		$out = [];
 		foreach ($buckets as $bucket) {
 			if (count($bucket) > 1) {
@@ -905,6 +956,66 @@ final class EPV2_Collector {
 			}
 		}
 		return $out;
+	}
+
+	/**
+	 * Compute per-source success ratio (published / collected) over 7 days.
+	 * Returns map: source_id => ['ratio' => float, 'published' => int, 'collected' => int, 'tier' => 'top'|'mid'|'bottom'].
+	 * Cached per-request via static variable (collect cycle calls shuffle once).
+	 *
+	 * Логика tiers:
+	 *  - top    — top 20% sources by success_ratio (минимум 5 collected items для qualifying)
+	 *  - bottom — bottom 20% sources
+	 *  - mid    — остальные (включая sources с <5 collected — недостаточно данных)
+	 */
+	private static function source_success_ratios(): array {
+		static $cache = null;
+		if ($cache !== null) {
+			return $cache;
+		}
+		global $wpdb;
+		$rows = $wpdb->get_results(
+			"SELECT source_id,
+				COUNT(*) AS collected,
+				SUM(state='published') AS published
+			FROM {$wpdb->prefix}epv2_queue
+			WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+				AND source_id > 0
+			GROUP BY source_id
+			HAVING collected >= 5",
+			ARRAY_A
+		);
+		if (! is_array($rows) || $rows === []) {
+			return $cache = [];
+		}
+		$with_ratio = [];
+		foreach ($rows as $r) {
+			$sid = (int) ($r['source_id'] ?? 0);
+			$col = max(1, (int) ($r['collected'] ?? 0));
+			$pub = (int) ($r['published'] ?? 0);
+			$with_ratio[$sid] = [
+				'ratio' => $pub / $col,
+				'published' => $pub,
+				'collected' => $col,
+				'tier' => 'mid',
+			];
+		}
+		// Sort by ratio DESC; top 20% → tier=top, bottom 20% → tier=bottom.
+		uasort($with_ratio, static fn($a, $b) => $b['ratio'] <=> $a['ratio']);
+		$total = count($with_ratio);
+		$top_cut = max(1, (int) ceil($total * 0.2));
+		$bot_cut = max(1, (int) ceil($total * 0.2));
+		$i = 0;
+		foreach ($with_ratio as $sid => &$entry) {
+			if ($i < $top_cut) {
+				$entry['tier'] = 'top';
+			} elseif ($i >= $total - $bot_cut) {
+				$entry['tier'] = 'bottom';
+			}
+			$i++;
+		}
+		unset($entry);
+		return $cache = $with_ratio;
 	}
 
 

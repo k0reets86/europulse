@@ -38,6 +38,7 @@ final class EPV2_Trends {
 			}));
 			update_option(self::OPTION_HISTORY, $history, false);
 			update_option(self::OPTION_LAST_REFRESH, time(), false);
+			self::bust_history_cache();
 		}
 		return $history;
 	}
@@ -276,9 +277,28 @@ final class EPV2_Trends {
 		return 0;
 	}
 
+	// 2026-05-13 perf: per-request cache. epv2_trend_history option = ~180KB
+	// serialized PHP. WordPress unserialize'ит при каждом get_option() —
+	// admin page вызывает per-row через analyze_item → trend_signal → history,
+	// 50+ строк × 180KB unserialize = заметно медленно. WP объект-кэш этого
+	// не покрывает (option NOT autoloaded). Кэш на длительность request'а
+	// безопасен — данные обновляются раз в ~25 минут (refresh() сам пишет
+	// фрешный value, тогда же надо bust'нуть кэш).
+	private static ?array $history_cache = null;
+
 	private static function history(): array {
+		if (self::$history_cache !== null) {
+			return self::$history_cache;
+		}
 		$history = get_option(self::OPTION_HISTORY, []);
-		return is_array($history) ? $history : [];
+		self::$history_cache = is_array($history) ? $history : [];
+		return self::$history_cache;
+	}
+
+	// Bust history cache after writing — refresh() updates the option, любой
+	// subsequent history() в том же request должен видеть новые данные.
+	private static function bust_history_cache(): void {
+		self::$history_cache = null;
 	}
 
 	private static function regions(): array {

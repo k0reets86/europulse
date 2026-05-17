@@ -7,13 +7,100 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from openai import AsyncOpenAI
 
-from .openai_compat import completion_debug, completion_text, completion_total_tokens, reasoning_extra_body
+from .openai_compat import (
+    completion_cached_tokens,
+    completion_debug,
+    completion_text,
+    completion_total_tokens,
+    reasoning_extra_body,
+)
 
 logger = logging.getLogger(__name__)
+
+# R10 Phase 2 2026-05-14: spaCy uk_core_news_lg для lemma-based filler detection.
+# Lazy load (один раз на process). Catches morphological variants which regex
+# misses (e.g. "слід зазначити" / "слід зазначати" / "було зазначено" share
+# lemma sequence ['слід', 'зазначити']).
+_UK_NLP = None
+_UK_NLP_LOAD_FAILED = False
+
+def _get_uk_nlp():
+    global _UK_NLP, _UK_NLP_LOAD_FAILED
+    if _UK_NLP is not None:
+        return _UK_NLP
+    if _UK_NLP_LOAD_FAILED:
+        return None
+    try:
+        import spacy  # type: ignore
+        _UK_NLP = spacy.load("uk_core_news_lg")
+        logger.info("spaCy uk_core_news_lg loaded for lemma-based filler detection")
+        return _UK_NLP
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spaCy UK model unavailable, lemma filler detection skipped: %s", exc)
+        _UK_NLP_LOAD_FAILED = True
+        return None
+
+# Canonical filler lemma sequences (2-3 lemmas). Catches all morphological
+# variants automatically. Не пересекается со старым regex detector — purely
+# additive. Operator может tune threshold отдельно по `lemma_filler_count`.
+_UK_FILLER_LEMMA_SEQUENCES: list[tuple[str, ...]] = [
+    ("слід", "зазначити"),
+    ("слід", "зауважити"),
+    ("варто", "зазначити"),
+    ("варто", "зауважити"),
+    ("необхідно", "враховувати"),
+    ("у", "цей", "контекст"),
+    ("в", "цей", "контекст"),
+    ("як", "видно"),
+    ("як", "відомо"),
+    ("як", "вже", "зазначатися"),
+    ("на", "наш", "погляд"),
+    ("на", "думка", "експерт"),
+    ("експерт", "вважати"),
+    ("аналітик", "припускати"),
+    ("спостерігач", "відзначати"),
+    ("важливо", "відзначити"),
+    ("слід", "пам'ятати"),
+    ("в", "результат", "це"),
+    ("як", "результат"),
+    ("у", "висновок"),
+    ("в", "цілий"),
+    ("в", "загальний"),
+    ("в", "сучасний", "умова"),
+]
+
+
+def _count_filler_lemmas(text: str) -> tuple[int, list[str]]:
+    """R10 Phase 2: lemma-based filler counter. Returns (count, samples).
+
+    Catches morphological variants which regex misses. Idempotent —
+    каждое lemma sequence считается раз на occurrence в тексте.
+    """
+    if not text:
+        return 0, []
+    nlp = _get_uk_nlp()
+    if nlp is None:
+        return 0, []
+    try:
+        doc = nlp(text[:50000])  # cap to avoid pathological docs
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spaCy UK pass failed: %s", exc)
+        return 0, []
+    lemmas = [tok.lemma_.lower() for tok in doc if not tok.is_punct and not tok.is_space]
+    total = 0
+    samples: list[str] = []
+    for seq in _UK_FILLER_LEMMA_SEQUENCES:
+        n = len(seq)
+        for i in range(len(lemmas) - n + 1):
+            if tuple(lemmas[i:i + n]) == seq:
+                total += 1
+                if len(samples) < 5:
+                    samples.append(" ".join(seq))
+    return total, samples
 
 
 @dataclass
@@ -32,11 +119,17 @@ class TranslationResult:
     provider: str = ""
     model: str = ""
     tokens: int = 0
+    # R5 2026-05-14: OpenAI prompt caching (50% discount). DeepSeek → 0.
+    cached_tokens: int = 0
     # Anti-plagiarism gate (architecture phase 3) — translation is also
     # checked against the primary-source text in its source language.
     uniqueness_pct: float = 100.0
     uniqueness_passed: bool = True
     uniqueness_reason: str = ""
+    # 2026-05-13: filler / style concerns. Не блокируют публикацию, но pipeline
+    # эмитит soft warnings → PHP gate решает на основе importance/source.
+    style_filler_count: int = 0
+    style_filler_samples: list = field(default_factory=list)
 
 
 _SYSTEM_PROMPT_TEMPLATE = """Du bist ein professioneller Übersetzer für die Nachrichtenplattform EuroPulse.today.
@@ -69,6 +162,24 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
 - Für Ukrainisch: „Ticker" im Nachrichtenkontext nicht als holprige „стрічка" übersetzen. Nutze „хроніка", „оновлення" oder „онлайн-оновлення"; „Nahost-Ticker" → „Хроніка подій на Близькому Сході" oder „Оновлення щодо Близького Сходу".
 - Für Ukrainisch: „gesetzliche Krankenkassen" immer als „каси обов’язкового медичного страхування" übersetzen. Niemals „законодавчі фонди", „державні страхові фонди", „фармацевтичний сектор" oder ähnliche Kalques.
 - Für Ukrainisch: keine Kanzleisprache und keine deutschen Kalques. Vermeide Formeln wie „вбачає потребу", „з огляду на", „у повідомленні не деталізовано", „подальші парламентські консультації", „органи, відповідальні за законодавство". Schreibe stattdessen lebendig und präzise: „вважає, що пакет треба змінити", „під час розгляду в парламенті", „деталей поки немає".
+- 2026-05-13: KOMPOUND-SUBSTANTIVE — präzise Ein-Wort-Übersetzungen, KEINE Adjektivkette aus 3-4 Wörtern. Deutsche Compound nouns ins Ukrainische:
+  • Gruppendynamik → «групова динаміка» (НЕ «груповий динамічний веселощі»)
+  • Sicherheitsbedenken → «занепокоєння щодо безпеки»
+  • Wirtschaftsaufschwung → «економічне піднесення»
+  • Klimakrise → «кліматична криза»
+  • Bürokratieabbau → «дебюрократизація» / «скорочення бюрократії»
+  • Energiewende → «енергетичний перехід» / «енергоперехід»
+  • Mitspracherecht → «право голосу»
+  • Vertrauensvotum → «вотум довіри»
+  • Cybersicherheit → «кібербезпека»
+  • Künstliche Intelligenz → «штучний інтелект» (НЕ «КІ» abbreviation)
+  • Verteidigungsfähigkeit → «обороноздатність» (НЕ «військова здатність»)
+  • Reformbedarf → «потреба у реформах» (НЕ «вбачає потребу»)
+  • Gesetzentwurf → «законопроєкт»
+  • Wahlumfrage → «опитування про вибори»
+  • Sprachgrenze → «мовний бар'єр»
+  Wenn unsicher — eine zusammengefasste 2-Wort-Phrase ist besser als eine 4-Wort-Adjektivkette, die keinen syntaktischen Sinn ergibt.
+- POLITISCHE ZUSCHREIBUNG: «Democratic and Republican lawmakers» → «законодавці-демократи та республіканці» (НЕ «демократичні та республіканські законодавці»). Parteizugehörigkeit als Apposition mit Bindestrich, nicht als Adjektiv.
 - Für Ukrainisch — Genus-Übereinstimmung Pflicht: deutsche Substantive übernehmen ihr Geschlecht NICHT auf das ukrainische Wort. „die Parade" (DE: feminin) → „парад" (UK: maskulin). Adjektive, Verben und Pronomen müssen sich nach dem ukrainischen Geschlecht richten, nicht nach dem deutschen. Korrekt: „військовий парад", „пройшов парад", „цей парад"; FALSCH: „військова парад", „пройшла парад", „ця парад". Das Gleiche gilt für: „der Bericht" → „звіт" (m, nicht f), „der Saldo" → „баланс" (m), „der Abend" → „вечір" (m), „die Krise" → „криза" (f, übereinstimmt), „das Unternehmen" → „підприємство" (n, übereinstimmt), „der Beschluss" → „рішення" (n, NICHT m), „die Sitzung" → „засідання" (n, NICHT f).
 - Titel, Lead und erster Absatz müssen unterschiedliche Aufgaben erfüllen: Titel meldet die Nachricht, Lead erklärt die Relevanz in 1–2 Sätzen, der erste Absatz führt mit neuen Details weiter. Nicht alle drei mit derselben Quellenformel oder denselben ersten Wörtern beginnen.
 - Der erste Absatz darf den Lead nicht nacherzählen. Er muss konkretisieren: wer betroffen ist, was sich ändert, welche offenen Punkte es gibt oder was als Nächstes passiert.
@@ -77,6 +188,7 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
   • EN: «possible consequences», «could affect», «official confirmation is still pending», «further details are not yet known», «this raises questions», «it remains to be seen», «observers see this as», «this could indicate…», «this reflects…», «this underscores growing concerns», «growing concerns about», «highlights mounting tensions», «in light of this», «against this backdrop» (если без конкретного факта).
   Statt solcher leeren Sätze: kürzere Übersetzung. Lieber 150 dichte Wörter als 350 mit Wassertext.
 - Wenn das deutsche Original einen Absatz hat, der nur aus solchen Filler-Sätzen besteht — diesen Absatz in der Übersetzung WEGLASSEN. Lückenhafte Quelle bleibt lückenhafte Quelle, in jeder Sprache.
+- ALLE ABSÄTZE DECKEN (2026-05-12 W2.1, перенесено из base_voice.py): Der DE-Master hat N Absätze (paragraphs <p>...</p>). Die UK- und EN-Übersetzung MÜSSEN ebenfalls N Absätze haben — keine wegen "Filler" zusammenfassen, keinen vollständig auslassen. AUSNAHME: Wenn ein Absatz wirklich NUR aus Filler-Phrasen (siehe Liste oben) besteht — dann darf er entfallen (vorherige Regel). Aber niemals einen substantiven Absatz weglassen, nur weil der Translator ihn als "redundant" empfindet. Erster Absatz ist NIE Filler — er trägt Subjekt-Einführung; wenn UK den ersten weglässt, hängen Pronomen im zweiten Absatz in der Luft.
 - ОСОБОЕ ПРАВИЛО для UK/EN финальных абзацев: VERBOTEN — последний абзац не должен быть meta-комментарием типа «Це свідчить про зростаюче занепокоєння…» / «This reflects growing concerns…». Финальный абзац ДОЛЖЕН содержать конкретный факт: следующий шаг с датой, реакцию с именем-функцией-цитатой, исторический контекст с числами. Если такого факта нет — финальный абзац ОПУСТИТЬ.
 - BEWAHREN ABLEHNUNG / REJECTION — wenn DE master strong refusal формулировку содержит,
   переводить эту силу 1:1, не softeneть. Konkret:
@@ -105,6 +217,23 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
   „Experten" / „Analysten" / „Sprecher" anonym erwähnt — KEINEN Namen wie
   „Dr. Müller" oder „Robert Edwards" erfinden, um die Translation natürlicher
   zu machen.
+
+- ПЕРЕКЛАД БЕЗ КАЛЬКИ І ДОСЛІВНОСТІ — semantic accuracy критично важлива:
+  • "channel crossings" → "перетинання Ла-Маншу" або "переправа через Ла-Манш", НЕ "перетворення" (transformations)
+  • "small boat crossings" → "переправа малими човнами" / "small boat crossings", НЕ "перетворення на малих човнах"
+  • "coalition" → "коаліція" / "coalition", НЕ калька з конкретними посиланнями
+  • "reform stau" / "reform backlog" → "затримка реформ" / "reform stalemate"
+  • "strike" → "страйк" (workforce action) АБО "удар" (military) — контекст вирішує
+  • "operation" → "операція" (military/medical) АБО "експлуатація" (system) — never confuse
+  • Якщо англійський/німецький термін має decadeя значень — перекладай за context, не за first dictionary entry
+- ENGLISH translation guards:
+  • Cyrillic chars NEVER appear in English text. Якщо в source Ukrainian/Russian name (e.g. "Зеленський") — transliterate via BGN/PCGN ("Zelensky" / "Zelenskyy")
+  • German umlauts стандартно preserved у English (Söder, Müller, Bärbel — leave as-is)
+  • Russian names: Putin, Lavrov, Medvedev — standard romanization
+- UKRAINIAN translation guards:
+  • Latin chars (Bärbel, Friedrich, Pistorius) — transliterate via DSTU 9112 (Бербель, Фрідріх, Пісторіус) — НЕ залишай half-Latin
+  • Brand names стандартно preserve (AfD, CDU, EU, NATO, SAP, BMW)
+  • Visual confusables — Latin "o" в Cyrillic context це BUG, завжди Cyrillic "о"
 
 ВАЖЛИВО — РОСІЯ-УКРАЇНА — обов'язкова редакційна лінія (БЕЗ винятків):
 EuroPulse висвітлює повномасштабну агресивну війну Росії проти України з лютого 2022 року.
@@ -167,6 +296,8 @@ async def translate_from_german(
     provider_order: list[tuple[str, str, str]] | None = None,
     card_lead_de: str = "",
     story_card: dict | None = None,
+    original_text: str = "",
+    original_lang: str = "",
 ) -> TranslationResult:
     system = _SYSTEM_PROMPT_TEMPLATE.format(target_lang=target_lang)
     card_lead_block = (
@@ -174,11 +305,39 @@ async def translate_from_german(
         if card_lead_de else ""
     )
     story_block = _format_story_card_for_translator(story_card) if story_card else ""
+    # 2026-05-12 — Cross-language quote fidelity. Pipeline UA-source: 24tv,
+    # pravda, Ukrinform etc. → DE master → UK перевод. Двойной hop теряет
+    # original Peskov-style direct quotes (audit нашёл «Erfahrungshorizont»
+    # вместо «багаж напрацювань»). Если target_lang совпадает с source_lang
+    # (UA-источник → UK перевод, EN-источник → EN перевод), даём translator'у
+    # original-text как референс для direct quotes: цитаты в кавычках брать
+    # из original, а не back-translate из DE.
+    _norm = (original_lang or "").strip().lower()[:2]
+    _target_code = "uk" if target_lang.lower().startswith("ukrain") else ("en" if target_lang.lower().startswith("engl") else "")
+    original_block = ""
+    if original_text and _norm and _target_code and _norm == _target_code:
+        snippet = original_text[:2500]
+        original_block = (
+            f"\n\n--- ORIGINAL ({original_lang.upper()}) — Quelle der Story ---\n"
+            f"{snippet}\n--- ENDE ORIGINAL ---\n\n"
+            f"WICHTIG (Cross-Language-Treue, 2026-05-12):\n"
+            f"Diese Story wurde ursprünglich auf {target_lang} berichtet. Der DE-Master oben\n"
+            f"ist Übersetzung aus dem Originaltext. Für deine {target_lang}-Version:\n"
+            f"  1. Direkte Zitate (in Anführungszeichen) MÜSSEN möglichst wörtlich aus dem\n"
+            f"     ORIGINAL oben übernommen werden, nicht back-translated aus dem DE-Master.\n"
+            f"     Beispiel UK: wenn das Original «багаж напрацювань» sagt — du schreibst\n"
+            f"     ebenfalls «багаж напрацювань», NICHT «Erfahrungshorizont» aus dem DE.\n"
+            f"  2. Eigennamen, Funktionen, Geografie kommen aus DE-Master (oder Story-Card).\n"
+            f"     Fakten und Reihenfolge des DE-Master bleiben erhalten.\n"
+            f"  3. Wenn das Original ein Zitat hat, das im DE-Master gekürzt wurde — du nimmst\n"
+            f"     trotzdem nur das, was der DE-Master abdeckt. Keine Zusatz-Fakten aus Original.\n"
+        )
     user = (
         f"TITEL (DE):\n{title_de}\n\n"
         f"TEASER (DE):\n{lead_de}{card_lead_block}\n\n"
         f"ARTIKEL (DE):\n{body_de[:3000]}"
         f"{story_block}"
+        f"{original_block}"
     )
     source_text = f"{title_de}\n{lead_de}\n{body_de}"
 
@@ -429,28 +588,59 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             target_lang=target_lang,
         )
         if target_lang.lower().startswith("ukrain"):
-            title = _normalize_ukrainian_names(title)
-            lead = _normalize_ukrainian_names(lead)
-            body = _normalize_ukrainian_names(body)
+            # 2026-05-12 W1.1: grammar fix first (catch closer to model output),
+            # then name normalization (DE→UA transliteration).
+            title = _normalize_ukrainian_grammar(_normalize_ukrainian_names(title))
+            lead = _normalize_ukrainian_grammar(_normalize_ukrainian_names(lead))
+            body = _normalize_ukrainian_grammar(_normalize_ukrainian_names(body))
         title, lead, body = _strip_translation_added_first_names(title, lead, body, source_text, target_lang)
         if target_lang.lower().startswith("ukrain"):
-            title = _fix_ukrainian_gender_agreement(_normalize_ukrainian_style(_normalize_ukrainian_title(title)))
-            lead = _fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(lead)))
-            body = _fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(body)))
+            title = _normalize_ukrainian_grammar(_fix_ukrainian_gender_agreement(_normalize_ukrainian_style(_normalize_ukrainian_title(title))))
+            lead = _normalize_ukrainian_grammar(_fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(lead))))
+            body = _normalize_ukrainian_grammar(_fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(body))))
             title, lead, body = _strip_translation_added_first_names(title, lead, body, source_text, target_lang)
-            title = _fix_ukrainian_gender_agreement(_normalize_ukrainian_style(_normalize_ukrainian_title(_normalize_ukrainian_names(title))))
-            lead = _fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(lead))))
-            body = _fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(body))))
+            # 2026-05-16 Q-fix: hybrid Latin-Cyrillic words detector + fixer.
+            # Применяется LAST в chain'е чтоб catch'ить остатки после всех
+            # других normalizers. Confusables substitution + DE→UK transliteration.
+            title = _fix_latin_cyrillic_hybrid_words(_normalize_ukrainian_grammar(_fix_ukrainian_gender_agreement(_normalize_ukrainian_style(_normalize_ukrainian_title(_normalize_ukrainian_names(title))))))
+            lead = _fix_latin_cyrillic_hybrid_words(_normalize_ukrainian_grammar(_fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(lead))))))
+            body = _fix_latin_cyrillic_hybrid_words(_normalize_ukrainian_grammar(_fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(body))))))
             title, lead, body = _repair_ukrainian_structure(title, lead, body)
             warnings = _ukrainian_style_warnings(title, lead, body)
             if warnings:
                 raise ValueError("ukrainian editorial style check failed: " + "; ".join(warnings))
+            # 2026-05-13: filler phrase counter — НЕ блокирует, soft signal.
+            filler_count, filler_samples = _count_ukrainian_filler_phrases(
+                f"{title}\n{lead}\n{body}"
+            )
+            # R10 Phase 2 2026-05-14: lemma-based augmentation. Catches
+            # morphological variants regex пропускает. Combined в общий
+            # style_filler_count, samples deduplicated.
+            lemma_count, lemma_samples = _count_filler_lemmas(
+                f"{title}\n{lead}\n{body}"
+            )
+            if lemma_count > 0:
+                filler_count += lemma_count
+                # Dedupe samples
+                existing = set(filler_samples)
+                for s in lemma_samples:
+                    if s not in existing and len(filler_samples) < 8:
+                        filler_samples.append(s)
+                        existing.add(s)
         else:
             title = _normalize_non_ukrainian_source_names(title)
             lead = _normalize_non_ukrainian_source_names(lead)
             body = _normalize_non_ukrainian_source_names(body)
+            # 2026-05-16 Q-fix EN: soft repair Cyrillic chars before hard error.
+            # Earlier code raised ValueError on any Cyrillic — discarded full
+            # translation. Now: confusables fix + BGN/PCGN transliteration
+            # FIRST, then hard error if STILL contaminated (safety net).
+            title = _fix_cyrillic_latin_hybrid_words_en(title)
+            lead = _fix_cyrillic_latin_hybrid_words_en(lead)
+            body = _fix_cyrillic_latin_hybrid_words_en(body)
             if _english_contains_cyrillic(title, lead, body):
                 raise ValueError("english translation contains Cyrillic text")
+            filler_count, filler_samples = 0, []
         return TranslationResult(
             title=title,
             lead=lead,
@@ -458,6 +648,9 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             card_lead=card_lead,
             success=True,
             tokens=completion_total_tokens(resp),
+            cached_tokens=completion_cached_tokens(resp),
+            style_filler_count=filler_count,
+            style_filler_samples=filler_samples,
         )
     except Exception as exc:
         logger.warning("Translation via %s failed: %s", provider, exc)
@@ -477,21 +670,201 @@ def _normalize_ukrainian_title(title: str) -> str:
     return cleaned
 
 
+# 2026-05-16 Q-fix: Latin↔Cyrillic confusables. AI sometimes outputs hybrid
+# tokens like "Бärbel" (Cyrillic Б + Latin ärbel) or "чорнo" (Latin o instead
+# of Cyrillic о). Look-alikes substitution + German→Ukrainian transliteration.
+_LATIN_TO_CYRILLIC_CONFUSABLES: dict[str, str] = {
+    'a': 'а', 'c': 'с', 'e': 'е', 'o': 'о', 'p': 'р', 'x': 'х', 'y': 'у',
+    'i': 'і', 'A': 'А', 'B': 'В', 'C': 'С', 'E': 'Е', 'H': 'Н', 'K': 'К',
+    'M': 'М', 'O': 'О', 'P': 'Р', 'T': 'Т', 'X': 'Х', 'Y': 'У', 'I': 'І',
+    # German umlauts → Ukrainian approximations
+    'ä': 'е', 'ö': 'е', 'ü': 'ю', 'Ä': 'Е', 'Ö': 'Е', 'Ü': 'Ю', 'ß': 'сс',
+    'é': 'е', 'è': 'е', 'ê': 'е', 'É': 'Е', 'È': 'Е', 'Ê': 'Е',
+    'á': 'а', 'à': 'а', 'â': 'а', 'Á': 'А', 'À': 'А', 'Â': 'А',
+    'í': 'і', 'ì': 'і', 'î': 'і', 'Í': 'І', 'Ì': 'І', 'Î': 'І',
+    'ó': 'о', 'ò': 'о', 'ô': 'о', 'Ó': 'О', 'Ò': 'О', 'Ô': 'О',
+    'ú': 'у', 'ù': 'у', 'û': 'у', 'Ú': 'У', 'Ù': 'У', 'Û': 'У',
+}
+
+# German→Ukrainian phonetic rules (multi-char first for greedy match).
+# Based on DSTU 9112 + common journalistic practice (Spiegel/Zeit name guides).
+_DE_TO_UK_DIGRAPHS: list[tuple[str, str]] = [
+    ('Sch', 'Ш'), ('sch', 'ш'),
+    ('Tsch', 'Ч'), ('tsch', 'ч'),
+    ('Ch', 'Х'), ('ch', 'х'),
+    ('Ck', 'К'), ('ck', 'к'),
+    ('Ph', 'Ф'), ('ph', 'ф'),
+    ('Sh', 'Ш'), ('sh', 'ш'),
+    ('Th', 'Т'), ('th', 'т'),
+    ('Ei', 'Ай'), ('ei', 'ай'),
+    ('Ie', 'І'), ('ie', 'і'),
+    ('Eu', 'Ой'), ('eu', 'ой'),
+    ('Au', 'Ау'), ('au', 'ау'),
+]
+_DE_TO_UK_SINGLES: dict[str, str] = {
+    'A': 'А', 'a': 'а', 'B': 'Б', 'b': 'б', 'C': 'К', 'c': 'к',
+    'D': 'Д', 'd': 'д', 'E': 'Е', 'e': 'е', 'F': 'Ф', 'f': 'ф',
+    'G': 'Г', 'g': 'г', 'H': 'Г', 'h': 'г', 'I': 'І', 'i': 'і',
+    'J': 'Й', 'j': 'й', 'K': 'К', 'k': 'к', 'L': 'Л', 'l': 'л',
+    'M': 'М', 'm': 'м', 'N': 'Н', 'n': 'н', 'O': 'О', 'o': 'о',
+    'P': 'П', 'p': 'п', 'Q': 'К', 'q': 'к', 'R': 'Р', 'r': 'р',
+    'S': 'С', 's': 'с', 'T': 'Т', 't': 'т', 'U': 'У', 'u': 'у',
+    'V': 'В', 'v': 'в', 'W': 'В', 'w': 'в', 'X': 'Кс', 'x': 'кс',
+    'Y': 'И', 'y': 'и', 'Z': 'Ц', 'z': 'ц',
+    'Ä': 'Е', 'ä': 'е', 'Ö': 'Е', 'ö': 'е', 'Ü': 'Ю', 'ü': 'ю',
+    'ß': 'сс',
+}
+
+
+def _transliterate_de_word_to_uk(word: str) -> str:
+    """Apply German→Ukrainian phonetic transliteration на single word."""
+    # Apply digraphs first (longer matches greedy)
+    for src, dst in _DE_TO_UK_DIGRAPHS:
+        word = word.replace(src, dst)
+    # Then single chars
+    return ''.join(_DE_TO_UK_SINGLES.get(c, c) for c in word)
+
+
+# Brands/abbreviations которые НЕ трансли терировать (keep Latin) — uppercase only.
+_KEEP_LATIN_TOKENS: frozenset[str] = frozenset({
+    'AfD', 'CDU', 'CSU', 'SPD', 'FDP', 'BSW', 'CDU/CSU',
+    'NATO', 'EU', 'UN', 'OSZE', 'WHO', 'WTO', 'IWF', 'IMF', 'OECD',
+    'USA', 'UK', 'DE', 'FR', 'DDR', 'BRD',
+    'BBC', 'CNN', 'ARD', 'ZDF', 'BR24', 'NDR', 'WDR', 'SWR', 'MDR', 'RBB',
+    'Süddeutsche', 'Spiegel', 'Welt', 'FAZ', 'Bild', 'Zeit', 'Stern',
+    'Reuters', 'AFP', 'dpa', 'AP', 'EPA',
+    'Bundestag', 'Bundesrat',
+    'Apple', 'Google', 'Microsoft', 'Meta', 'OpenAI', 'Tesla', 'X',
+    'Samsung', 'Sony', 'Siemens', 'BMW', 'VW', 'Audi', 'Mercedes',
+    'SAP', 'Deutsche Bank', 'Commerzbank',
+})
+
+
+def _fix_latin_cyrillic_hybrid_words(text: str) -> str:
+    """2026-05-16 Q-fix: detect tokens с Latin chars в Ukrainian context, fix.
+
+    Strategy:
+    1. Tokenize text preserving punctuation
+    2. For each token decide action:
+       - Brand/acronym whitelist → keep
+       - Mixed Cyr+Lat → confusables sub OR transliterate
+       - Pure Latin word in Cyrillic context → transliterate (German name)
+    3. Cyrillic context detection: ≥3 Cyrillic tokens в окрестности (sentence/window)
+    """
+    if not text:
+        return text
+
+    def _classify(word: str) -> tuple[bool, bool, int, int]:
+        """Returns (has_cyr, has_lat, cyr_count, lat_count)."""
+        cyr = sum(1 for c in word if 'Ѐ' <= c <= 'ӿ')
+        lat = sum(1 for c in word if ('a' <= c.lower() <= 'z') or c in 'äöüÄÖÜß')
+        return (cyr > 0, lat > 0, cyr, lat)
+
+    def _is_alpha_token(t: str) -> bool:
+        return bool(t) and any(c.isalpha() for c in t)
+
+    def _is_brand(word: str) -> bool:
+        return word in _KEEP_LATIN_TOKENS
+
+    def _is_pure_latin_word(word: str) -> bool:
+        """Pure Latin alphabetical (no digits, no Cyrillic)."""
+        if not word or not any(c.isalpha() for c in word):
+            return False
+        for c in word:
+            if c.isalpha():
+                if not (('a' <= c.lower() <= 'z') or c in 'äöüÄÖÜßéèêíìîáàâóòôúùû'):
+                    return False
+        return True
+
+    # Tokenize preserving separators
+    tokens = re.split(r'(\s+|[.,;:!?()«»"\'\-—–]+)', text)
+
+    # Detect Cyrillic-dominant context (≥30% of alpha tokens are Cyrillic)
+    alpha_tokens = [t for t in tokens if _is_alpha_token(t)]
+    if not alpha_tokens:
+        return text
+    cyr_token_count = sum(1 for t in alpha_tokens if _classify(t)[0])
+    is_cyrillic_context = cyr_token_count >= max(3, len(alpha_tokens) // 3)
+
+    def _fix_word(word: str) -> str:
+        has_cyr, has_lat, cyr_count, lat_count = _classify(word)
+        # Pure Cyrillic — nothing to do
+        if has_cyr and not has_lat:
+            return word
+        # Pure Latin in Cyrillic context → check brand whitelist first, иначе transliterate
+        if has_lat and not has_cyr:
+            if _is_brand(word):
+                return word
+            # Short uppercase (likely acronym not in whitelist) — keep
+            if len(word) <= 4 and word.isupper():
+                return word
+            # Pure Latin word in Cyrillic context → German→Ukrainian translit
+            if is_cyrillic_context and _is_pure_latin_word(word):
+                return _transliterate_de_word_to_uk(word)
+            return word
+        # Mixed Cyr+Lat (hybrid bug)
+        if has_cyr and has_lat:
+            if _is_brand(word):
+                return word
+            # Mostly Cyrillic → confusables substitution first
+            if cyr_count >= lat_count:
+                fixed = ''.join(_LATIN_TO_CYRILLIC_CONFUSABLES.get(c, c) for c in word)
+                _, has_lat2, _, _ = _classify(fixed)
+                if not has_lat2:
+                    return fixed
+                return _transliterate_de_word_to_uk(fixed)
+            # Mostly Latin with Cyrillic stuck — full transliteration
+            return _transliterate_de_word_to_uk(word)
+        return word
+
+    return ''.join(_fix_word(t) if _is_alpha_token(t) else t for t in tokens)
+
+
 def _normalize_ukrainian_names(text: str) -> str:
     cleaned = text
+    # 2026-05-12 W1.2: extended dict для DE→UA name transliteration.
+    # Раньше gpt-4o-mini генерил «Манюела» (Manuela), «Швезіг» с typos.
+    # Whitelist common German political/public figures с canonical UA-form.
     replacements = {
-        "Міерш": "Мірш",
-        "Міерша": "Мірша",
-        "Миерш": "Мірш",
-        "Мерш": "Мірш",
-        "Зеєдер": "Зедер",
-        "Зеєдера": "Зедера",
-        "Зьодер": "Зедер",
-        "Зьодера": "Зедера",
-        "Сьодер": "Зедер",
-        "Сьодера": "Зедера",
-        "Зодер": "Зедер",
-        "Зодера": "Зедера",
+        # Miersch / Söder fixes (legacy)
+        "Міерш": "Мірш", "Міерша": "Мірша", "Миерш": "Мірш", "Мерш": "Мірш",
+        "Зеєдер": "Зедер", "Зеєдера": "Зедера",
+        "Зьодер": "Зедер", "Зьодера": "Зедера",
+        "Сьодер": "Зедер", "Сьодера": "Зедера",
+        "Зодер": "Зедер", "Зодера": "Зедера",
+        # 2026-05-12: common DE first names — typo fix
+        "Манюела": "Мануела", "Манюели": "Мануели", "Манюелу": "Мануелу",
+        "Манюелі": "Мануелі", "Манюелою": "Мануелою",
+        "Барбель": "Бербель",  # Bas / Wagenknecht — capital Bärbel
+        "Аннелі": "Аннелізе",  # rare typo
+        # Schwesig variants
+        "Швезиг": "Швезіг", "Швесиг": "Швезіг", "Швесіг": "Швезіг",
+        # Pistorius variants
+        "Пісторіус": "Пісторіус",  # canonical
+        "Пісторюс": "Пісторіус", "Пістореус": "Пісторіус",
+        # Habeck
+        "Хабек": "Габек", "Хабека": "Габека",
+        # Baerbock
+        "Беєрбок": "Бербок", "Берьок": "Бербок",
+        # Faeser
+        "Феєсер": "Фезер", "Феєсера": "Фезера",
+        # Lauterbach
+        "Лаутербах": "Лаутербах",
+        # Klingbeil
+        "Клінгбайл": "Клінгбайль",
+        # Lang (Ricarda)
+        "Лянг": "Ланг",
+        # 2026-05-13 v21: institutional names — Abraham Accords canonical UA
+        "Абрамські угоди": "Угоди Авраама",
+        "Абрамських угод": "Угод Авраама",
+        "Абрамським угодам": "Угодам Авраама",
+        "Авраамські угоди": "Угоди Авраама",
+        "Авраамських угод": "Угод Авраама",
+        # FC Bayern brand fix — Bayern (Bavaria) vs Bayer (Leverkusen)
+        "Байєр Мюнхен": "Баварія Мюнхен", "Байер Мюнхен": "Баварія Мюнхен",
+        "ФК Байєр Мюнхен": "Баварія Мюнхен", "ФК Байер Мюнхен": "Баварія Мюнхен",
+        # Common typos in toponyms
+        "Мекленбург-Передньої Померанії": "Мекленбург-Передньої Померанії",
     }
     for src, dst in replacements.items():
         cleaned = re.sub(rf"\b{re.escape(src)}\b", dst, cleaned, flags=re.U)
@@ -499,6 +872,158 @@ def _normalize_ukrainian_names(text: str) -> str:
     cleaned = re.sub(r"\bМірш\s*\((?:Miersch)\)", "Мірш", cleaned, flags=re.I | re.U)
     cleaned = re.sub(r"\bЗедер\s*\((?:Söder|Soeder)\)", "Зедер", cleaned, flags=re.I | re.U)
     return cleaned
+
+
+_UK_INVALID_VERB_FIXES = {
+    # 2026-05-12 W1.1: gpt-4o-mini / deepseek-chat генерят invalid Ukrainian
+    # verb forms (закликаій/закликалий/стикаєтьсій/піднімалосє). Это не существующие
+    # словоформы — model fails суффикс. Whitelist replace.
+    "закликаій": "закликала", "закликалий": "закликала", "закликаліз": "закликала",
+    "стикаєтьсій": "стикається", "стикаєтьсі": "стикається",
+    "піднімалосє": "піднімалося", "піднімалосіі": "піднімалося",
+    "розповідаії": "розповідає", "розповідаіі": "розповідає",
+    "обговорюіі": "обговорює", "обговорюіт": "обговорює",
+    "відмовляіт": "відмовляє", "вирішуіт": "вирішує",
+    "оприлюдниій": "оприлюднила", "опубліковаій": "опублікувала",
+    "повідомиій": "повідомила", "заявиій": "заявила",
+    "пояснилоій": "пояснила", "розповіій": "розповіла",
+    # 2026-05-13: новые наблюдаемые в проде варианты -уій (verb-stem + invalid suffix)
+    "спрощуій": "спрощує", "ускладнюій": "ускладнює",
+    "забезпечуій": "забезпечує", "продовжуій": "продовжує",
+    "вимагаій": "вимагає", "пропонуій": "пропонує",
+    "очікуій": "очікує", "розглядаій": "розглядає",  # dead entry "розгляддаій" удалён v21
+    "посилюій": "посилює", "підтримуій": "підтримує",
+}
+
+
+def _normalize_ukrainian_grammar(text: str) -> str:
+    """2026-05-12 W1.1 — post-validation на invalid UA verb endings.
+
+    gpt-4o-mini и deepseek-chat иногда генерят суффикс-ломаные слова типа
+    `закликалий` (должно `закликала`), `стикаєтьсій` (`стикається`). Это
+    не typo и не legitimate dialect — это model failure. Hardcoded replace.
+    Если future regression — добавлять в _UK_INVALID_VERB_FIXES.
+    """
+    cleaned = text
+    for src, dst in _UK_INVALID_VERB_FIXES.items():
+        cleaned = re.sub(rf"\b{re.escape(src)}\b", dst, cleaned, flags=re.U | re.I)
+    # 2026-05-13 W1.1-hotfix: removed broad-stem regex `([а-яіїєґ]{3,})(алий|авій|авіт)\b`
+    # — corrupted legitimate masculine adjectives "тривалий", "кривавій", "відсталий",
+    # "довготривалий" → feminine "тривала". Lambda branches also both returned 'ала'.
+    # Whitelist-only approach (_UK_INVALID_VERB_FIXES) — false negatives < false positives.
+    # Forms ending «-ьсій» (instead of -ься) — narrow, safe
+    cleaned = re.sub(r"\b([а-яіїєґ]{3,})ьсій\b", lambda m: m.group(1) + 'ься', cleaned, flags=re.U | re.I)
+    # Forms ending «-осє» (instead of -ося) — narrow, safe
+    cleaned = re.sub(r"\b([а-яіїєґ]{3,})осє\b", lambda m: m.group(1) + 'ося', cleaned, flags=re.U | re.I)
+    return cleaned
+
+
+# 2026-05-16 Q-fix EN side: Cyrillic→Latin transliteration + hybrid token fixer.
+# Same pattern как UK side, но обратное направление. AI sometimes leaves
+# Cyrillic chars в English output, или производит hybrid tokens.
+
+# Cyrillic→Latin confusables (visual look-alikes). For mostly-Latin token
+# with 1-2 Cyrillic chars stuck — direct substitution.
+_CYRILLIC_TO_LATIN_CONFUSABLES: dict[str, str] = {
+    'а': 'a', 'в': 'v', 'с': 'c', 'е': 'e', 'о': 'o', 'р': 'p', 'х': 'x', 'у': 'y',
+    'і': 'i', 'А': 'A', 'В': 'V', 'С': 'C', 'Е': 'E', 'Н': 'H', 'К': 'K',
+    'М': 'M', 'О': 'O', 'Р': 'P', 'Т': 'T', 'Х': 'X', 'У': 'Y', 'І': 'I',
+}
+
+# Full Cyrillic → Latin transliteration (BGN/PCGN Ukrainian + GOST 7.79 Russian).
+# Used for full-word Cyrillic tokens stuck в English text. Digraphs first.
+_UK_RU_TO_EN_DIGRAPHS: list[tuple[str, str]] = [
+    ('Щ', 'Shch'), ('щ', 'shch'),
+    ('Ж', 'Zh'), ('ж', 'zh'),
+    ('Ч', 'Ch'), ('ч', 'ch'),
+    ('Ш', 'Sh'), ('ш', 'sh'),
+    ('Х', 'Kh'), ('х', 'kh'),
+    ('Ц', 'Ts'), ('ц', 'ts'),
+    ('Ю', 'Yu'), ('ю', 'yu'),
+    ('Я', 'Ya'), ('я', 'ya'),
+    ('Є', 'Ye'), ('є', 'ye'),
+    ('Ї', 'Yi'), ('ї', 'yi'),
+    ('Й', 'Y'), ('й', 'y'),
+]
+_UK_RU_TO_EN_SINGLES: dict[str, str] = {
+    'А': 'A', 'а': 'a', 'Б': 'B', 'б': 'b', 'В': 'V', 'в': 'v',
+    'Г': 'H', 'г': 'h',  # UK pronunciation (RU = G но UK = H)
+    'Ґ': 'G', 'ґ': 'g',
+    'Д': 'D', 'д': 'd', 'Е': 'E', 'е': 'e',
+    'З': 'Z', 'з': 'z', 'И': 'Y', 'и': 'y',  # UK 'и' = 'y' (RU 'и' = 'i')
+    'І': 'I', 'і': 'i', 'К': 'K', 'к': 'k', 'Л': 'L', 'л': 'l',
+    'М': 'M', 'м': 'm', 'Н': 'N', 'н': 'n', 'О': 'O', 'о': 'o',
+    'П': 'P', 'п': 'p', 'Р': 'R', 'р': 'r', 'С': 'S', 'с': 's',
+    'Т': 'T', 'т': 't', 'У': 'U', 'у': 'u', 'Ф': 'F', 'ф': 'f',
+    'Ы': 'Y', 'ы': 'y',  # RU specific
+    'Э': 'E', 'э': 'e',  # RU specific
+    'Ь': "'", 'ь': "'", 'Ъ': '"', 'ъ': '"',
+}
+
+
+def _transliterate_cyrillic_word_to_en(word: str) -> str:
+    """Apply Cyrillic→Latin (BGN/PCGN UA + GOST RU) transliteration to word."""
+    for src, dst in _UK_RU_TO_EN_DIGRAPHS:
+        word = word.replace(src, dst)
+    return ''.join(_UK_RU_TO_EN_SINGLES.get(c, c) for c in word)
+
+
+def _fix_cyrillic_latin_hybrid_words_en(text: str) -> str:
+    """2026-05-16 Q-fix EN: detect tokens с Cyrillic chars в English context.
+
+    Mirror logic _fix_latin_cyrillic_hybrid_words for UK side:
+    1. Tokenize preserving punctuation
+    2. For each alpha token:
+       - Pure Latin → unchanged
+       - Pure Cyrillic в Latin context → transliterate via BGN/PCGN
+       - Mixed → confusables substitution first, fallback to full translit
+    3. Latin context = ≥30% Latin tokens OR ≥3 Latin tokens
+    """
+    if not text:
+        return text
+
+    def _classify(word: str) -> tuple[bool, bool, int, int]:
+        cyr = sum(1 for c in word if 'Ѐ' <= c <= 'ӿ')
+        lat = sum(1 for c in word if ('a' <= c.lower() <= 'z') or c in 'äöüÄÖÜßéèêíìîáàâóòôúùû')
+        return (cyr > 0, lat > 0, cyr, lat)
+
+    def _is_alpha_token(t: str) -> bool:
+        return bool(t) and any(c.isalpha() for c in t)
+
+    tokens = re.split(r'(\s+|[.,;:!?()«»"\'\-—–]+)', text)
+
+    # Detect Latin-dominant context
+    alpha_tokens = [t for t in tokens if _is_alpha_token(t)]
+    if not alpha_tokens:
+        return text
+    lat_token_count = sum(1 for t in alpha_tokens if _classify(t)[1])
+    is_latin_context = lat_token_count >= max(3, len(alpha_tokens) // 3)
+
+    def _fix_word(word: str) -> str:
+        has_cyr, has_lat, cyr_count, lat_count = _classify(word)
+        # Pure Latin — unchanged
+        if has_lat and not has_cyr:
+            return word
+        # Pure Cyrillic в Latin context → transliterate
+        if has_cyr and not has_lat:
+            if is_latin_context:
+                return _transliterate_cyrillic_word_to_en(word)
+            return word
+        # Mixed
+        if has_cyr and has_lat:
+            # Mostly Latin → confusables substitution
+            if lat_count >= cyr_count:
+                fixed = ''.join(_CYRILLIC_TO_LATIN_CONFUSABLES.get(c, c) for c in word)
+                _, _, cyr_after, _ = _classify(fixed)
+                if cyr_after == 0:
+                    return fixed
+                # Still has Cyrillic — full transliteration
+                return _transliterate_cyrillic_word_to_en(fixed)
+            # Mostly Cyrillic — full transliteration
+            return _transliterate_cyrillic_word_to_en(word)
+        return word
+
+    return ''.join(_fix_word(t) if _is_alpha_token(t) else t for t in tokens)
 
 
 def _normalize_non_ukrainian_source_names(text: str) -> str:
@@ -749,6 +1274,82 @@ def _move_ukrainian_source_attribution_sentence(text: str) -> str:
             rest = rest[:-1].rstrip()
         return f"{rest}, {formula} {source}."
     return text
+
+
+# 2026-05-13 anti-filler detector. AI gpt-4o-mini систематически вставляет
+# meta-filler фразы в украинский перевод, хотя prompt-правила (rule 75-78)
+# их явно запрещают. Detector не блокирует — только counts, потом soft warning.
+# Если 3+ фраз в одном переводе — операторская проверка (PHP gate).
+_UK_FILLER_PATTERNS = [
+    # Прямые запрещённые формулировки (от prompt'а)
+    r"\bможливі наслідки\b",
+    r"\bце рішення може вплинути\b",
+    r"\bце може вплинути\b",
+    r"\bофіційне підтвердження поки що відсутнє\b",
+    r"\bподальші деталі поки не відомі\b",
+    r"\bце піднімає питання\b",
+    r"\bзалишається спостерігати\b",
+    r"\bекспертам? вбачають? у цьому\b",
+    r"\bце свідчить про\b",
+    r"(?<!\sяк )\bце підкреслю(є|ють)\b",  # "як підкреслює виробник" = legit attribution
+    r"\bце відображає\b",
+    r"\bце вказує на\b",
+    r"\bце демонстру(є|ють)\b",
+    r"\bце показу(є|ють)\b",
+    # 2026-05-13 v21: убран \b до "ситуація" — Cyrillic + \b edge давал silent failure.
+    # Worker auditor: "Ситуація показує" в 10864 не матчился, хотя должен.
+    r"(?:^|[\s,])[Сс]итуація показу(є|ють)\b",
+    r"\bдебати .* показу(ють|є)\b",
+    r"\bзростаюч(е|у) занепокоєння\b",
+    r"\bзростаючу стурбованість\b",
+    # 2026-05-13 v21: "викликає занепокоєння" с named entity — legit (e.g. "обстріли
+    # викликають занепокоєння міжнародних організацій"). Ловим только когда после
+    # неё нет конкретного субъекта (anaphoric usage). Heuristic: следом просто
+    # ".", end of sentence, или "що".
+    r"\bвиклика(є|ють)?\s+занепокоєння(?=\s*[.,;:]|\s+що|\s*$)",
+    r"\bвиклика(в|ли|ло)\s+занепокоєння\b",  # past tense — added v21
+    r"\bу зв['ʼ]язку з цим\b",
+    r"\bз огляду на це\b",
+    r"\bна тлі цього\b",
+    r"\bв контексті цього\b",
+    # Generic-too-generic meta-comments (rule 80 — final paragraph)
+    r"\bекспертами? попереджа(ють|є) про\b",
+    r"\bекспертами? застеріга(ють|є)\b",
+    r"\bаналітики (бачать|очікують|прогнозують)\b",
+    # Bureaucratic calques от prompt'а
+    r"\bвбача(є|ють)? потребу\b",
+    r"\bвійськов(а|у)\s+здатність\b",  # calque на "military capability"
+    # 2026-05-13 v21 — РУ→UK калька «на фоне» (production hit в 10889).
+    # Натуральное украинское: «на тлі» (рядом «на тлі цього» = filler, но
+    # «на фоні» — это уже RU stylistic borrowing, ловим всегда).
+    r"\bна фоні\b",
+    # 2026-05-13 v21 — generic finale formula (10906 в проде).
+    r"\b(поточні події|ці події|ця ситуація)\s+підкреслю(є|ють)\b",
+    # 2026-05-13 v21 — vague demonstrative anaphora без factual content (4+ hits в выборке).
+    r"\bці\s+(події|атаки|заходи|практики|обставини|тенденції)\s+(показу|вказу|свідча|підкреслю)",
+    # 2026-05-13 v21 — narrative cliché.
+    r"\bце вже\s+(не\s+)?(перший|другий|третій|четвертий|сотий)\s+(раз|випадок|спроба|інцидент)\b",
+    # 2026-05-13 v21 — Newspeak / hyperbolic framing (10914 hit).
+    r"\bісторичн\w+\s+(прорив|момент|подія|зустріч)\b",
+    # 2026-05-13 v21 — quantifier filler (production: "все більше під тиском", "все більше людей").
+    r"\bвсе більше\s+(під|людей|компаній|випадків|загрожує|стає)",
+    # 2026-05-13 v21 — Wasserrohrbruch / другие compound noun calque issues — placeholder.
+]
+
+
+def _count_ukrainian_filler_phrases(text: str) -> tuple[int, list[str]]:
+    """Returns (count, sample_phrases). Operates case-insensitive Unicode-aware."""
+    if not text:
+        return 0, []
+    samples = []
+    total = 0
+    for pat in _UK_FILLER_PATTERNS:
+        matches = re.findall(pat, text, re.I | re.U)
+        if matches:
+            total += len(matches)
+            if len(samples) < 5:
+                samples.append(matches[0] if isinstance(matches[0], str) else " ".join(matches[0]) if isinstance(matches[0], tuple) else str(matches[0]))
+    return total, samples
 
 
 def _ukrainian_style_warnings(title: str, lead: str, body: str) -> list[str]:

@@ -6,16 +6,13 @@ if (! defined('ABSPATH')) {
 
 final class EPV2_Admin {
 	private const QUEUE_PAGE_FETCH_LIMIT = 80;
-	private const QUEUE_SNAPSHOT_CACHE_TTL = 3;
-	// Refresh interval bumped 2500 → 10000 (operator-feedback 2026-05-10):
-	// AI processing занимает 30-60 сек и item проходит через 5 state-
-	// transitions (new → processing_de → retry_process → ready_publish
-	// или published). При 2.5-сек snapshot admin делал 12 refreshes за
-	// один AI цикл и item визуально перепрыгивал между «Новые» / «В работе»
-	// / «Готово» каждые несколько секунд. 10 сек — реактивно достаточно
-	// для operator, но stable рендер (одна secция fade за visit).
-	private const QUEUE_SNAPSHOT_REFRESH_MS = 10000;
-	private const QUEUE_SNAPSHOT_REQUEST_COOLDOWN = 5;
+	// R14 2026-05-14: reduced TTLs after R1+R2+R3 disabled item recycle.
+	// Original bump 2500→10000 был из-за auto_promote recycle (items
+	// перепрыгивали каждые 30s). Сейчас items стабильнее — можно faster
+	// refresh. Worst case lag: 1+2+5=8s (vs 13s до R14).
+	private const QUEUE_SNAPSHOT_CACHE_TTL = 1;
+	private const QUEUE_SNAPSHOT_REFRESH_MS = 5000;
+	private const QUEUE_SNAPSHOT_REQUEST_COOLDOWN = 2;
 
 	private static function require_manage_capability(): void {
 		if (! current_user_can('manage_europulse_autopilot')) {
@@ -115,6 +112,7 @@ final class EPV2_Admin {
 		$issues = self::latest_human_issues();
 		echo '<div class="wrap"><h1>EuroPulse AutoPilot</h1>';
 		self::render_automation_safeguard_notice();
+		self::render_publish_heartbeat_notice();
 		echo '<p>Текущий контракт сайта загружен для языков: <strong>' . esc_html(implode(', ', EPV2_Site_Profile::get_languages())) . '</strong></p>';
 		echo '<div style="margin:16px 0;padding:14px 16px;background:#fff;border:1px solid #dcdcde;border-radius:8px;max-width:980px">';
 		echo '<h2 style="margin:0 0 8px">Автоматический режим</h2>';
@@ -136,16 +134,21 @@ final class EPV2_Admin {
 			}
 		}
 		echo '</p></div>';
-		echo '<div style="margin:16px 0;padding:14px 16px;background:#fff;border:1px solid #dcdcde;border-radius:8px;max-width:980px">';
-		echo '<h2 style="margin:0 0 8px">Ручные сервисные действия</h2>';
-		echo '<p style="margin:0 0 12px;color:#50575e">Эти кнопки не включают автоматику. Они вручную запускают один отдельный этап один раз.</p>';
-		echo '<p>';
-		echo '<a class="button button-primary" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_run_collect'), 'epv2_run_collect')) . '">Собрать кандидатов один раз</a> ';
-		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_run_process'), 'epv2_run_process')) . '">Обработать очередь один раз</a> ';
-		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_run_publish'), 'epv2_run_publish')) . '">Проверить публикацию один раз</a> ';
-		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_prune_queue'), 'epv2_prune_queue')) . '">Почистить очередь</a> ';
-		echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_reset_stats'), 'epv2_reset_stats')) . '" onclick="return confirm(\'Сбросить сегодняшние счётчики?\')">Сбросить счётчики</a>';
-		echo '</p></div>';
+		// R11 2026-05-14: hide decorative "run once" controls в auto mode.
+		// Operator не пользуется ими — autopilot делает сам каждые N мин.
+		// Кнопки доступны в semi mode для ad-hoc operations.
+		if ((string) EPV2_Settings::get('mode', 'semi') !== 'auto') {
+			echo '<div style="margin:16px 0;padding:14px 16px;background:#fff;border:1px solid #dcdcde;border-radius:8px;max-width:980px">';
+			echo '<h2 style="margin:0 0 8px">Ручные сервисные действия</h2>';
+			echo '<p style="margin:0 0 12px;color:#50575e">Эти кнопки не включают автоматику. Они вручную запускают один отдельный этап один раз.</p>';
+			echo '<p>';
+			echo '<a class="button button-primary" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_run_collect'), 'epv2_run_collect')) . '">Собрать кандидатов один раз</a> ';
+			echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_run_process'), 'epv2_run_process')) . '">Обработать очередь один раз</a> ';
+			echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_run_publish'), 'epv2_run_publish')) . '">Проверить публикацию один раз</a> ';
+			echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_prune_queue'), 'epv2_prune_queue')) . '">Почистить очередь</a> ';
+			echo '<a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_reset_stats'), 'epv2_reset_stats')) . '" onclick="return confirm(\'Сбросить сегодняшние счётчики?\')">Сбросить счётчики</a>';
+			echo '</p></div>';
+		}
 
 		// Phase 3 — schedule preview block on the dashboard.
 		// Operator sees the current 7-window schedule, current mode, and
@@ -182,6 +185,12 @@ final class EPV2_Admin {
 			echo '<p style="margin-top:12px"><a class="button" href="' . esc_url(wp_nonce_url(admin_url('admin-post.php?action=epv2_reset_schedule_to_defaults'), 'epv2_reset_schedule_to_defaults')) . '" onclick="return confirm(\'Сбросить расписание к архитектурному дефолту (7 окон)?\')">Сбросить к архитектурному дефолту</a></p>';
 			echo '</div>';
 		}
+
+		// R12 2026-05-14: monitoring widgets — throughput 24h, AI cost, rejected histogram.
+		self::render_throughput_24h_widget();
+		self::render_ai_cost_summary_widget();
+		// R6 2026-05-14: rejected reasons histogram (24h vs 7d).
+		self::render_rejected_histogram_widget();
 
 		if (! empty($issues)) {
 			echo '<h2>Понятные проблемы</h2><table class="widefat striped" style="max-width:980px;margin-bottom:16px"><thead><tr><th>Где</th><th>Что происходит</th></tr></thead><tbody>';
@@ -488,6 +497,168 @@ final class EPV2_Admin {
 		echo '</p></div>';
 	}
 
+	/**
+	 * R12 2026-05-14: throughput last 24h — ASCII bar chart per hour.
+	 * Helps spot dip'ы и peak'и в реальном времени.
+	 */
+	private static function render_throughput_24h_widget(): void {
+		$data = EPV2_Stats::throughput_24h_hourly();
+		if (empty($data)) return;
+		$counts = array_column($data, 'count');
+		$max = max($counts) ?: 1;
+		$total = array_sum($counts);
+		// ASCII bar chars from low to high (8 levels)
+		$chars = ['·', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+		echo '<div style="margin:16px 0;padding:14px 16px;background:#fff;border:1px solid #dcdcde;border-radius:8px;max-width:980px">';
+		echo '<h2 style="margin:0 0 8px">Публикации за 24h (по часам UTC)</h2>';
+		echo '<p style="margin:0 0 8px;color:#646970">Total: ' . (int) $total . ' за 24h. Peak: ' . (int) $max . '/час.</p>';
+		echo '<pre style="margin:0;font-family:monospace;font-size:14px;line-height:1.4;color:#1d4ed8;background:#eff6ff;padding:8px 12px;border-radius:4px;overflow-x:auto">';
+		$line = '';
+		foreach ($data as $entry) {
+			$ratio = $entry['count'] / $max;
+			$idx = (int) round($ratio * (count($chars) - 1));
+			$line .= $chars[$idx];
+		}
+		echo esc_html($line) . "\n";
+		// Hour labels (every 4 hours)
+		$label_line = '';
+		foreach ($data as $i => $entry) {
+			$label_line .= ($i % 4 === 0) ? $entry['label'] : ' ';
+		}
+		// Adjust width: each hour char = 1, labels each 4 chars wide
+		$label_compressed = '';
+		foreach ($data as $i => $entry) {
+			if ($i % 4 === 0 && (int) $entry['label'] < 10) {
+				$label_compressed .= '0' . $entry['label'];
+			} elseif ($i % 4 === 0) {
+				$label_compressed .= (string) $entry['label'];
+			} elseif ($i % 4 === 1) {
+				continue; // skip - already 2 chars used
+			} else {
+				$label_compressed .= ' ';
+			}
+		}
+		echo esc_html($label_compressed);
+		echo '</pre>';
+		echo '</div>';
+	}
+
+	/**
+	 * R12 2026-05-14: AI cost summary — today vs yesterday vs 7d avg.
+	 * Numbers + delta % vs avg для anomaly detection.
+	 */
+	private static function render_ai_cost_summary_widget(): void {
+		$summary = EPV2_Stats::ai_cost_summary();
+		$t_req = (int) $summary['today_requests'];
+		$t_tok = (int) $summary['today_tokens'];
+		$y_req = (int) $summary['yesterday_requests'];
+		$y_tok = (int) $summary['yesterday_tokens'];
+		$avg_req = (int) $summary['week_avg_requests'];
+		$avg_tok = (int) $summary['week_avg_tokens'];
+		$days = (int) $summary['week_days_sampled'];
+		$req_delta = $avg_req > 0 ? round((($t_req - $avg_req) / $avg_req) * 100, 1) : 0;
+		$tok_delta = $avg_tok > 0 ? round((($t_tok - $avg_tok) / $avg_tok) * 100, 1) : 0;
+		$req_color = $req_delta > 50 ? '#b45309' : ($req_delta < -30 ? '#646970' : '#15803d');
+		$tok_color = $tok_delta > 50 ? '#b45309' : ($tok_delta < -30 ? '#646970' : '#15803d');
+		echo '<div style="margin:16px 0;padding:14px 16px;background:#fff;border:1px solid #dcdcde;border-radius:8px;max-width:980px">';
+		echo '<h2 style="margin:0 0 8px">AI расход (сегодня vs вчера vs 7d avg)</h2>';
+		echo '<table class="widefat striped"><thead><tr><th>Metric</th><th>Сегодня</th><th>Вчера</th><th>' . esc_html('7d avg (n=' . $days . ')') . '</th><th>Δ vs avg</th></tr></thead><tbody>';
+		echo '<tr><td>Requests</td><td><strong>' . number_format($t_req) . '</strong></td><td>' . number_format($y_req) . '</td><td>' . number_format($avg_req) . '</td>';
+		echo '<td style="color:' . $req_color . '">' . esc_html(($req_delta > 0 ? '+' : '') . $req_delta . '%') . '</td></tr>';
+		echo '<tr><td>Tokens</td><td><strong>' . number_format($t_tok) . '</strong></td><td>' . number_format($y_tok) . '</td><td>' . number_format($avg_tok) . '</td>';
+		echo '<td style="color:' . $tok_color . '">' . esc_html(($tok_delta > 0 ? '+' : '') . $tok_delta . '%') . '</td></tr>';
+		echo '</tbody></table>';
+		echo '</div>';
+	}
+
+	/**
+	 * R6 2026-05-14: rejected reasons histogram widget. 24h + 7d data.
+	 * Helps operator tune validators / thresholds based on actual data
+	 * вместо guesswork.
+	 */
+	private static function render_rejected_histogram_widget(): void {
+		$today = EPV2_Stats::rejected_reason_histogram(24);
+		$week = EPV2_Stats::rejected_reason_histogram(168);
+		$bucket_labels = [
+			'auto_reject_policy' => 'Auto-reject policy (R1)',
+			'selection' => 'Selection (низкий score)',
+			'dedup' => 'Дубликат / signature match',
+			'editorial_weak' => 'Editorial verdict слабый',
+			'thin_source' => 'Тонкая база источников',
+			'hallucination' => 'AI hallucination (числа/имена)',
+			'cross_lang' => 'Cross-lang inconsistency',
+			'plagiarism' => 'Plagiarism gate (R9)',
+			'chronic' => 'Chronic recycle (lifetime cap)',
+			'attempt_cap' => 'Attempt cap exceeded',
+			'expired' => 'Потерял актуальность',
+			'media' => 'Media error',
+			'other' => 'Другое',
+		];
+		$total_24h = array_sum($today);
+		$total_7d = array_sum($week);
+		// Sort buckets by 7d count (даже если 24h=0, видим контекст)
+		uksort($bucket_labels, function ($a, $b) use ($week, $today) {
+			return ($week[$b] ?? 0) - ($week[$a] ?? 0)
+				?: ($today[$b] ?? 0) - ($today[$a] ?? 0);
+		});
+		echo '<div style="margin:16px 0;padding:14px 16px;background:#fff;border:1px solid #dcdcde;border-radius:8px;max-width:980px">';
+		echo '<h2 style="margin:0 0 8px">Причины rejection (24h vs 7d)</h2>';
+		echo '<p style="margin:0 0 8px;color:#646970">Total: ' . (int) $total_24h . ' за 24h, ' . (int) $total_7d . ' за 7d. Помогает тюнить validators по реальным данным.</p>';
+		if ($total_24h === 0 && $total_7d === 0) {
+			echo '<p style="margin:0;color:#646970">Нет rejected items за этот период.</p>';
+			echo '</div>';
+			return;
+		}
+		echo '<table class="widefat striped"><thead><tr><th>Причина</th><th>24h</th><th>7d total</th><th>7d avg/day</th></tr></thead><tbody>';
+		foreach ($bucket_labels as $key => $label) {
+			$t = (int) ($today[$key] ?? 0);
+			$w = (int) ($week[$key] ?? 0);
+			if ($t === 0 && $w === 0) continue;
+			$avg = $w > 0 ? round($w / 7, 1) : 0;
+			echo '<tr>';
+			echo '<td>' . esc_html($label) . '</td>';
+			echo '<td><strong>' . $t . '</strong></td>';
+			echo '<td>' . $w . '</td>';
+			echo '<td>' . esc_html((string) $avg) . '</td>';
+			echo '</tr>';
+		}
+		echo '</tbody></table>';
+		echo '</div>';
+	}
+
+	/**
+	 * R7 2026-05-14: notice если publish_thread heartbeat stale (>90s) ИЛИ
+	 * thread_alive=false. Orchestrator POST'ит heartbeat каждый 60s через
+	 * /bridge/heartbeat endpoint. Если не приходит — orchestrator down или
+	 * publish_thread проседает silently.
+	 */
+	private static function render_publish_heartbeat_notice(): void {
+		$hb = get_option('epv2_publish_thread_heartbeat', null);
+		if (! is_array($hb) || empty($hb['ts'])) {
+			return; // no heartbeat ever recorded — show nothing (boot state)
+		}
+		$ts = strtotime((string) $hb['ts'] . ' UTC');
+		if (! $ts) {
+			return;
+		}
+		$age = time() - $ts;
+		$thread_alive = ! empty($hb['thread_alive']);
+		$last_beat_age = (int) ($hb['last_beat_age_s'] ?? 0);
+		// Alert если heartbeat не приходит >120s (orchestrator down / can't reach WP)
+		// или thread_alive=false (orchestrator работает но publish thread мёртв)
+		$is_critical = $age > 120 || ! $thread_alive;
+		if (! $is_critical) {
+			return;
+		}
+		echo '<div class="notice notice-error"><p><strong>Publisher inactive.</strong> ';
+		if ($age > 120) {
+			echo esc_html('Orchestrator heartbeat не приходит ' . $age . ' секунд. Проверь `systemctl status epv2-orchestrator`.');
+		} elseif (! $thread_alive) {
+			echo esc_html('Publish thread мёртв. Last beat age: ' . $last_beat_age . 's. Watchdog должен respawn в течение 60с — если не помогает, restart orchestrator.');
+		}
+		echo '</p></div>';
+	}
+
 	private static function queue_lightweight_snapshot_payload(): array {
 		$progress = get_option('epv2_collect_progress', []);
 		$collect_paused = EPV2_Jobs::collect_paused();
@@ -631,11 +802,14 @@ final class EPV2_Admin {
 		$active_work_items = self::sort_queue_items($active_work_items, 'updated_at', 'desc');
 		$ready_publish_items = self::sort_queue_items($ready_publish_items, 'updated_at', 'desc');
 		$new_queue_items = self::sort_queue_items($new_queue_items, 'updated_at', 'desc');
-		// Manual-review + ready_review items use raw `state` rather than
-		// user_facing_state because workflow_is_terminal_state currently
-		// does not include 'manual_review'/'ready_review'. Pulling по raw
-		// state даёт admin own bucket without touching workflow logic.
-		$manual_review_items = array_values(array_filter($items, static fn($item) => in_array((string) ($item->state ?? ''), ['manual_review', 'ready_review'], true)));
+		// 2026-05-12 W2.4: split ready_review (worker built + waiting operator
+		// approve) and manual_review (hard block — operator must fix). Раньше
+		// оба в одном blob'е, оператор не различал. Теперь separate buckets.
+		$manual_review_only_items = array_values(array_filter($items, static fn($item) => (string) ($item->state ?? '') === 'manual_review'));
+		$ready_review_only_items = array_values(array_filter($items, static fn($item) => (string) ($item->state ?? '') === 'ready_review'));
+		// Backward-compat: keep combined $manual_review_items для template'ов
+		// которые ещё ссылаются. Постепенно будут раздельные blocks.
+		$manual_review_items = array_merge($ready_review_only_items, $manual_review_only_items);
 		$manual_review_ids = array_flip(array_map(static fn($i) => (int) ($i->id ?? 0), $manual_review_items));
 		$rejected_items = array_values(array_filter($items, static function ($item) use ($manual_review_ids) {
 			$id = (int) ($item->id ?? 0);
@@ -820,7 +994,11 @@ final class EPV2_Admin {
 				$new_items[] = $row;
 			}
 		}
-		$manual_review_items = self::queue_light_rows_by_states(['manual_review', 'ready_review'], 30);
+		// 2026-05-12 W2.4: split ready_review (worker built — оператор approve)
+		// vs manual_review (hard block — оператор fix). Раньше combined в одну
+		// «Ручная проверка», operator не различал. Теперь явные две section'а.
+		$ready_review_items = self::queue_light_rows_by_states(['ready_review'], 30);
+		$manual_review_items = self::queue_light_rows_by_states(['manual_review'], 30);
 		$rejected_items = self::queue_light_rows_by_states(['rejected', 'error', 'duplicate'], 30);
 		$published_items = self::queue_light_rows_by_states(['published'], 30);
 		$automation_paused = EPV2_Jobs::automation_paused();
@@ -833,7 +1011,8 @@ final class EPV2_Admin {
 			'automation_paused' => $automation_paused,
 			'next_publish' => $next_publish,
 		]);
-		self::render_light_queue_section('Ручная проверка', $manual_review_items, 'manual_review');
+		self::render_light_queue_section('Готов к проверке (worker собрал, нужен apply)', $ready_review_items, 'ready_review');
+		self::render_light_queue_section('Ручная правка (есть блокер, нужна правка)', $manual_review_items, 'manual_review');
 		self::render_light_queue_section('Отклонённые', $rejected_items, 'rejected');
 		self::render_light_queue_section('Опубликованные материалы', $published_items, 'published');
 		return (string) ob_get_clean();
@@ -1388,6 +1567,31 @@ final class EPV2_Admin {
 				// Pipeline retry artifacts — item moved on, message stale.
 				'/пакет снят из ready_publish/iu',
 				'/canonical publish gate не пройден/iu',
+				// 2026-05-13 v21/v22: дополнительные transition-сообщения которые
+				// были leftover в error_message после watchdog/auto_promote перевода
+				// item обратно в active states (retry_process / new). Item сейчас в
+				// работе, но видна history-метка о прошлой неудаче. UX bug:
+				// оператор думает item отбракован, хотя он в pipeline.
+				'/материал отбракован после исчерпания попыток/iu',
+				'/материал снят из очереди публикации до publish-run/iu',
+				'/материал снят из автоматической очереди/iu',
+				'/материал снят на rebuild_bundle/iu',
+				'/материал снят с автопубликации/iu',
+				'/материал снят: стадия .+ превысила лимит/iu',
+				'/материал снят: стадия .+ выполнила.+попыток/iu',
+				'/regenerated stage=.+ by operator/iu',
+				'/reprocess from manual_review/iu',
+				'/bulk-promoted from manual_review/iu',
+				'/promoted from manual_review by operator/iu',
+				'/rebuild_bundle attempt cap reached/iu',
+				'/material требует ручной проверки/iu',
+				// inline short-circuit и quarantine — те же legacy markers
+				'/inline short-circuit/iu',
+				'/предварительный (selection decision|publish-priority)/iu',
+				'/не пересматривается перезапуском/iu',
+				// 2026-05-13 v22: soft warnings consumer reasons
+				'/материал остановлен для ручной правки/iu',
+				'/материал остановлен для ручной проверки/iu',
 			];
 			$is_infra_noise = false;
 			foreach ($infra_noise_patterns as $pat) {
@@ -2029,6 +2233,17 @@ final class EPV2_Admin {
 	}
 
 	public static function manual(): void {
+		// R11 2026-05-14: в auto mode operator не пользуется Manual page.
+		// Показываем заглушку с инструкцией как разблокировать (switch mode).
+		if ((string) EPV2_Settings::get('mode', 'semi') === 'auto') {
+			echo '<div class="wrap"><h1>Ручной режим</h1>';
+			echo '<div class="notice notice-info"><p><strong>Auto mode активен.</strong> ';
+			echo esc_html('Manual rewrite UI отключён, поскольку autopilot обрабатывает весь поток автоматически. Чтобы включить ручной режим — переключите mode на "semi" в Настройках, тогда эта страница станет доступной.');
+			echo '</p></div>';
+			echo '<p><a class="button" href="' . esc_url(admin_url('admin.php?page=epv2-settings')) . '">Открыть Настройки</a></p>';
+			echo '</div>';
+			return;
+		}
 		$draft = EPV2_Manual_Mode::get_draft();
 		$notice = get_transient('epv2_manual_notice_' . get_current_user_id());
 		if ($notice !== false) {
@@ -2652,20 +2867,65 @@ final class EPV2_Admin {
 		$ids_csv = sanitize_text_field((string) ($_POST['ids_csv'] ?? ''));
 		$ids = array_filter(array_map('intval', explode(',', $ids_csv)));
 		$promoted = 0;
+		$blocked = 0;
+		$blocked_examples = [];
+		// 2026-05-13: bulk promote routes through Publish_Gate (same logic as
+		// single-item force_publish at line ~2287). Items with real content
+		// blockers (missing media, missing translations, etc.) are NOT moved
+		// to ready_publish — they stay in manual_review with explanation.
+		// Only selection-rejection blockers are bypassed by manual_mode.
+		$selection_only_tokens = [
+			'selection_reject', 'selection_low', 'selection_blocked',
+			'enrichment_required', 'sources_below_kind_minimum',
+			'publish_not_due', 'context_reject', 'stale_context',
+		];
 		foreach ($ids as $id) {
 			$row = EPV2_Queue::get_item($id);
 			if (! $row || (string) ($row->state ?? '') !== 'manual_review') {
 				continue;
 			}
-			EPV2_Queue::mark_state($id, 'ready_publish', [
-				'error_message' => 'Promoted from manual_review by operator on ' . current_time('mysql'),
+			$payload = EPV2_Review::decode_payload((string) ($row->ai_payload ?? ''));
+			if (! is_array($payload)) { $payload = []; }
+			$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			$payload['_meta']['manual_mode'] = true;
+			$payload['_meta']['manual_override_reason'] = 'operator_bulk_promote';
+			$payload['_meta']['manual_override_at'] = gmdate('Y-m-d H:i:s');
+			$gate = EPV2_Publish_Gate::evaluate($row, $payload, [
+				'context' => 'publish',
+				'force' => true,
 			]);
-			if (class_exists('EPV2_Learning_Journal')) {
-				EPV2_Learning_Journal::record('manual_review_promoted', $id, 'operator_promote_to_publish');
+			$blockers = (array) ($gate['blockers'] ?? []);
+			$selection_only = $blockers !== [] && array_values(array_filter(
+				$blockers,
+				static fn($b) => ! in_array($b, $selection_only_tokens, true)
+			)) === [];
+			$notes = json_decode((string) ($row->admin_notes ?? ''), true);
+			$notes = is_array($notes) ? $notes : [];
+			$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$notes['_system']['manual_override'] = 'bulk_promote';
+			$notes['_system']['manual_override_at'] = gmdate('Y-m-d H:i:s');
+			if ($blockers === [] || $selection_only) {
+				$notes['_system']['publish_not_before'] = time() - 1;
+				$notes['_system']['ready_publish_at'] = gmdate('Y-m-d H:i:s');
+				EPV2_Queue::mark_state($id, 'ready_publish', [
+					'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+					'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+					'error_message' => 'Bulk-promoted from manual_review by operator on ' . current_time('mysql'),
+				]);
+				if (class_exists('EPV2_Learning_Journal')) {
+					EPV2_Learning_Journal::record('manual_review_promoted', $id, 'operator_bulk_promote');
+				}
+				$promoted++;
+			} else {
+				$blocked++;
+				if (count($blocked_examples) < 3) {
+					$blocked_examples[] = $id . ' (' . implode(',', array_slice($blockers, 0, 2)) . ')';
+				}
 			}
-			$promoted++;
 		}
-		set_transient('epv2_admin_notice', sprintf('Промоушен в готово к публикации: %d из %d', $promoted, count($ids)), 30);
+		$msg = sprintf('Промоушен: %d опубл., %d с реальными блокерами не пропущены', $promoted, $blocked);
+		if ($blocked_examples) { $msg .= ' — примеры: ' . implode('; ', $blocked_examples); }
+		set_transient('epv2_admin_notice', $msg, 60);
 		wp_safe_redirect(admin_url('admin.php?page=epv2-queue&state_filter=manual_review'));
 		exit;
 	}
@@ -2716,6 +2976,18 @@ final class EPV2_Admin {
 			}
 			if (isset($result['seo']) && is_array($result['seo'])) {
 				$existing['seo'] = array_replace((array) ($existing['seo'] ?? []), $result['seo']);
+			}
+			// 2026-05-13: bust stale stage_checklist в payload._meta. Без этого
+			// `workflow_user_state_for_row` fast-path читает старое
+			// `stage_checklist.ready_publish=true` после regen → backpressure
+			// пропускает item, orchestrator не подбирает, item висит. Очищаем,
+			// чтобы при следующем normalize заново посчитать на свежем payload.
+			if (isset($existing['_meta']) && is_array($existing['_meta'])) {
+				unset($existing['_meta']['stage_checklist']);
+				unset($existing['_meta']['quality']);
+				unset($existing['_meta']['seo_quality']);
+				unset($existing['_meta']['release_quality']);
+				unset($existing['_meta']['google_quality']);
 			}
 			EPV2_Queue::update_fields($item_id, [
 				'ai_payload' => wp_json_encode($existing, JSON_UNESCAPED_UNICODE),

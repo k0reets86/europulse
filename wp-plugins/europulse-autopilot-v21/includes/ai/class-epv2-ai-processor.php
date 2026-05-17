@@ -12,7 +12,7 @@ final class EPV2_AI_Processor {
 	 * версией; при resume проверяется mismatch и устаревшие payload'ы
 	 * принудительно пересгенерируются вместо silent reuse'а.
 	 */
-	public const EDITORIAL_PROMPT_VERSION = '2026-05-12-v15';
+	public const EDITORIAL_PROMPT_VERSION = '2026-05-16-v23';
 
 		public static function process_scheduled(bool $force = false, bool $ignore_retry_after = false): void {
 			$started_at = microtime(true);
@@ -704,7 +704,7 @@ final class EPV2_AI_Processor {
 						$worker_checklist = self::payload_stage_checklist($payload);
 						if (empty($worker_checklist[$worker_lang . '_ready'])) {
 							$translation_attempts = self::bump_translation_no_progress_attempt((int) $item->id, $worker_lang, $payload);
-							if ($translation_attempts >= 3) {
+							if ($translation_attempts >= 2) { // R21 2026-05-14: reduced 3→2 — 3rd attempt rarely passes after 2nd fail with same blocker
 								$result = self::resolve_translation_no_progress_terminally($item, $payload, $worker_lang, $translation_attempts, $analysis, $gate);
 								$count++;
 								$run_payload['processed_item_id'] = (int) $item->id;
@@ -714,15 +714,20 @@ final class EPV2_AI_Processor {
 							$next_translation_stage = $worker_stage;
 							self::queue_incomplete_translation_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
 						} elseif ($worker_stage === 'translate_uk') {
-							self::reset_translation_no_progress_attempt((int) $item->id, $worker_lang);
 							$next_translation_stage = 'translate_en';
 						} else {
-							self::reset_translation_no_progress_attempt((int) $item->id, $worker_lang);
 							$next_translation_stage = 'publish_finish';
 						}
 						if ($next_translation_stage !== $worker_stage) {
 							try {
 								self::queue_required_stage((int) $item->id, $payload, $next_translation_stage, $analysis, $gate);
+								// 2026-05-12 fix: counter reset ТОЛЬКО после успешного перехода.
+								// Раньше reset стоял ДО queue_required_stage. Если последняя
+								// бросала Exception («Переход к translate_en запрещён: UK этап
+								// не подтверждён»), fallback bump'ал counter с 0 → 1. Цикл
+								// reset→bump→reset→bump — счётчик никогда не достигал cap=3,
+								// item 2530 крутился 32 раза за 24h в translate_uk loop.
+								self::reset_translation_no_progress_attempt((int) $item->id, $worker_lang);
 							} catch (Throwable $e) {
 								self::log_process_item_step('after_worker_single_translation_transition_fallback', (int) $item->id, [
 									'run_id' => $run,
@@ -732,7 +737,7 @@ final class EPV2_AI_Processor {
 									'duration_ms' => self::duration_ms_since($item_started_at),
 								]);
 								$translation_attempts = self::bump_translation_no_progress_attempt((int) $item->id, $worker_lang, $payload);
-								if ($translation_attempts >= 3) {
+								if ($translation_attempts >= 2) { // R21 2026-05-14: reduced 3→2 — 3rd attempt rarely passes after 2nd fail with same blocker
 									$result = self::resolve_translation_no_progress_terminally($item, $payload, $worker_lang, $translation_attempts, $analysis, $gate);
 									$count++;
 									$run_payload['processed_item_id'] = (int) $item->id;
@@ -828,7 +833,7 @@ final class EPV2_AI_Processor {
 							'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 							'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 							'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-							'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+							'ai_tokens' => self::payload_total_tokens($payload),
 							'error_message' => '',
 						]);
 						self::log_process_item_step('after_worker_mark_state', (int) $item->id, ['run_id' => $run, 'next_state' => $next_state, 'duration_ms' => self::duration_ms_since($item_started_at)]);
@@ -881,7 +886,7 @@ final class EPV2_AI_Processor {
 								break;
 							}
 							$translation_attempts = self::bump_translation_no_progress_attempt((int) $item->id, $lang_to_repair, $payload);
-							if ($translation_attempts >= 4) {
+							if ($translation_attempts >= 3) { // R21 2026-05-14: reduced 4→3
 								$result = self::resolve_translation_no_progress_terminally($item, $payload, $lang_to_repair, $translation_attempts, $analysis, $gate);
 								$count++;
 								$run_payload['processed_item_id'] = (int) $item->id;
@@ -914,7 +919,7 @@ final class EPV2_AI_Processor {
 							'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 							'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 							'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-							'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+							'ai_tokens' => self::payload_total_tokens($payload),
 							'error_message' => '',
 						]);
 						$count++;
@@ -1032,7 +1037,7 @@ final class EPV2_AI_Processor {
 						'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 						'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 						'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-						'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+						'ai_tokens' => self::payload_total_tokens($payload),
 						'error_message' => '',
 					]);
 					$count++;
@@ -1327,6 +1332,144 @@ final class EPV2_AI_Processor {
 							throw new RuntimeException('AI provider unavailable: no ready provider in chain');
 						}
 						$worker_stage = self::worker_stage_for_request($existing_payload, $auto_rework, $auto_finish);
+
+						// B1 (2026-05-12): thin dossier hard gate. Worker_client
+						// прогнал enrichment и flagged item если source_count <
+						// sources_min для content kind. Skip AI call → manual_review.
+						// Save tokens + предотвратить fabrication-prone rewrites.
+						$thin_blocker = $existing_payload['_meta']['thin_dossier_blocker'] ?? null;
+						if (
+							is_array($thin_blocker)
+							&& in_array((string) $worker_stage, ['build_de_master', 'rebuild_bundle'], true)
+						) {
+							$thin_notes = is_array(json_decode((string) ($item->admin_notes ?? ''), true))
+								? json_decode((string) $item->admin_notes, true) : [];
+							$thin_notes['_system'] = is_array($thin_notes['_system'] ?? null) ? $thin_notes['_system'] : [];
+							$thin_notes['_system']['workflow_terminal_reason'] = 'thin_dossier_post_enrichment';
+							$thin_notes['_system']['quarantine_reason'] = sprintf(
+								'thin_dossier_sources_%d_below_min_%d_kind_%s',
+								(int) ($thin_blocker['actual_sources'] ?? 0),
+								(int) ($thin_blocker['required_sources'] ?? 0),
+								(string) ($thin_blocker['kind'] ?? 'unknown')
+							);
+							$thin_notes['_system']['workflow_step_status'] = 'terminal';
+							$thin_notes['_system']['workflow_owner_token'] = '';
+							$thin_notes['_system']['workflow_heartbeat_at'] = '';
+							$thin_notes['_system']['next_operator_action'] = 'add_supporting_sources_or_change_kind';
+							unset($thin_notes['_system']['retry_after'], $thin_notes['_system']['workflow_not_before']);
+							EPV2_Queue::mark_state((int) $item->id, 'manual_review', [
+								'admin_notes' => wp_json_encode($thin_notes, JSON_UNESCAPED_UNICODE),
+								'error_message' => sprintf(
+									'Тонкий source dossier: %d из %d требуемых источников (kind=%s). AI rewrite пропущен, не пересматривается перезапуском без operator интервенции.',
+									(int) ($thin_blocker['actual_sources'] ?? 0),
+									(int) ($thin_blocker['required_sources'] ?? 0),
+									(string) ($thin_blocker['kind'] ?? 'unknown')
+								),
+							]);
+							EPV2_Queue::clear_active_automation_item((int) $item->id);
+							self::log_process_item_step('thin_dossier_pre_worker_skip', (int) $item->id, [
+								'run_id' => $run,
+								'worker_stage' => $worker_stage,
+								'kind' => (string) ($thin_blocker['kind'] ?? ''),
+								'actual_sources' => (int) ($thin_blocker['actual_sources'] ?? 0),
+								'required_sources' => (int) ($thin_blocker['required_sources'] ?? 0),
+								'duration_ms' => self::duration_ms_since($item_started_at),
+							]);
+							if (class_exists('EPV2_Learning_Journal')) {
+								EPV2_Learning_Journal::record('manual_review_landed', (int) $item->id, 'thin_dossier_post_enrichment', [
+									'kind' => (string) ($thin_blocker['kind'] ?? ''),
+									'sources' => (int) ($thin_blocker['actual_sources'] ?? 0),
+									'min' => (int) ($thin_blocker['required_sources'] ?? 0),
+								]);
+							}
+							$count++;
+							$run_payload['processed_item_id'] = (int) $item->id;
+							$run_payload['result'] = 'thin_dossier_pre_worker_skip';
+							break;
+						}
+
+						// Inline short-circuit (2026-05-12, operator request): родственно
+						// commit 68c77a5 для publish_ready_gate, но на стадии AI invocation.
+						// Watchdog `quarantine_pathological_workflow_loops` ловит attempts>=2
+						// только при периодическом sweep'е. Между sweep'ами retry-process
+						// успевал запустить AI ещё 2-3 раза на тот же stage → "5/2 attempts"
+						// и сожжённые токены. Pre-worker check останавливает loop до AI-затраты:
+						// если за последний час уже было 2+ run'а данной stage, route в
+						// terminal по importance, скипаем worker call.
+						$stage_cap_targets = ['build_de_master', 'rebuild_bundle', 'publish_finish', 'publish_ready_gate'];
+						if (in_array((string) $worker_stage, $stage_cap_targets, true)) {
+							$pre_attempts = EPV2_Queue::stage_recent_attempts((int) $item->id, (string) $worker_stage, HOUR_IN_SECONDS);
+							$stage_limit = EPV2_Queue::stage_attempt_limit_public((string) $worker_stage);
+							if ($pre_attempts >= $stage_limit) {
+								$pre_importance = class_exists('EPV2_Importance_Score')
+									? (int) EPV2_Importance_Score::compute($item, $existing_payload)
+									: 0;
+								$pre_threshold = class_exists('EPV2_Importance_Score')
+									? (int) EPV2_Importance_Score::DEFAULT_THRESHOLD
+									: 30;
+								// R-policy 2026-05-14 followup: в auto mode всегда rejected
+								// (раньше items briefly hit manual_review → next maintenance
+								// auto-rejected — transient state виден operator'у).
+								$pre_state = ((string) EPV2_Settings::get('mode', 'semi') === 'auto')
+									? 'rejected'
+									: ($pre_importance >= $pre_threshold ? 'manual_review' : 'rejected');
+								$pre_notes = is_array(json_decode((string) ($item->admin_notes ?? ''), true))
+									? json_decode((string) $item->admin_notes, true)
+									: [];
+								$pre_notes['_system'] = is_array($pre_notes['_system'] ?? null) ? $pre_notes['_system'] : [];
+								$pre_notes['_system']['workflow_terminal_reason'] = 'inline_stage_attempt_cap';
+								$pre_notes['_system']['quarantine_reason'] = 'inline_short_circuit_' . sanitize_key((string) $worker_stage);
+								$pre_notes['_system']['workflow_step_status'] = 'terminal';
+								$pre_notes['_system']['workflow_owner_token'] = '';
+								$pre_notes['_system']['workflow_heartbeat_at'] = '';
+								$pre_notes['_system']['importance_score'] = $pre_importance;
+								$pre_notes['_system']['importance_threshold'] = $pre_threshold;
+								$pre_notes['_system']['next_operator_action'] = $pre_state === 'manual_review'
+									? 'inspect_payload_or_reset_stage_after_fix'
+									: 'review_source_or_restore_manually';
+								unset($pre_notes['_system']['retry_after'], $pre_notes['_system']['workflow_not_before']);
+								// Включаем hard-terminal токен «не пересматривается перезапуском»,
+								// чтобы soft_terminal_state_guard не салвейджил эту терминалку
+								// обратно в retry_process. Без него items с low importance, отбитые
+								// inline-катчем, всплывают в admin UI под «новыми» с error_message —
+								// operator видит мусор в очереди (баг подтверждён 2026-05-12 на 2562).
+								EPV2_Queue::mark_state((int) $item->id, $pre_state, [
+									'admin_notes'   => wp_json_encode($pre_notes, JSON_UNESCAPED_UNICODE),
+									'error_message' => sprintf(
+										'Материал снят: стадия "%s" уже выполнила %d попыток за час (cap=%d), не пересматривается перезапуском. Inline short-circuit до новой AI-затраты.',
+										$worker_stage,
+										$pre_attempts,
+										$stage_limit
+									),
+								]);
+								EPV2_Queue::clear_active_automation_item((int) $item->id);
+								self::log_process_item_step('inline_stage_attempt_cap_terminated', (int) $item->id, [
+									'run_id'        => $run,
+									'worker_stage'  => $worker_stage,
+									'attempts'      => $pre_attempts,
+									'cap'           => $stage_limit,
+									'importance'    => $pre_importance,
+									'terminal_state' => $pre_state,
+									'duration_ms'   => self::duration_ms_since($item_started_at),
+								]);
+								if (class_exists('EPV2_Learning_Journal')) {
+									EPV2_Learning_Journal::record(
+										$pre_state === 'manual_review' ? 'manual_review_landed' : 'quarantine_rejected',
+										(int) $item->id,
+										'inline_short_circuit_' . sanitize_key((string) $worker_stage),
+										[
+											'attempts'  => $pre_attempts,
+											'limit'     => $stage_limit,
+											'importance' => $pre_importance,
+										]
+									);
+								}
+								$count++;
+								$run_payload['processed_item_id'] = (int) $item->id;
+								$run_payload['result'] = 'inline_stage_attempt_cap_terminated';
+								break;
+							}
+						}
 						self::log_process_item_step('before_worker_stage', (int) $item->id, ['run_id' => $run, 'duration_ms' => self::duration_ms_since($item_started_at), 'worker_stage' => $worker_stage]);
 						if ($worker_stage === 'rebuild_bundle') {
 							EPV2_Queue::set_live_status((int) $item->id, 'Внешний worker собирает контекст, добирает источники, медиа и строит финальный DE-first bundle.', 'worker_rebuild');
@@ -1526,7 +1669,7 @@ final class EPV2_AI_Processor {
 									'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 									'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 									'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-									'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+									'ai_tokens' => self::payload_total_tokens($payload),
 									'error_message' => $terminal_state_global === 'ready_review'
 										? sprintf(
 											'Материал остановлен для ручной проверки на стадии %s: worker вернул blockers (%s).',
@@ -1556,7 +1699,10 @@ final class EPV2_AI_Processor {
 							if (isset($worker_stage) && (string) $worker_stage === 'rebuild_bundle') {
 							$worker_outcome = sanitize_key((string) ($worker_response['outcome'] ?? ''));
 							$payload_blockers = self::payload_blocker_strings($payload);
-							if ($worker_outcome === 'ready_review' || $payload_blockers !== []) {
+							// 2026-05-13: consume soft worker warnings → manual_review при threshold.
+							$warning_verdict = self::payload_worker_warning_verdict($payload);
+							$soft_warning_blocks = ($warning_verdict['verdict'] ?? '') === 'manual_review';
+							if ($worker_outcome === 'ready_review' || $payload_blockers !== [] || $soft_warning_blocks) {
 								$payload = self::set_payload_pipeline_stage($payload, '');
 								$terminal_gate = EPV2_Publish_Gate::evaluate($item, $payload, [
 									'context' => 'worker_terminal_outcome',
@@ -1581,15 +1727,28 @@ final class EPV2_AI_Processor {
 								if ($terminal_state === 'ready_review') {
 									$terminal_notes['_system']['manual_confirmation_required'] = 'worker_blockers';
 								}
+								// 2026-05-13: surface soft warning verdict в error_message + admin_notes.
+								if ($soft_warning_blocks) {
+									$terminal_notes['_system']['soft_warning_verdict'] = $warning_verdict;
+									if ($terminal_state === 'ready_review') {
+										$terminal_notes['_system']['manual_confirmation_required'] = 'soft_warning_threshold';
+									}
+								}
+								$err_msg = '';
+								if ($worker_outcome === 'ready_review' || $payload_blockers !== []) {
+									$err_msg = $terminal_state === 'ready_review'
+										? 'Материал остановлен для ручной проверки: worker вернул terminal review/blockers (' . implode(', ', $payload_blockers) . ').'
+										: 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($terminal_gate['selection_decision'] ?? 'unknown') . '".';
+								} elseif ($soft_warning_blocks) {
+									$err_msg = 'Материал остановлен для ручной правки: ' . ($warning_verdict['reason'] ?? 'worker soft warnings');
+								}
 								EPV2_Queue::mark_state((int) $item->id, $terminal_state, [
 									'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
 									'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 									'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 									'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-									'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
-									'error_message' => $terminal_state === 'ready_review'
-										? 'Материал остановлен для ручной проверки: worker вернул terminal review/blockers (' . implode(', ', $payload_blockers) . ').'
-										: 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($terminal_gate['selection_decision'] ?? 'unknown') . '".',
+									'ai_tokens' => self::payload_total_tokens($payload),
+									'error_message' => $err_msg,
 									'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
 								]);
 								self::log_process_item_step('after_worker_terminal_outcome', (int) $item->id, [
@@ -1647,7 +1806,7 @@ final class EPV2_AI_Processor {
 								'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 								'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 								'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-								'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+								'ai_tokens' => self::payload_total_tokens($payload),
 								'error_message' => '',
 							]);
 							self::log_process_item_step('after_worker_rebuild_mark_state', (int) $item->id, [
@@ -1729,7 +1888,7 @@ final class EPV2_AI_Processor {
 									'ai_payload' => wp_json_encode(self::set_payload_pipeline_stage($payload, ''), JSON_UNESCAPED_UNICODE),
 									'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 									'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-									'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+									'ai_tokens' => self::payload_total_tokens($payload),
 									'error_message' => '',
 								]);
 								self::log_process_item_step('after_worker_publish_finish_mark_state', (int) $item->id, [
@@ -1749,7 +1908,7 @@ final class EPV2_AI_Processor {
 							if (empty($worker_checklist[$worker_lang . '_ready'])) {
 								$next_translation_stage = (string) $worker_stage;
 								$translation_attempts = self::bump_translation_no_progress_attempt((int) $item->id, $worker_lang, $payload);
-								if ($translation_attempts >= 3) {
+								if ($translation_attempts >= 2) { // R21 2026-05-14: reduced 3→2 — 3rd attempt rarely passes after 2nd fail with same blocker
 									$result = self::resolve_translation_no_progress_terminally($item, $payload, $worker_lang, $translation_attempts, $analysis, $gate);
 									$count++;
 									$run_payload['processed_item_id'] = (int) $item->id;
@@ -1786,7 +1945,7 @@ final class EPV2_AI_Processor {
 								]);
 								$next_translation_stage = (string) $worker_stage;
 								$translation_attempts = self::bump_translation_no_progress_attempt((int) $item->id, $worker_lang, $payload);
-								if ($translation_attempts >= 3) {
+								if ($translation_attempts >= 2) { // R21 2026-05-14: reduced 3→2 — 3rd attempt rarely passes after 2nd fail with same blocker
 									$result = self::resolve_translation_no_progress_terminally($item, $payload, $worker_lang, $translation_attempts, $analysis, $gate);
 									$count++;
 									$run_payload['processed_item_id'] = (int) $item->id;
@@ -1877,7 +2036,7 @@ final class EPV2_AI_Processor {
 						'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 						'ai_provider' => ! empty($gate['allow']) ? EPV2_Settings::get('ai_provider', 'gemini') : '',
 						'ai_model' => ! empty($gate['allow']) ? EPV2_Settings::get('ai_model', '') : '',
-						'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+						'ai_tokens' => self::payload_total_tokens($payload),
 						'error_message' => '',
 						'admin_notes' => wp_json_encode(['selection' => $analysis, 'gate' => $gate], JSON_UNESCAPED_UNICODE),
 					]);
@@ -2864,6 +3023,33 @@ final class EPV2_AI_Processor {
 		return (int) round((microtime(true) - $started_at) * 1000);
 	}
 
+	/**
+	 * A5 (2026-05-12): proper cumulative token accounting.
+	 *
+	 * Раньше mark_state писал `'ai_tokens' => $payload._meta.tokens` — это
+	 * tokens ТОЛЬКО последнего stage. Каждая последующая AI call перезаписывала
+	 * предыдущее значение, поэтому в БД оставалось только translate_en tokens
+	 * (последний stage), теряя rebuild_bundle+publish_finish+translate_uk.
+	 * Дневной recorded total 148K при реальных ~3.2M tokens.
+	 *
+	 * Этот helper суммирует из `_meta.ai_runtime[]` (history all stages) и
+	 * fallback на `_meta.tokens` если runtime пустой.
+	 */
+	public static function payload_total_tokens(array $payload): int {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$total = 0;
+		$runtime = is_array($meta['ai_runtime'] ?? null) ? $meta['ai_runtime'] : [];
+		foreach ($runtime as $entry) {
+			if (! is_array($entry)) continue;
+			$total += max(0, (int) ($entry['tokens'] ?? 0));
+		}
+		if ($total > 0) {
+			return $total;
+		}
+		// Fallback for items без runtime history (legacy, pre-ai_runtime).
+		return max(0, (int) ($meta['tokens'] ?? 0));
+	}
+
 	private static function log_generate_review_payload_step(string $step, object $item, array $context = []): void {
 		if (! class_exists('EPV2_Logger')) {
 			return;
@@ -3429,9 +3615,22 @@ final class EPV2_AI_Processor {
 		return self::repair_payload_media($item, $payload);
 	}
 
+	// 2026-05-13: per-request memoization. Admin queue render calls this
+	// per-row (см. workflow_user_state_for_row), и слепо повторно нормализует
+	// тот же payload 50+ раз за один request → slow.log записал стек 5 сек.
+	// Кэш живёт ОДИН HTTP-request (PHP static) — никакого cross-request stale
+	// state быть не может. Ключ — content hash payload'а, так что если payload
+	// меняется (например после worker write) cache miss и пересчёт.
+	private static array $normalize_cache = [];
+
 	public static function normalize_existing_payload(array $payload, bool $allow_expensive = true): array {
 		if ($payload === []) {
 			return [];
+		}
+		// Cache lookup. Hash короткий — md5 над json даёт стабильный 32-char key.
+		$cache_key = md5(($allow_expensive ? 'X' : 'L') . wp_json_encode($payload));
+		if (isset(self::$normalize_cache[$cache_key])) {
+			return self::$normalize_cache[$cache_key];
 		}
 		$payload = self::compact_payload_source_dossier($payload);
 		$payload = self::normalize_payload_contract_flags($payload);
@@ -3439,9 +3638,16 @@ final class EPV2_AI_Processor {
 			$payload = self::normalize_payload_without_stage_refresh($payload);
 			$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 			$payload['_meta']['quality'] = self::fast_stage_routing_quality($payload);
-			return self::refresh_stage_checklist($payload);
+			$result = self::refresh_stage_checklist($payload);
+		} else {
+			$result = self::finalize_payload_for_queue($payload);
 		}
-		return self::finalize_payload_for_queue($payload);
+		// Ограничиваем размер кэша — admin queue показывает ~100 строк max.
+		if (count(self::$normalize_cache) >= 256) {
+			self::$normalize_cache = [];
+		}
+		self::$normalize_cache[$cache_key] = $result;
+		return $result;
 	}
 
 	public static function normalize_persisted_queue_contracts(int $limit = 500): array {
@@ -4052,7 +4258,7 @@ final class EPV2_AI_Processor {
 				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-				'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+				'ai_tokens' => self::payload_total_tokens($payload),
 				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 				'error_message' => '',
 			]);
@@ -4664,7 +4870,7 @@ final class EPV2_AI_Processor {
 			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 			'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 			'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-			'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+			'ai_tokens' => self::payload_total_tokens($payload),
 			'admin_notes' => $notes_json,
 			'error_message' => sprintf(
 				'Требует ручного подтверждения translation: автоматический перевод %s стабильно не проходит валидатор после %d попыток.',
@@ -4691,7 +4897,7 @@ final class EPV2_AI_Processor {
 			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 			'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 			'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-			'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+			'ai_tokens' => self::payload_total_tokens($payload),
 			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 			'error_message' => $message,
 		]);
@@ -4780,7 +4986,7 @@ final class EPV2_AI_Processor {
 			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 			'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 			'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-			'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+			'ai_tokens' => self::payload_total_tokens($payload),
 			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 			'error_message' => '',
 		]);
@@ -4831,7 +5037,7 @@ final class EPV2_AI_Processor {
 				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-				'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+				'ai_tokens' => self::payload_total_tokens($payload),
 				'error_message' => '',
 			]);
 			return 'translation_recovered_to_' . $next_state;
@@ -4868,7 +5074,7 @@ final class EPV2_AI_Processor {
 				'ai_payload' => wp_json_encode(self::force_payload_pipeline_stage($payload, 'translate_' . $lang), JSON_UNESCAPED_UNICODE),
 				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-				'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+				'ai_tokens' => self::payload_total_tokens($payload),
 				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 				'error_message' => '',
 			]);
@@ -6389,6 +6595,68 @@ final class EPV2_AI_Processor {
 			return false;
 		}
 
+		/**
+		 * 2026-05-13: consumer for worker-side soft warnings (filler / fabricated_name / etc).
+		 * Worker эмитит warnings в _meta.warnings без блокировки публикации.
+		 * Сюда подтянуты threshold-правила: если worker нашёл проблемные сигналы выше
+		 * порога — item route'ится в manual_review (а не публикуется автоматически).
+		 *
+		 * Returns 'pass' | 'manual_review' с reason; caller использует для outcome decision.
+		 */
+		public static function payload_worker_warning_verdict(array $payload): array {
+			$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			$warnings = (array) ($meta['warnings'] ?? []);
+			if ($warnings === []) {
+				return ['verdict' => 'pass', 'reason' => ''];
+			}
+			$filler_uk = 0;
+			$fabricated_names = 0;
+			$explicit_dates = 0;
+			$full_name_soft = 0;
+			$samples = [];
+			foreach ($warnings as $w) {
+				$text = is_scalar($w) ? (string) $w : wp_json_encode($w);
+				if (preg_match('/uk_filler_phrases:\s*(\d+)\s*штук/iu', $text, $m)) {
+					$filler_uk = max($filler_uk, (int) $m[1]);
+					if (count($samples) < 3) { $samples[] = $text; }
+				} elseif (stripos($text, 'rewriter_fabricated_name:') === 0) {
+					$fabricated_names++;
+					if (count($samples) < 3) { $samples[] = $text; }
+				} elseif (stripos($text, 'rewriter_explicit_date:') === 0
+					&& stripos($text, 'severity=hard') !== false) {
+					$explicit_dates++;
+					if (count($samples) < 3) { $samples[] = $text; }
+				} elseif (stripos($text, 'rewriter_full_name:') === 0
+					&& stripos($text, 'severity=soft') !== false) {
+					$full_name_soft++;
+				}
+			}
+			// Thresholds (calibrated 2026-05-13 from production audit):
+			//  - uk_filler_phrases >= 5 → manual_review (3 = worker emits warning; 5 = persistent style issue)
+			//  - fabricated_name >= 2 → manual_review (single hit обычно false-positive на German noun phrase;
+			//    2+ unique pairs = реальная фабрикация типа ESC 10149)
+			//  - explicit_date (hard severity) >= 1 → manual_review (worker уже отделяет soft/hard по window)
+			//  - full_name_soft >= 3 → manual_review (накопление borderline name fabrications)
+			if ($filler_uk >= 5) {
+				return ['verdict' => 'manual_review', 'reason' => "uk_filler_phrases: {$filler_uk} штук (≥5) — стиль требует ручной правки", 'samples' => $samples];
+			}
+			if ($fabricated_names >= 2) {
+				return ['verdict' => 'manual_review', 'reason' => "fabricated_name pairs: {$fabricated_names} — возможная фабрикация имён", 'samples' => $samples];
+			}
+			if ($explicit_dates >= 1) {
+				return ['verdict' => 'manual_review', 'reason' => "rewriter_explicit_date hard: фабрикованная конкретная дата", 'samples' => $samples];
+			}
+			if ($full_name_soft >= 3) {
+				return ['verdict' => 'manual_review', 'reason' => "rewriter_full_name soft: {$full_name_soft} имён без подтверждения в source", 'samples' => $samples];
+			}
+			return ['verdict' => 'pass', 'reason' => '', 'counts' => [
+				'uk_filler' => $filler_uk,
+				'fabricated_name' => $fabricated_names,
+				'explicit_date' => $explicit_dates,
+				'full_name_soft' => $full_name_soft,
+			]];
+		}
+
 		private static function languages_look_publishable(array $payload): bool {
 		$de = is_array($payload['languages']['de'] ?? null) ? $payload['languages']['de'] : [];
 		$uk = is_array($payload['languages']['uk'] ?? null) ? $payload['languages']['uk'] : [];
@@ -6663,7 +6931,7 @@ final class EPV2_AI_Processor {
 				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
 				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-				'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+				'ai_tokens' => self::payload_total_tokens($payload),
 				'error_message' => '',
 				'admin_notes' => wp_json_encode(['selection' => $analysis, 'gate' => $gate], JSON_UNESCAPED_UNICODE),
 			]);

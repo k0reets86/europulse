@@ -11,7 +11,13 @@ from dataclasses import dataclass, field
 
 from openai import AsyncOpenAI
 
-from .openai_compat import completion_debug, completion_text, completion_total_tokens, reasoning_extra_body
+from .openai_compat import (
+    completion_cached_tokens,
+    completion_debug,
+    completion_text,
+    completion_total_tokens,
+    reasoning_extra_body,
+)
 
 
 _SENTENCE_TERMINAL_RE = re.compile(r"[.!?»\"…]\s*$", re.UNICODE)
@@ -55,6 +61,8 @@ class SEOResult:
     provider: str = ""
     model: str = ""
     tokens: int = 0
+    # R5 2026-05-14: OpenAI prompt caching tracking.
+    cached_tokens: int = 0
 
 
 _SYSTEM = """Du bist ein SEO-Experte für die Nachrichtenplattform EuroPulse.today.
@@ -172,6 +180,7 @@ async def _call(user_prompt: str, api_key: str, provider: str, model: str) -> SE
             keywords=[str(k) for k in data.get("keywords", [])[:10]],
             success=True,
             tokens=completion_total_tokens(resp),
+            cached_tokens=completion_cached_tokens(resp),
         )
     except Exception as exc:
         logger.warning("SEO generation via %s failed: %s", provider, exc)

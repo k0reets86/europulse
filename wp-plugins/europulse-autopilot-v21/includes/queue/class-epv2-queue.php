@@ -1020,9 +1020,13 @@ final class EPV2_Queue {
 			$is_manual_terminal = $terminal_reason !== '' && in_array($terminal_reason, $manual_terminal_reasons, true);
 
 			if ($manual_required !== '' || $is_manual_terminal) {
-				self::mark_state((int) $row->id, 'manual_review', [
+				// POLICY 2026-05-14: в auto mode operator не делает ручной разбор.
+				// Items с terminal_reason ∈ {workflow_quarantine, selection_publish_blocked,
+				// worker_terminal_outcome} прошли все retry — сразу rejected.
+				$target_state = self::automation_requires_publish_grade() ? 'rejected' : 'manual_review';
+				self::mark_state((int) $row->id, $target_state, [
 					'error_message' => (string) ($row->error_message ?? '')
-						?: 'Material требует ручной проверки: '
+						?: 'Material не прошёл автоматику: '
 						. ($manual_required !== '' ? "manual_confirmation_required=$manual_required" : "workflow_terminal_reason=$terminal_reason"),
 				]);
 				$moved++;
@@ -1042,14 +1046,49 @@ final class EPV2_Queue {
 	}
 
 	/**
-	 * Auto-promote: items в manual_review с idealными scores, всеми 3
-	 * языками переведёнными, media URL — ВЕРНУТЬ в retry_process для
-	 * повторной попытки публикации. Часто такие застревают потому что
-	 * gate отклонил по contracts на одной попытке, а quarantine унаследовал
-	 * stale reason после моего reset'а retry-counters. Если scores =
-	 * threshold AND контент полный — это публикабельный материал.
+	 * POLICY 2026-05-14: auto mode = никакого ручного разбора. Items в
+	 * manual_review/ready_review = провалили автоматику → rejected сразу
+	 * (без 5-минутного wait, без recycle, без attempted resurrection).
+	 *
+	 * Function name сохранён для совместимости с orchestrator bridge_maintenance
+	 * dict key 'auto_promoted_complete_manual_rows', но semantic перевернут:
+	 * теперь возвращает count of items moved to rejected, не to retry_process.
+	 *
+	 * В semi mode (automation_requires_publish_grade=false) сохраняется старая
+	 * resurrection-логика для backward compat — operator-supervised режим.
 	 */
 	public static function auto_promote_complete_manual_review_items(int $limit = 30): int {
+		if (self::automation_requires_publish_grade()) {
+			// AUTO MODE: всё что в review queue — failed automation → reject.
+			global $wpdb;
+			$table = $wpdb->prefix . 'epv2_queue';
+			$rows = $wpdb->get_results($wpdb->prepare(
+				"SELECT id FROM {$table}
+				 WHERE state IN ('manual_review','ready_review')
+				   AND (
+					 JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.manual_override_at')) IS NULL
+					 OR JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.manual_override_at')) = ''
+				   )
+				 ORDER BY updated_at ASC
+				 LIMIT %d",
+				max(1, min(100, $limit))
+			));
+			if (! is_array($rows) || $rows === []) return 0;
+			$rejected = 0;
+			foreach ($rows as $row) {
+				if (! ($row instanceof stdClass)) continue;
+				self::mark_state((int) $row->id, 'rejected', [
+					'error_message' => 'auto_reject_review_policy_2026-05-14: failed automation, no manual triage in auto mode',
+				]);
+				$rejected++;
+			}
+			if ($rejected > 0 && class_exists('EPV2_Logger')) {
+				EPV2_Logger::info('queue', "auto_reject_review_items: $rejected → rejected (auto mode, no manual recycle)");
+			}
+			return $rejected;
+		}
+
+		// SEMI MODE: legacy resurrection-логика — operator решает что промоутить.
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 		$rows = $wpdb->get_results($wpdb->prepare(
@@ -1162,6 +1201,82 @@ final class EPV2_Queue {
 	}
 
 	/**
+	 * 2026-05-12 — B4 fix: lifetime attempt cap для chronic recyclers.
+	 *
+	 * Item 2530 (Namibia Flugzeugabsturz) recycled 15+ раз через 6 hours,
+	 * заблокировал pipeline на 2 часа без публикации. Auto_promote cap
+	 * (prior_promotes>=2) защищает только от того что одно автоматическое
+	 * продвижение не повторится бесконечно, но НЕ от других путей recycling:
+	 * watchdog_legacy_reset, sanitize_stuck_*, selector pickup напрямую etc.
+	 * Каждый цикл тратит AI токены без шанса на публикацию.
+	 *
+	 * Lifetime cap: если item имеет >= 25 process-job runs за 24 часа в
+	 * epv2_runs — это чистый chronic recycle. Routed в permanent rejected с
+	 * hard-terminal flag («не пересматривается перезапуском») чтобы все
+	 * downstream salvage layers оставили item в покое.
+	 *
+	 * 25 runs / 24h ≈ 1 run / hour — для item который никогда не публикуется
+	 * это явный лимит, при котором надо остановиться.
+	 */
+	public static function force_reject_chronic_recyclers(int $limit = 20, int $min_runs_24h = 25): int {
+		global $wpdb;
+		$runs_table = $wpdb->prefix . 'epv2_runs';
+		$queue_table = $wpdb->prefix . 'epv2_queue';
+		// Find candidates: items with high run count in last 24h that haven't
+		// reached terminal state yet (still cycling through).
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT q.id, q.state, q.original_title, q.admin_notes,
+				COUNT(r.id) AS run_count
+			FROM {$queue_table} q
+			INNER JOIN {$runs_table} r
+				ON CAST(JSON_UNQUOTE(JSON_EXTRACT(r.payload, '$.last_item_id')) AS UNSIGNED) = q.id
+				AND r.job_name = 'process'
+				AND r.started_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+			WHERE q.state IN ('new', 'retry_process', 'processing_de', 'manual_review', 'ready_review', 'ready_publish')
+			GROUP BY q.id
+			HAVING run_count >= %d
+			ORDER BY run_count DESC
+			LIMIT %d",
+			$min_runs_24h,
+			max(1, min(100, $limit))
+		));
+		if (! is_array($rows) || $rows === []) return 0;
+
+		$rejected = 0;
+		foreach ($rows as $row) {
+			if (! ($row instanceof stdClass)) continue;
+			$notes = is_array(json_decode((string) $row->admin_notes, true)) ? json_decode((string) $row->admin_notes, true) : [];
+			$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$notes['_system']['workflow_terminal_reason'] = 'chronic_recycler_lifetime_cap';
+			$notes['_system']['quarantine_reason'] = 'process_runs_' . (int) $row->run_count . '_in_24h_over_cap_' . $min_runs_24h;
+			$notes['_system']['workflow_step_status'] = 'terminal';
+			$notes['_system']['workflow_owner_token'] = '';
+			$notes['_system']['workflow_heartbeat_at'] = '';
+			$notes['_system']['next_operator_action'] = 'review_source_or_restore_manually';
+			unset($notes['_system']['retry_after'], $notes['_system']['workflow_not_before']);
+			$wpdb->update($queue_table, [
+				'state' => 'rejected',
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+				'error_message' => sprintf(
+					'Chronic recycler permanent reject: %d process runs за 24 часа (cap=%d). Pipeline тратит AI без шанса на публикацию, не пересматривается перезапуском.',
+					(int) $row->run_count,
+					$min_runs_24h
+				),
+				'updated_at' => current_time('mysql', true),
+			], ['id' => (int) $row->id]);
+			$rejected++;
+			if (class_exists('EPV2_Logger')) {
+				EPV2_Logger::warning('queue', "force_reject_chronic_recycler: id={$row->id} runs={$row->run_count}", [
+					'item_id' => (int) $row->id,
+					'run_count' => (int) $row->run_count,
+					'title' => mb_substr((string) $row->original_title, 0, 80),
+				]);
+			}
+		}
+		return $rejected;
+	}
+
+	/**
 	 * Items в ready_publish, которые publish-gate стабильно отклоняет
 	 * (release_quality / google_quality ниже текущих порогов content-kind,
 	 * либо есть quarantine_reason без post_id, и item висит дольше 5 мин)
@@ -1169,6 +1284,83 @@ final class EPV2_Queue {
 	 * вызывается каждый тик, gate возвращает not allowed, publish_not_before
 	 * сдвигается вперёд, таймер постоянно растёт, ничего не публикуется.
 	 */
+	/**
+	 * Sanitize stale ready_review items (2026-05-12, operator feedback).
+	 *
+	 * Items в state='ready_review' застряли без auto-cleanup. Operator видит их
+	 * как «готовы» (admin UI label), но technically они проваливают publish_gate
+	 * (payload_contract, stage_contract, quality_contract). Items сидят 25+ часов
+	 * forever без operator intervention — фантомный «готов» backlog.
+	 *
+	 * Логика:
+	 *  - Если items > $hours_old в ready_review И publish_gate.allowed=true →
+	 *    promote в ready_publish (publisher подберёт)
+	 *  - Если items > $hours_old И sel=reject/low → rejected
+	 *  - Если items > $hours_old И payload_contract issues → manual_review
+	 *    (operator должен fix or rebuild)
+	 */
+	public static function sanitize_stale_ready_review_items(int $hours_old = 6, int $limit = 50): array {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
+			 WHERE state='ready_review'
+			   AND updated_at < DATE_SUB(NOW(), INTERVAL %d HOUR)
+			 ORDER BY updated_at ASC
+			 LIMIT %d",
+			max(1, $hours_old),
+			max(1, min(200, $limit))
+		));
+		$result = ['promoted' => 0, 'rejected' => 0, 'to_review' => 0];
+		if (! is_array($rows) || $rows === []) return $result;
+		foreach ($rows as $row) {
+			$id = (int) ($row->id ?? 0);
+			if ($id <= 0) continue;
+			$payload = self::row_payload($row);
+			$gate = class_exists('EPV2_Publish_Gate')
+				? EPV2_Publish_Gate::evaluate($row, $payload, ['context' => 'publish'])
+				: ['allowed' => false, 'selection_decision' => '', 'blockers' => []];
+			$sel = strtolower((string) ($gate['selection_decision'] ?? ''));
+			$blockers = is_array($gate['blockers'] ?? null) ? $gate['blockers'] : [];
+			if (! empty($gate['allowed'])) {
+				self::mark_state($id, 'ready_publish', [
+					'error_message' => '',
+				]);
+				$result['promoted']++;
+				continue;
+			}
+			if (in_array($sel, ['low', 'reject'], true)) {
+				self::mark_state($id, 'rejected', [
+					'error_message' => 'Sanitize stale ready_review: selection=' . $sel . ' >= ' . $hours_old . 'h не пересматривается перезапуском.',
+				]);
+				$result['rejected']++;
+				continue;
+			}
+			// Has payload/contract issues but sel ok.
+			// POLICY 2026-05-14: auto mode → rejected (no operator triage).
+			$stale_target = self::automation_requires_publish_grade() ? 'rejected' : 'manual_review';
+			self::mark_state($id, $stale_target, [
+				'error_message' => sprintf(
+					'Stale ready_review (>%dh): publish_gate blockers=%s.',
+					$hours_old,
+					implode(',', $blockers)
+				),
+			]);
+			if ($stale_target === 'rejected') {
+				$result['rejected']++;
+			} else {
+				$result['to_review']++;
+			}
+		}
+		if (class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', sprintf(
+				'sanitize_stale_ready_review: promoted=%d, rejected=%d, to_review=%d',
+				$result['promoted'], $result['rejected'], $result['to_review']
+			));
+		}
+		return $result;
+	}
+
 	public static function sanitize_stuck_ready_publish_items(int $limit = 50): int {
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
@@ -1221,13 +1413,16 @@ final class EPV2_Queue {
 			$reason_msg = $below_quality
 				? "Quality ниже порога $content_kind: release=$rel_score/$rel_threshold, google=$goo_score/$goo_threshold."
 				: "Carry-over quarantine: $quarantine.";
-			self::mark_state((int) $row->id, 'manual_review', [
-				'error_message' => 'Материал застрял в очереди публикации (gate отклонял каждый тик). ' . $reason_msg . ' Требует ручной правки или ребилда.',
+			// POLICY 2026-05-14: auto mode → rejected; semi → manual_review.
+			$stuck_target = self::automation_requires_publish_grade() ? 'rejected' : 'manual_review';
+			self::mark_state((int) $row->id, $stuck_target, [
+				'error_message' => 'Материал застрял в очереди публикации (gate отклонял каждый тик). ' . $reason_msg,
 			]);
 			$moved++;
 		}
 		if ($moved > 0 && class_exists('EPV2_Logger')) {
-			EPV2_Logger::info('queue', "sanitize_stuck_ready_publish_items: $moved items → manual_review");
+			$tgt = self::automation_requires_publish_grade() ? 'rejected' : 'manual_review';
+			EPV2_Logger::info('queue', "sanitize_stuck_ready_publish_items: $moved items → $tgt");
 		}
 		return $moved;
 	}
@@ -1367,6 +1562,60 @@ final class EPV2_Queue {
 			EPV2_Logger::info('queue', "trim_old_terminal_items: удалено $total_deleted (keep=$keep)");
 		}
 		return $total_deleted;
+	}
+
+	/**
+	 * 2026-05-13: age-based cleanup для rejected items. Operator-spec —
+	 * rejected items живут максимум 2 часа в очереди, после чего удаляются
+	 * из БД. Освобождает админку от накопления (по 50+ rejected/час).
+	 * Diagnostic info остаётся в ep_epv2_log (14-day retention).
+	 */
+	public static function trim_rejected_older_than_hours(int $hours = 2): int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$hours = max(1, min(168, $hours));
+		$deleted = (int) $wpdb->query($wpdb->prepare(
+			"DELETE FROM {$table}
+			 WHERE state IN ('rejected', 'error', 'duplicate')
+			   AND updated_at < DATE_SUB(NOW(), INTERVAL %d HOUR)
+			 LIMIT 500",
+			$hours
+		));
+		if ($deleted > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "trim_rejected_older_than_hours: удалено $deleted (старше {$hours}h)");
+		}
+		return $deleted;
+	}
+
+	/**
+	 * 2026-05-13: age-based cleanup для review-queue items.
+	 * Operator-spec — manual_review / ready_review items на 99% не будут
+	 * вручную обработаны. Через 2 часа они auto-prune. Это означает: если
+	 * оператор хочет item спасти — должен апплай'нуть в первые 2 часа.
+	 * Items с активным admin_override (operator явно начал работу) — НЕ
+	 * удаляются (защита in-progress правок).
+	 */
+	public static function trim_review_queue_older_than_hours(int $hours = 2): int {
+		global $wpdb;
+		$table = $wpdb->prefix . 'epv2_queue';
+		$hours = max(1, min(168, $hours));
+		// Защита: если оператор недавно открыл/менял item (manual_override stamp
+		// в admin_notes._system) — не удаляем. Только items без активной правки.
+		$deleted = (int) $wpdb->query($wpdb->prepare(
+			"DELETE FROM {$table}
+			 WHERE state IN ('manual_review', 'ready_review')
+			   AND updated_at < DATE_SUB(NOW(), INTERVAL %d HOUR)
+			   AND (
+				 JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.manual_override_at')) IS NULL
+				 OR JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.manual_override_at')) = ''
+			   )
+			 LIMIT 500",
+			$hours
+		));
+		if ($deleted > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', "trim_review_queue_older_than_hours: удалено $deleted (старше {$hours}h, manual_review + ready_review)");
+		}
+		return $deleted;
 	}
 
 	private static function force_reject_zombie_pre_ai_rejects(): int {
@@ -1688,6 +1937,11 @@ final class EPV2_Queue {
 				$importance = EPV2_Importance_Score::compute($item, $payload);
 			}
 			if ($selection_blocked) {
+				$state = 'rejected';
+			} elseif (self::automation_requires_publish_grade()) {
+				// POLICY 2026-05-14: auto mode — drop importance gate, всегда rejected.
+				// Operator не разбирает manual_review, importance-based routing
+				// просто превращается в дополнительную задержку перед auto-trim.
 				$state = 'rejected';
 			} else {
 				$state = $importance >= $importance_threshold ? 'manual_review' : 'rejected';
@@ -2087,6 +2341,13 @@ final class EPV2_Queue {
 		if (! $current) {
 			return;
 		}
+		// 2026-05-13: bust processable-cache transient на state-changes,
+		// которые влияют на orchestrator's processable check. Без bust'а
+		// 30-секундное stale window задерживает orchestrator pickup новых
+		// items / переходов в retry_process.
+		if (in_array($state, ['new', 'ready_publish', 'retry_process', 'ready_review'], true)) {
+			delete_transient('epv2_bridge_has_processable_v1');
+		}
 		// Central per-provider AI usage accounting. Any mark_state call that
 		// persists a fresh ai_payload counts as a worker round-trip — read
 		// the token total from _meta.ai_runtime[]/_meta.tokens directly so
@@ -2208,7 +2469,9 @@ final class EPV2_Queue {
 			in_array((string) ($notes['_system']['manual_confirmation_required'] ?? ''), ['media', 'translation'], true)
 			&& in_array($state, ['processing_de', 'retry_process'], true)
 		) {
-			$state = 'ready_review';
+			// POLICY 2026-05-14: auto mode → rejected (worker сигнал
+			// "нужна ручная проверка" в auto mode = automation failed).
+			$state = self::automation_requires_publish_grade() ? 'rejected' : 'ready_review';
 		}
 		if ($state === 'ready_publish') {
 			$existing_not_before = (int) ($notes['_system']['publish_not_before'] ?? 0);
@@ -2297,6 +2560,13 @@ final class EPV2_Queue {
 		self::guard_payload_field_sizes($id, $data);
 		$wpdb->update($wpdb->prefix . 'epv2_queue', $data, ['id' => $id]);
 		self::sync_active_automation_item($id, $state);
+		// R16 2026-05-14: extension hook на reject. Useful для archival /
+		// audit pipelines / external monitoring. Includes terminal reason
+		// from error_message + admin_notes workflow_terminal_reason.
+		if ($state === 'rejected') {
+			$reason = (string) ($extra['error_message'] ?? '');
+			do_action('epv2_after_reject', $id, $reason, $state);
+		}
 	}
 
 	public static function set_active_automation_item(int $id): void {
@@ -2355,16 +2625,31 @@ final class EPV2_Queue {
 	}
 
 	public static function active_owner_claim(int $item_id): bool {
+		// 2026-05-12 W3.3: atomic CAS via MySQL GET_LOCK + double-check.
+		// Раньше check pointer → set_active separately — race condition,
+		// два orchestrator'a могли claim тот же item одновременно (item 2203
+		// orphan был результат именно этого).
+		// Теперь: app-level mutex serialize'ит claim'ы.
+		global $wpdb;
 		$item = self::get_item_summary($item_id);
 		if (! $item) {
 			return false;
 		}
-		$current = self::active_owner_pointer_item();
-		if ($current && (int) ($current->id ?? 0) !== $item_id) {
+		$lock_acquired = (int) $wpdb->get_var($wpdb->prepare("SELECT GET_LOCK(%s, %d)", 'epv2_active_owner_claim', 3));
+		if ($lock_acquired !== 1) {
+			// Couldn't acquire lock — another claimer in progress. Fail safely.
 			return false;
 		}
-		self::set_active_automation_item($item_id);
-		return true;
+		try {
+			$current = self::active_owner_pointer_item();
+			if ($current && (int) ($current->id ?? 0) !== $item_id) {
+				return false;
+			}
+			self::set_active_automation_item($item_id);
+			return true;
+		} finally {
+			$wpdb->query($wpdb->prepare("SELECT RELEASE_LOCK(%s)", 'epv2_active_owner_claim'));
+		}
 	}
 
 	public static function active_owner_heartbeat(int $item_id): void {
@@ -2722,6 +3007,12 @@ final class EPV2_Queue {
 		// «Новые» с warning text. Operator видит junk в очереди.
 		'снят после story-card',
 		'pre-ai verdict',
+		// 2026-05-12 W3.2 REVERTED: добавление этих tokens вызвало cascade — items
+		// которые operator должен был review в manual_review, инстead уходили в
+		// rejected → trim_old_terminal_items (keep=80) их DELETE'ил. Result:
+		// 183 manual_review/ready_review/rejected/duplicate items lost. WP posts
+		// intact. Этот expand был too aggressive — operator должен иметь возможность
+		// review chronic recyclers / TTL-exceeded items, не auto-trim их.
 	];
 
 	/**
@@ -2775,6 +3066,12 @@ final class EPV2_Queue {
 
 	private static function soft_terminal_state_guard(int $id, string $intended_state, array $extra, ?object $current): string {
 		if (! $current) {
+			return $intended_state;
+		}
+		// POLICY 2026-05-14: в auto mode operator не разбирает ready_review.
+		// Salvage rejected → ready_review даёт mёртвый item, который потом
+		// auto-rejected обратно. Skip guard полностью, оставить terminal как есть.
+		if (self::automation_requires_publish_grade()) {
 			return $intended_state;
 		}
 		$error_message = (string) ($extra['error_message'] ?? '');
@@ -2928,11 +3225,17 @@ final class EPV2_Queue {
 		// они могут ждать analysis-grade rewrite.
 		global $wpdb;
 		$hours = max(1, min(168, $hours));
+		// 2026-05-12 bug #18 fix: использовать ТОЛЬКО created_at, не GREATEST.
+		// Раньше `GREATEST(created_at, updated_at)` пропускал items потому что
+		// каждый collect cycle / watchdog / selector poll рефрешит updated_at,
+		// и GREATEST returns recent value → item никогда не «stale». Items
+		// 2669, 2724 висели 8h+ в state=new без auto-prune. Created_at
+		// immutable — реально показывает возраст intake'а.
 		$rows = $wpdb->get_results($wpdb->prepare(
 			"SELECT id, ai_payload, admin_notes FROM {$wpdb->prefix}epv2_queue
 			 WHERE state = 'new'
-			   AND GREATEST(created_at, updated_at) < DATE_SUB(NOW(), INTERVAL %d HOUR)
-			 ORDER BY GREATEST(created_at, updated_at) ASC
+			   AND created_at < DATE_SUB(NOW(), INTERVAL %d HOUR)
+			 ORDER BY created_at ASC
 			 LIMIT 100",
 			$hours
 		));
@@ -2941,15 +3244,55 @@ final class EPV2_Queue {
 		}
 		$pruned = 0;
 		$kept_top = 0;
+		$kept_ready = 0;
 		foreach ($rows as $row) {
 			$id = (int) ($row->id ?? 0);
 			if ($id <= 0) continue;
 			// TOP / breaking exception — эти items имеют право ждать дольше.
-			// Сигналы: story_card.top_story_candidate / breaking_candidate,
-			// payload._meta.breaking / top_story / breaking_watch,
-			// admin_notes.selection.top_story_candidate / breaking_candidate.
 			if (self::row_is_top_story_or_breaking($row)) {
 				$kept_top++;
+				continue;
+			}
+			// 2026-05-12 fix: publish-ready exception. Если item технически
+			// готов (stage_checklist.ready_publish=true, все 3 lang + media),
+			// но почему-то застрял в state='new' (watchdog_legacy_reset перевёл
+			// без routing'а, orchestrator не подобрал) — НЕ rejected. Это
+			// legitimate publish candidate, его нужно promote'нуть в
+			// ready_publish, а не отбросить как stale.
+			// Caught case: item 2651 имел stage_checklist.ready_publish=true,
+			// pub_est=NULL, но был отбит TTL fix'ом. Operator подтвердил —
+			// должен был публиковаться.
+			$row_payload = json_decode((string) ($row->ai_payload ?? ''), true);
+			// 2026-05-12 (refined): use Publish_Gate::evaluate как final arbiter.
+			// Раньше я промоутил по stage_checklist.ready_publish=true, но gate
+			// валидирует contract (payload_contract, stage_contract, quality)
+			// отдельно. Items имели checklist=true но `allowed=false` из-за
+			// contract issues → publisher не публикует, item висит в
+			// ready_publish forever, operator confused.
+			$gate_allows_publish = false;
+			if (is_array($row_payload) && class_exists('EPV2_Publish_Gate')) {
+				$gate_check = EPV2_Publish_Gate::evaluate($row, $row_payload, [
+					'context' => 'publish',
+				]);
+				$gate_allows_publish = ! empty($gate_check['allowed']);
+			}
+			if ($gate_allows_publish) {
+				// Promote to ready_publish для publisher pickup, clear stale state.
+				$promote_notes = json_decode((string) ($row->admin_notes ?? ''), true);
+				$promote_notes = is_array($promote_notes) ? $promote_notes : [];
+				$promote_notes['_system'] = is_array($promote_notes['_system'] ?? null) ? $promote_notes['_system'] : [];
+				$promote_notes['_system']['_promoted_by_prune'] = gmdate('Y-m-d H:i:s');
+				unset(
+					$promote_notes['_system']['workflow_owner_token'],
+					$promote_notes['_system']['workflow_heartbeat_at'],
+					$promote_notes['_system']['retry_after'],
+					$promote_notes['_system']['workflow_not_before']
+				);
+				self::mark_state($id, 'ready_publish', [
+					'admin_notes' => wp_json_encode($promote_notes, JSON_UNESCAPED_UNICODE),
+					'error_message' => '',
+				]);
+				$kept_ready++;
 				continue;
 			}
 			self::mark_state($id, 'rejected', [
@@ -2958,7 +3301,7 @@ final class EPV2_Queue {
 			$pruned++;
 		}
 		if (class_exists('EPV2_Logger')) {
-			EPV2_Logger::info('queue', "prune_new_stale: $pruned rejected (>={$hours}h в 'new'), $kept_top kept (TOP/breaking exception)");
+			EPV2_Logger::info('queue', "prune_new_stale: $pruned rejected (>={$hours}h в 'new'), $kept_top kept (TOP/breaking), $kept_ready promoted (publish-ready)");
 		}
 		return $pruned;
 	}
@@ -4139,12 +4482,50 @@ final class EPV2_Queue {
 			return 'ready_publish';
 		}
 
-		$payload = self::row_payload($row);
-		if ($payload !== []) {
-			$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
+		// 2026-05-13 v22/v23: items с НЕ-publish real state НИКОГДА не должны
+		// репортить ufs=ready_publish из stored stage_checklist. State 'new' /
+		// 'retry_process' / 'processing_*' / 'ready_review' имеют priority над
+		// stored checklist (он может быть stale от prior cycle). Items в new
+		// после watchdog_legacy_reset из rejected — stage_checklist может быть
+		// true, но item не реально готов — он ждёт orchestrator pickup.
+		// "Готово к публикации" блок в admin показывал такие items как "висяки".
+		if (in_array($state, ['new', 'retry_process', 'processing_de', 'processing_uk', 'processing_en'], true)) {
+			return 'new';
 		}
-		if ($payload !== [] && (EPV2_AI_Processor::payload_is_publish_ready($payload) || self::workflow_payload_ready_publish_checklist($payload))) {
-			return 'ready_publish';
+		if ($state === 'ready_review') {
+			return 'ready_review';
+		}
+
+		$payload = self::row_payload($row);
+		// 2026-05-13 perf: admin page render вызывает эту функцию per-row
+		// (~50 строк на page). normalize_existing_payload(false) всё равно
+		// дёргает recategorize_payload_from_de_master → categorizer regex chain
+		// (slow.log: 5+ сек per row). Для DISPLAY достаточно прочитать
+		// сохранённый stage_checklist + media_contract. Их актуальность
+		// поддерживает worker write path. Если данных нет (legacy/edge case) —
+		// fallback на полный normalize.
+		if ($payload !== []) {
+			$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			$stage_checklist = is_array($meta['stage_checklist'] ?? null) ? $meta['stage_checklist'] : [];
+			$has_stored_checklist = ! empty($stage_checklist);
+			if ($has_stored_checklist) {
+				// Fast path — читаем сохранённое состояние без normalize.
+				$ready_via_checklist =
+					! empty($stage_checklist['ready_publish'])
+					&& ! empty($stage_checklist['translations_ready'])
+					&& ! empty($stage_checklist['publish_finish_ready'])
+					&& empty($meta['translations_deferred'])
+					&& EPV2_AI_Processor::payload_media_contract_passes($payload);
+				if ($ready_via_checklist) {
+					return 'ready_publish';
+				}
+				return 'new';
+			}
+			// Slow path только для редких legacy/edge rows без stored checklist.
+			$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
+			if (EPV2_AI_Processor::payload_is_publish_ready($payload) || self::workflow_payload_ready_publish_checklist($payload)) {
+				return 'ready_publish';
+			}
 		}
 
 		return 'new';
@@ -4293,13 +4674,21 @@ final class EPV2_Queue {
 		];
 	}
 
+	// 2026-05-13 perf: rest.php вызывает bridge_health_snapshot() 3 раза в одном
+	// request (lines 160, 237, 238) — каждый раз обходит ~100 рядов через
+	// trends.history() которая unserialize'ит 180KB option. Memoize в request.
+	private static array $bridge_health_cache = [];
+
 	public static function bridge_health_snapshot(): array {
+		if (isset(self::$bridge_health_cache['snapshot'])) {
+			return self::$bridge_health_cache['snapshot'];
+		}
 		$runtime = self::bridge_runtime_snapshot();
 		$active = self::bridge_active_owner_row();
 		$contract = self::cached_queue_contract_health();
 		$acceptance = self::bridge_acceptance_snapshot();
 
-		return [
+		$result = [
 			'active_automation_item' => (int) ($runtime['active_automation_item'] ?? 0),
 			'active_workflow_step' => $active ? self::workflow_step($active) : '',
 			'active_workflow_status' => $active ? self::workflow_step_status($active) : '',
@@ -4311,6 +4700,8 @@ final class EPV2_Queue {
 			'workflow_stage_circuit' => EPV2_Resilience_Manager::workflow_stage_circuit_snapshot(),
 			'incident_counters' => self::bridge_incident_counters(),
 		];
+		self::$bridge_health_cache['snapshot'] = $result;
+		return $result;
 	}
 
 	private static function bridge_incident_counters(): array {
@@ -4352,17 +4743,40 @@ final class EPV2_Queue {
 	}
 
 	private static function bridge_has_processable_items(): bool {
+		// 2026-05-13 perf: эта функция занимает ~6 секунд (4 SELECT с двойным
+		// JSON_EXTRACT в ORDER BY + workflow_user_state_for_row per row). Зовётся
+		// каждый раз когда orchestrator опрашивает /bridge/state (раз в 10 сек),
+		// и при каждом refresh админки. Кэшируем 5 сек: orchestrator делает
+		// processing decision раз в цикл, 5 сек stale не мешает.
+		// In-request memo + cross-request transient.
+		static $request_cache = null;
+		if ($request_cache !== null) {
+			return $request_cache;
+		}
+		$cache_key = 'epv2_bridge_has_processable_v1';
+		$cached = get_transient($cache_key);
+		if ($cached !== false) {
+			$request_cache = (bool) ($cached === 'y');
+			return $request_cache;
+		}
+
 		$active = self::bridge_active_owner_row();
 		if ($active && ! self::workflow_waiting_not_before($active) && ! self::item_requires_manual_confirmation_state($active)) {
+			$request_cache = true;
+			set_transient($cache_key, 'y', 30);
 			return true;
 		}
 
 		foreach (['new', 'retry_process', 'ready_review', 'reserve'] as $state) {
 			if (self::bridge_next_processable_row($state) instanceof stdClass) {
+				$request_cache = true;
+				set_transient($cache_key, 'y', 30);
 				return true;
 			}
 		}
 
+		$request_cache = false;
+		set_transient($cache_key, 'n', 30);
 		return false;
 	}
 
@@ -4509,7 +4923,10 @@ final class EPV2_Queue {
 			'recent' => $recent,
 			'status' => $streak >= 10 ? 'accepted' : ($streak > 0 ? 'in_progress' : 'not_proven'),
 		];
-		set_transient($cache_key, $snapshot, 30);
+		// 2026-05-13 perf: TTL поднят 30→180 сек. Snapshot — readonly статистика
+		// для admin/observability, 3-минутная давность не критична. Раньше
+		// каждый refresh админки попадал в expired cache → 3-секундный freeze.
+		set_transient($cache_key, $snapshot, 180);
 		return $snapshot;
 	}
 
@@ -4547,12 +4964,29 @@ final class EPV2_Queue {
 	private static function bridge_next_processable_row(string $state): ?object {
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
+		// 2026-05-12 W3.1: ordering fix. Раньше ORDER BY created_at ASC
+		// благоприятствовал zombies (item 2203 38h old блокировал слот; fresh
+		// items 2818-2832 ждали 100+ min). Новый order:
+		//   1. in-progress workflow_step (resume) FIRST — finish what started
+		//   2. has workflow_owner_token (active claim) — pick up partial work
+		//   3. importance score (если есть в story_card.importance hint) —
+		//      lacking direct importance column, use story_score
+		//   4. created_at DESC — newer beats old (5h TTL eventually purges old)
+		// LIMIT increased 25→50 чтобы свежие не starve'или ниже cutoff.
 		$rows = $wpdb->get_results($wpdb->prepare(
 			"SELECT " . self::SUMMARY_FIELDS . "
 			FROM {$table}
 			WHERE state = %s
-			ORDER BY created_at ASC, id ASC
-			LIMIT 25",
+			ORDER BY
+				(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(admin_notes,'$._system.workflow_step')) IS NOT NULL
+					AND JSON_UNQUOTE(JSON_EXTRACT(admin_notes,'$._system.workflow_step')) != ''
+					THEN 1 ELSE 0 END) DESC,
+				(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(admin_notes,'$._system.workflow_owner_token')) IS NOT NULL
+					AND JSON_UNQUOTE(JSON_EXTRACT(admin_notes,'$._system.workflow_owner_token')) != ''
+					THEN 1 ELSE 0 END) DESC,
+				COALESCE(story_score, 0) DESC,
+				created_at DESC, id DESC
+			LIMIT 50",
 			$state
 		));
 		if (! is_array($rows) || $rows === []) {
@@ -4803,21 +5237,43 @@ final class EPV2_Queue {
 	}
 
 	private static function workflow_stage_attempt_limit(string $stage): int {
-		// Phase 2.4 — Architecture audit section 6 tradeoff #4:
-		// "2 attempts per failed step, then manual_review".
-		// Each stage gets the same independent budget; once exhausted,
-		// quarantine routes the item to manual_review (Queue::quarantine).
+		// Q-fix 2026-05-16: bumped 2→4 для pipeline stages. Reason:
+		// `recent_process_attempt_count` counts ALL process runs per item,
+		// not stage-specific runs. Normal pipeline = 4 process runs
+		// (rebuild_bundle → translate_uk → translate_en → publish_finish).
+		// Limit=2 caused inline_stage_attempt_cap to fire after just 2
+		// successful transitions — 60% throughput drop observed 14-16 мая.
+		// Limit=4 allows full pipeline progression; chronic recyclers
+		// still caught via separate workflow_step_attempts counter (per-
+		// stage real attempts) + watchdog quarantine_pathological_loops.
+		// publish_ready_gate kept tighter — это final check, retries rare.
 		$stage = sanitize_key($stage);
 		return match ($stage) {
+			'publish_ready_gate' => 2,
 			'build_de_master',
 			'rebuild_bundle',
 			'publish_finish',
-			'publish_ready_gate',
 			'translate_uk',
 			'translate_en',
-			'translate_finish' => 2,
-			default => 2,
+			'translate_finish' => 4,
+			default => 4,
 		};
+	}
+
+	/**
+	 * Public wrapper для recent_process_attempt_count — позволяет AI processor
+	 * сделать inline short-circuit check до run_worker_stage. См. fix 2026-05-12:
+	 * watchdog quarantine ловит attempts>=2 только при периодическом sweep;
+	 * между sweep'ами retry-process может запустить AI ещё 2-3 раза для того же
+	 * stage, дав "5/2 attempts" в quarantine error_message. Inline check
+	 * перед worker invocation останавливает loop до новой AI-затраты.
+	 */
+	public static function stage_recent_attempts(int $item_id, string $stage, int $window_seconds = HOUR_IN_SECONDS): int {
+		return self::recent_process_attempt_count($item_id, $stage, $window_seconds);
+	}
+
+	public static function stage_attempt_limit_public(string $stage): int {
+		return self::workflow_stage_attempt_limit($stage);
 	}
 
 	private static function recent_process_attempt_count(int $item_id, string $stage = '', int $window_seconds = DAY_IN_SECONDS): int {
@@ -4826,24 +5282,43 @@ final class EPV2_Queue {
 			return 0;
 		}
 		$table = $wpdb->prefix . 'epv2_runs';
-		// Architecture audit phase 2.4 mandates "2 attempts per failed
-		// step then manual_review". The default 24-hour window meant an
-		// item that failed twice in the morning and twice in the
-		// afternoon got quarantined immediately on the next run, even
-		// though the morning failures were stale. 2-hour window keeps
-		// the per-step semantics tight: 2 attempts within 2 hours →
-		// quarantine. Anything older than that does not count.
 		$default_window = 2 * HOUR_IN_SECONDS;
 		$effective_window = $window_seconds === DAY_IN_SECONDS
 			? $default_window
 			: max(HOUR_IN_SECONDS, $window_seconds);
 		$since = gmdate('Y-m-d H:i:s', time() - $effective_window);
+		// Q-fix 2026-05-16: filter out SUCCESSFUL stage transitions.
+		// Pipeline routinely uses 4 process calls per item (rebuild_bundle →
+		// translate_uk → translate_en → publish_finish). Каждый успешный
+		// transition записывает result="queued_X_stage". Эти НЕ failures —
+		// it's normal stage progression. Counting them inflates attempts и
+		// fresh items fail inline cap after 2-3 successful transitions.
+		// Real "failed attempts" = result содержит retry/rebuild_bundle для
+		// THE SAME stage being attempted, OR worker_failed*, OR error*.
+		// Conservative: exclude obvious successful transitions.
+		$stage_filter = '';
+		if ($stage !== '') {
+			// Only count runs that were attempts AT THIS stage AND did not
+			// successfully transition forward. Match result="queued_{stage}_stage"
+			// which means stage retried itself (failure), or result starting
+			// with error/failed/retry. Exclude "queued_OTHER_stage" (success).
+			$stage_safe = $wpdb->_real_escape($stage);
+			$stage_filter = "AND (
+				JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'queued_{$stage_safe}_stage'
+				OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'error_%'
+				OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'failed_%'
+				OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'retry_%'
+				OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'worker_failed%'
+				OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE '%_attempt_cap_terminated'
+			)";
+		}
 		return (int) $wpdb->get_var($wpdb->prepare(
 			"SELECT COUNT(*)
 			FROM {$table}
 			WHERE job_name = 'process'
 				AND started_at >= %s
-				AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.last_item_id')) AS UNSIGNED) = %d",
+				AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.last_item_id')) AS UNSIGNED) = %d
+				{$stage_filter}",
 			$since,
 			$item_id
 		));

@@ -4,16 +4,47 @@ Rewrites article into German using OpenAI GPT-4o Mini (primary) or DeepSeek (fal
 """
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
-from .openai_compat import completion_debug, completion_text, completion_total_tokens, reasoning_extra_body
+from .openai_compat import (
+    completion_cached_tokens,
+    completion_debug,
+    completion_text,
+    completion_total_tokens,
+    reasoning_extra_body,
+)
 
 logger = logging.getLogger(__name__)
+
+# R8 Phase 2 2026-05-14: spaCy de_core_news_lg для NER-based filtering
+# fabricated_name candidates. Eliminates German compound noun FP epidemic
+# (Bundesverteidigungsminister, Russlands Angriffskrieg etc.) → их NER не
+# определит как PERSON. Lazy load (один раз на process) — ~2s startup.
+_DE_NLP = None
+_DE_NLP_LOAD_FAILED = False
+
+def _get_de_nlp():
+    """Lazy-load spaCy DE model. Returns None если spacy не установлен или fail'нул."""
+    global _DE_NLP, _DE_NLP_LOAD_FAILED
+    if _DE_NLP is not None:
+        return _DE_NLP
+    if _DE_NLP_LOAD_FAILED:
+        return None
+    try:
+        import spacy  # type: ignore
+        _DE_NLP = spacy.load("de_core_news_lg")
+        logger.info("spaCy de_core_news_lg loaded for fabricated_name NER filtering")
+        return _DE_NLP
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spaCy DE model unavailable, falling back to heuristic-only: %s", exc)
+        _DE_NLP_LOAD_FAILED = True
+        return None
 
 # Map of known publication hosts → display name used in attribution phrases
 _SOURCE_NAME_MAP: dict[str, str] = {
@@ -92,12 +123,23 @@ class RewriteResult:
     provider: str = ""
     model: str = ""
     tokens: int = 0
+    # R5 2026-05-14: OpenAI prompt caching tracking — 50% discount применяется
+    # на cached_tokens. DeepSeek не отдаёт cached → 0.
+    cached_tokens: int = 0
     # Anti-plagiarism gate (architecture phase 3). Surface the score so
     # callers can log it / decide on regeneration. Default leaves the
     # gate inactive when not computed.
     uniqueness_pct: float = 100.0
     uniqueness_passed: bool = True
     uniqueness_reason: str = ""
+    # B3 (2026-05-12): soft validator warnings. Раньше валидатор date/name
+    # бросал error и REJECT'ил весь rewrite (item уходил в retry → cap →
+    # manual_review). Теперь validators могут возвращать warning'и, и rewrite
+    # доходит до publisher. PHP gate решает уровень severity для каждого:
+    #  - дата явная фабрикация (год в будущем, нет в source) → может block'ить
+    #  - дата current-year edge case → можно опубликовать с warning
+    # warnings is a list of dicts: [{"kind": "date|name", "value": "...", "severity": "soft|hard"}]
+    warnings: list = field(default_factory=list)
 
 
 _SYSTEM_PROMPT = """Du bist ein professioneller deutschsprachiger Nachrichtenredakteur für EuroPulse.today —
@@ -541,9 +583,9 @@ Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "card_l
         if not api_key:
             continue
         if provider == "deepseek":
-            result = await _call_deepseek(user_prompt, api_key, source_text, max_tok, model or "deepseek-chat")
+            result = await _call_deepseek(user_prompt, api_key, source_text, max_tok, model or "deepseek-chat", story_card=story_card, dossier_block=dossier_block)
         else:
-            result = await _call_openai(user_prompt, api_key, source_text, max_tok, model or "gpt-4o-mini")
+            result = await _call_openai(user_prompt, api_key, source_text, max_tok, model or "gpt-4o-mini", story_card=story_card, dossier_block=dossier_block)
         if result.success:
             result.provider = provider
             result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
@@ -709,7 +751,7 @@ def _clean_text(text: str) -> str:
     return cleaned
 
 
-async def _call_openai(user_prompt: str, api_key: str, source_text: str, max_tokens: int = 1536, model: str = "gpt-4o-mini") -> RewriteResult:
+async def _call_openai(user_prompt: str, api_key: str, source_text: str, max_tokens: int = 1536, model: str = "gpt-4o-mini", story_card: dict | None = None, dossier_block: str = "") -> RewriteResult:
     try:
         client = AsyncOpenAI(api_key=api_key)
         kwargs = {
@@ -731,15 +773,16 @@ async def _call_openai(user_prompt: str, api_key: str, source_text: str, max_tok
         raw = completion_text(response)
         if not raw.strip():
             raise ValueError(f"empty OpenAI response ({completion_debug(response)})")
-        result = _parse_json_result(raw, source_text)
+        result = _parse_json_result(raw, source_text, story_card=story_card, supporting_text=dossier_block)
         result.tokens = completion_total_tokens(response)
+        result.cached_tokens = completion_cached_tokens(response)
         return result
     except Exception as exc:
         logger.warning("OpenAI rewrite failed: %s", exc)
         return RewriteResult(error=str(exc))
 
 
-async def _call_deepseek(user_prompt: str, api_key: str, source_text: str, max_tokens: int = 1536, model: str = "deepseek-chat") -> RewriteResult:
+async def _call_deepseek(user_prompt: str, api_key: str, source_text: str, max_tokens: int = 1536, model: str = "deepseek-chat", story_card: dict | None = None, dossier_block: str = "") -> RewriteResult:
     try:
         client = AsyncOpenAI(
             api_key=api_key,
@@ -756,15 +799,17 @@ async def _call_deepseek(user_prompt: str, api_key: str, source_text: str, max_t
             max_tokens=max_tokens,
         )
         raw = response.choices[0].message.content or ""
-        result = _parse_json_result(raw, source_text)
+        result = _parse_json_result(raw, source_text, story_card=story_card, supporting_text=dossier_block)
         result.tokens = completion_total_tokens(response)
+        # DeepSeek не отдаёт cached_tokens, completion_cached_tokens вернёт 0.
+        result.cached_tokens = completion_cached_tokens(response)
         return result
     except Exception as exc:
         logger.warning("DeepSeek rewrite failed: %s", exc)
         return RewriteResult(error=str(exc))
 
 
-def _parse_json_result(raw: str, source_text: str) -> RewriteResult:
+def _parse_json_result(raw: str, source_text: str, story_card: dict | None = None, supporting_text: str = "") -> RewriteResult:
     import json
     try:
         data = json.loads(raw)
@@ -777,18 +822,54 @@ def _parse_json_result(raw: str, source_text: str) -> RewriteResult:
         )
         result = _strip_unsupported_first_names(result, source_text)
         result = _normalize_german_style(result)
-        unsupported = _unsupported_explicit_dates(
-            f"{result.title_de}\n{result.lead_de}\n{result.body_de}",
-            source_text,
-        )
-        if unsupported:
-            return RewriteResult(error=f"Unsupported explicit date in AI rewrite: {', '.join(unsupported)}")
-        unsupported_names = _unsupported_generated_full_names(
-            f"{result.title_de}\n{result.lead_de}\n{result.body_de}",
-            source_text,
-        )
-        if unsupported_names:
-            return RewriteResult(error=f"Unsupported full name in AI rewrite: {', '.join(unsupported_names)}")
+        # B3 (2026-05-12): Soft validators. Раньше REJECT'или весь rewrite, теперь
+        # annotate в result.warnings. Hard fabrications (date далеко в будущем без
+        # source-mention) маркируются severity=hard — PHP publisher может всё ещё
+        # block'ить, но мы НЕ теряем item на retry-cap из-за edge cases (yearless
+        # current-year, today + relative hint, well-known full name).
+        full_text = f"{result.title_de}\n{result.lead_de}\n{result.body_de}"
+        try:
+            today = _dt.date.today()
+        except Exception:
+            today = None
+
+        unsupported_dates = _unsupported_explicit_dates(full_text, source_text)
+        for dt_str in unsupported_dates:
+            severity = "hard"
+            # Soft-classify: дата в прошлом дальше 2 лет, или в будущем дальше 3 лет —
+            # серьёзная фабрикация. Иначе soft (operator decides).
+            try:
+                m = re.match(r"(\d{1,2})\.\s*([a-zäöü]+)\s+(\d{4})", dt_str.lower())
+                if m and today is not None:
+                    month_num = _DE_MONTH_NUM.get(m.group(2), 0)
+                    if month_num:
+                        date_obj = _dt.date(int(m.group(3)), month_num, int(m.group(1)))
+                        diff_days = (date_obj - today).days
+                        if -730 <= diff_days <= 1095:
+                            severity = "soft"
+            except (ValueError, TypeError):
+                pass
+            result.warnings.append({"kind": "explicit_date", "value": dt_str, "severity": severity})
+
+        unsupported_names = _unsupported_generated_full_names(full_text, source_text)
+        for name in unsupported_names:
+            # Name validator всегда soft — regex pattern имеет известные false-positive cases
+            # (compound nouns + capitalized titles), PHP publisher решает на основе
+            # importance / category / source confidence.
+            result.warnings.append({"kind": "full_name", "value": name, "severity": "soft"})
+
+        # 2026-05-12 W1.3: proper-noun fabrication guard.
+        # ESC post 10149 invented "Linda Lampenius", "Pete Parkkonen", etc. — none in source.
+        # R8 Phase 1+2 2026-05-14: severity restored to "hard" после deploy:
+        #  - Phase 1 (supporting_text cross-ref) — расширяет trusted_tokens
+        #  - Phase 2 (spaCy de_core_news_lg NER) — фильтрует compound nouns
+        # Combined reduce FP rate ~85%. Real fabrications all'еще caught.
+        # 2026-05-13 epidemic (Russlands Angriffskrieg → flagged as name) теперь
+        # impossible — spaCy NER не определяет это как PER entity.
+        fabricated = _detect_fabricated_proper_nouns(full_text, source_text, story_card, supporting_text=supporting_text)
+        for name in fabricated:
+            result.warnings.append({"kind": "fabricated_name", "value": name, "severity": "hard"})
+
         return result
     except Exception as exc:
         return RewriteResult(error=f"JSON parse failed: {exc}")
@@ -801,9 +882,40 @@ _DE_TO_EN_MONTHS = {
     "november": "november", "dezember": "december",
 }
 
+# Direct DE month → numeric mapping. The previous numeric lookup used
+# `list(_DE_TO_EN_MONTHS.keys()).index(...) + 1`, which is off-by-one starting
+# from April because "maerz" is a duplicate of "märz" in the dict above.
+# That made the "11.04.2026" / "2026-04-11" source-match branch skip many
+# legitimate dates. Use this explicit map instead.
+_DE_MONTH_NUM = {
+    "januar": 1, "februar": 2, "märz": 3, "maerz": 3,
+    "april": 4, "mai": 5, "juni": 6, "juli": 7,
+    "august": 8, "september": 9, "oktober": 10,
+    "november": 11, "dezember": 12,
+}
+
+_DATE_RELATIVE_HINTS = (
+    "heute", "today", "сьогодні", "сегодня", "сьогоднi",
+    "gestern", "yesterday", "вчора", "вчера",
+    "morgen", "tomorrow", "завтра",
+    "soeben", "gerade eben", "kürzlich", "kuerzlich", "vor wenigen", "vor kurzem",
+    "tagesaktuell", "stunden", "minuten", "minutes ago", "hours ago",
+    "this morning", "this afternoon", "this evening",
+    "diesem morgen", "diesem nachmittag", "diesem abend",
+    "live", "breaking", "just in",
+)
+
+
 def _unsupported_explicit_dates(generated_text: str, source_text: str) -> list[str]:
     source = source_text.lower()
     generated = generated_text.lower()
+    try:
+        today = _dt.date.today()
+        current_year = today.year
+    except Exception:
+        today = None
+        current_year = 0
+    has_relative_hint = any(hint in source for hint in _DATE_RELATIVE_HINTS)
     matches = re.findall(
         r"\b(\d{1,2})\.\s*(januar|februar|m[äa]rz|april|mai|juni|juli|august|september|oktober|november|dezember)\s+(\d{4})\b",
         generated,
@@ -821,10 +933,33 @@ def _unsupported_explicit_dates(generated_text: str, source_text: str) -> list[s
         if f"{month_en} {day}, {year}" in source or f"{day} {month_en} {year}" in source:
             continue
         # Numeric: "11.04.2026" or "2026-04-11"
-        month_num = list(_DE_TO_EN_MONTHS.keys()).index(month_de_norm) + 1 if month_de_norm in _DE_TO_EN_MONTHS else 0
+        month_num = _DE_MONTH_NUM.get(month_de_norm, 0)
         if month_num:
             if f"{day}.{month_num:02d}.{year}" in source or f"{year}-{month_num:02d}-{int(day):02d}" in source:
                 continue
+        # 2026-05-12 — Whitelist 1: yearless mention in current-year events.
+        # German news convention: "11. April" без года для current-year items.
+        # AI добавляет current year (правильно) → validator не находит "11. april 2026"
+        # в source → false positive. Принимаем yearless форму если year == текущий.
+        if month_num and int(year) == current_year:
+            if f"{day}. {month_de_norm}" in source:
+                continue
+            if f"{month_en} {day}" in source or f"{day} {month_en}" in source:
+                continue
+            if f"{day}.{month_num:02d}." in source:
+                continue
+        # 2026-05-12 — Whitelist 2: today/yesterday/tomorrow с relative-time
+        # hint в source. AI часто конвертирует "heute/gestern/morgen" в
+        # explicit calendar date — это допустимый transformation если source
+        # содержит relative-time маркер (heute, today, сьогодні, kürzlich, live).
+        if today is not None and month_num and has_relative_hint:
+            try:
+                parsed = _dt.date(int(year), month_num, int(day))
+                days_diff = (parsed - today).days
+                if -2 <= days_diff <= 2:
+                    continue
+            except (ValueError, TypeError):
+                pass
         unsupported.append(f"{day}. {month_de} {year}")
     return sorted(set(unsupported))
 
@@ -836,6 +971,39 @@ _NAME_SKIP_LAST_WORDS = {
     "Kabinett", "Krankenversicherung", "Krankenkassen", "Deutschlandfunk",
     "EU", "NATO", "UNO", "USA", "WHO", "OECD", "OSZE", "G7", "G20",
     "Bundeswehr", "Bundesrepublik", "Bundesregierung", "Landesregierung",
+    # 2026-05-13: country genitives (Aggression Russlands, Hilfe Chinas etc.)
+    # — это атрибут страны, не имя человека. Все были false-positive в проде.
+    "Deutschlands", "Russlands", "Chinas", "Frankreichs", "Englands",
+    "Italiens", "Spaniens", "Polens", "Tschechiens", "Ungarns",
+    "Österreichs", "Schweiz", "Niederlande", "Belgiens", "Luxemburgs",
+    "Schweizer", "Türkei",  # nominative forms — kept для compound-noun matches типа
+    # «Botschafter Schweiz», но добавляем canonical genitive ниже
+    "Ukraines", "Belarus", "Moldovas", "Rumäniens", "Bulgariens",
+    "Israels", "Iraks", "Irans", "Syriens", "Libanons", "Ägyptens",
+    "Amerikas", "Kanadas", "Mexikos", "Brasiliens", "Argentiniens",
+    "Indiens", "Pakistans", "Afghanistans", "Japans", "Koreas",
+    "Türkeis", "Saudis", "Arabiens", "Jordaniens",  # 2026-05-13 v21: canonical genitive
+    "Großbritanniens", "Britanniens",
+    "Niederlandes", "Belarus'",  # additional genitive forms
+    # 2026-05-13: common German nouns that get matched as "surname" after an
+    # adjective (Künstliche Intelligenz, Aggression Russlands etc.)
+    "Intelligenz", "Aggression", "Kommando", "Verwaltung", "Behörde",
+    "Polizei", "Justiz", "Regierung", "Opposition", "Koalition",
+    "Wirtschaft", "Industrie", "Branche", "Energie", "Klima", "Umwelt",
+    "Bildung", "Forschung", "Wissenschaft", "Technologie", "Innovation",
+    "Sicherheit", "Verteidigung", "Außenpolitik", "Innenpolitik",
+    "Gesundheit", "Medizin", "Pharmazie", "Therapie", "Diagnose",
+    "Kultur", "Kunst", "Musik", "Literatur", "Theater", "Film", "Sport",
+    "Verkehr", "Mobilität", "Logistik", "Transport", "Infrastruktur",
+    "Migration", "Integration", "Asyl", "Flucht", "Vertreibung",
+    "Demokratie", "Diktatur", "Republik", "Monarchie", "Föderation",
+    "Initiative", "Strategie", "Konzept", "Programm", "Projekt", "Plan",
+    "Ansatz", "Methode", "Verfahren", "Prozess", "System", "Modell",
+    "Entscheidung", "Wahl", "Abstimmung", "Beschluss", "Urteil", "Gericht",
+    "Krieg", "Konflikt", "Krise", "Eskalation", "Sanktionen", "Embargo",
+    "Hilfe", "Unterstützung", "Förderung", "Kooperation", "Zusammenarbeit",
+    "Präsident", "Präsidentin", "Kanzler", "Kanzlerin", "Minister", "Ministerin",
+    "Politik", "Politiker", "Politikerin",
     # Publication and agency names that show up in attribution clauses
     # ("wie Reuters berichtet"); the regex would otherwise treat
     # «German-Compound Reuters» as a person name.
@@ -845,18 +1013,151 @@ _NAME_SKIP_LAST_WORDS = {
     "ARD", "ZDF", "BBC", "CNN", "Reuters", "Politico", "Guardian",
     "Euronews", "DW", "Ukrinform", "Pravda", "Independent", "LIGA",
     "UNIAN", "Suspilne",
+    # 2026-05-13: aggregator / niche source names (production false-positives)
+    "Golem", "Heise", "Netzpolitik", "ntv", "N-tv", "RND", "Watson",
+    "T-Online", "Web.de", "Gmx", "Yahoo", "Google",
     # German articles / fillers that occasionally end up matched as a
     # «last word» of a fake compound.
     "Der", "Die", "Das", "The",
 }
 
 # Tokens that, if they appear AS the first word of a candidate full name,
-# rule the match out: they're either German articles/prepositions or a
-# composite-noun prefix that the regex misread as a first name.
+# rule the match out: they're either German articles/prepositions, role
+# nouns ("Regisseurin Mahnaz"), substantivized adjectives ("Jugendliche Immer"),
+# or a composite-noun prefix that the regex misread as a first name.
 _NAME_SKIP_FIRST_WORDS = {
-    "Der", "Die", "Das", "Den", "Dem", "Des", "Ein", "Eine",
+    # Articles / pronouns
+    "Der", "Die", "Das", "Den", "Dem", "Des", "Ein", "Eine", "Einen", "Einem", "Einer",
+    "Dieser", "Diese", "Dieses", "Jener", "Jene", "Solche", "Solcher",
     "The", "An", "A",
-    "Bundes", "Landes", "Stadt", "Land",
+    # 2026-05-13: German prepositions/conjunctions at sentence start
+    # ("Laut Golem", "Nach Russlands", "Aus Sicht", "Bei Angriffen" etc.)
+    # — никогда не имя, всегда attribution или syntactic marker.
+    "Laut", "Nach", "Aus", "Bei", "Mit", "Vor", "Von", "Für", "Gegen",
+    "Über", "Unter", "Zwischen", "Während", "Trotz", "Wegen", "Durch",
+    "Auf", "An", "In", "Zu", "Bis", "Seit", "Ab", "Ohne", "Um",
+    "Wie", "Als", "Wenn", "Falls", "Sobald", "Sofern", "Obwohl",
+    "Inmitten", "Anhand", "Angesichts", "Bezüglich", "Hinsichtlich",
+    # Common German adverbs that start sentences then look like first names
+    "Auch", "Schon", "Bereits", "Erst", "Sogar", "Genau", "Zudem",
+    "Allerdings", "Jedoch", "Deshalb", "Daher", "Folglich", "Somit",
+    "Inzwischen", "Mittlerweile", "Stattdessen", "Andererseits",
+    # 2026-05-13: common declined adjectival forms at sentence start
+    # (Allgemeine/r/n/m, Künstliche, Evidenzbasierter, Hessische, Bayerische etc.)
+    "Allgemeine", "Allgemeiner", "Allgemeinen", "Allgemeinem", "Allgemeines",
+    "Künstliche", "Künstlicher", "Künstlichen", "Künstliches",
+    "Natürliche", "Natürlicher", "Natürlichen",
+    "Evidenzbasierte", "Evidenzbasierter", "Evidenzbasierten",
+    "Hessische", "Hessischer", "Hessischen",
+    "Bayerische", "Bayerischer", "Bayerischen",
+    "Berliner", "Münchner", "Hamburger", "Kölner", "Frankfurter",
+    "Sächsische", "Sächsischer", "Sächsischen",
+    "Niedersächsische", "Schleswig-Holsteinische",
+    "Europäische", "Europäischer", "Europäischen", "Europäisches",
+    "Amerikanische", "Amerikanischer", "Amerikanischen",
+    "Russische", "Russischer", "Russischen",
+    "Chinesische", "Chinesischer", "Chinesischen",
+    "Ukrainische", "Ukrainischer", "Ukrainischen",
+    "Französische", "Französischer", "Französischen",
+    "Britische", "Britischer", "Britischen",
+    "Italienische", "Italienischer", "Italienischen",
+    "Polnische", "Polnischer", "Polnischen",
+    "Türkische", "Türkischer", "Türkischen",
+    "Israelische", "Israelischer", "Israelischen",
+    "Iranische", "Iranischer", "Iranischen",
+    "Syrische", "Syrischer", "Syrischen",
+    "Informelle", "Informeller", "Informellen",
+    "Formelle", "Formeller", "Formellen",
+    "Wichtige", "Wichtiger", "Wichtigen",
+    "Neue", "Neuer", "Neuen", "Alte", "Alter", "Alten",
+    "Aktuelle", "Aktueller", "Aktuellen",
+    "Konkrete", "Konkreter", "Konkreten",
+    "Mögliche", "Möglicher", "Möglichen",
+    "Notwendige", "Notwendiger", "Notwendigen",
+    "Geplante", "Geplanter", "Geplanten",
+    "Geltende", "Geltender", "Geltenden",
+    "Bestehende", "Bestehender", "Bestehenden",
+    "Verschiedene", "Verschiedener", "Verschiedenen",
+    # German compound prefixes
+    "Bundes", "Landes", "Stadt", "Land", "Volks", "Welt",
+    # Substantivized adjectives commonly appearing at sentence start
+    "Jugendliche", "Jugendlicher", "Erwachsene", "Erwachsener", "Beamte", "Beamter",
+    "Reisende", "Reisender", "Tote", "Toter", "Verletzte", "Verletzter",
+    "Frühere", "Früherer", "Ehemalige", "Ehemaliger", "Neue", "Neuer", "Erste", "Erster",
+    "Letzte", "Letzter", "Spätere", "Späterer", "Kommende", "Kommender",
+    # Role / title nouns (2026-05-12 fix: "Regisseurin Mahnaz", "Trainer Klopp", etc.
+    # При парном matching они выглядят как «first_name last_name», но первое слово —
+    # роль, а второе — реальная фамилия). 13 «Boris Pistorius» false-positive сегодня.
+    "Regisseur", "Regisseurin", "Regisseure", "Schauspieler", "Schauspielerin",
+    "Autor", "Autorin", "Direktor", "Direktorin", "Intendant", "Intendantin",
+    "Sänger", "Sängerin", "Komponist", "Komponistin", "Maler", "Malerin",
+    "Trainer", "Trainerin", "Spieler", "Spielerin", "Schiedsrichter", "Schiedsrichterin",
+    "Stürmer", "Stürmerin", "Torwart", "Torhüter", "Mittelfeldspieler",
+    "Minister", "Ministerin", "Bundeskanzler", "Bundeskanzlerin", "Kanzler", "Kanzlerin",
+    "Präsident", "Präsidentin", "Vizepräsident", "Vizepräsidentin",
+    "Politiker", "Politikerin", "Abgeordneter", "Abgeordnete", "Senator", "Senatorin",
+    "Wissenschaftler", "Wissenschaftlerin", "Forscher", "Forscherin",
+    "Professor", "Professorin", "Doktor", "Doktorin",
+    "Manager", "Managerin", "Chef", "Chefin", "Vorstandschef", "Vorstandschefin",
+    "Sprecher", "Sprecherin", "Vertreter", "Vertreterin",
+    "Anwalt", "Anwältin", "Richter", "Richterin", "Staatsanwalt", "Staatsanwältin",
+    "Aktivist", "Aktivistin", "Demonstrant", "Demonstrantin",
+    "Journalist", "Journalistin", "Reporter", "Reporterin", "Moderator", "Moderatorin",
+    "General", "Generalin", "Oberst", "Hauptmann", "Soldat", "Soldatin",
+    "Bürgermeister", "Bürgermeisterin", "Landrat", "Landrätin", "Gouverneur", "Gouverneurin",
+    "Polizist", "Polizistin", "Kommissar", "Kommissarin",
+    "Arzt", "Ärztin", "Chefarzt", "Chefärztin",
+}
+
+
+# Well-known public figures (2026-05-12 fix): полное имя ("Boris Pistorius",
+# "Friedrich Merz") в news context — это не fabrication, даже если source
+# называет только фамилию. AI legitimately обогащает текст для понятности
+# среднему читателю. 13 «Boris Pistorius» false-positive сегодня.
+#
+# Лимит: только national-level политики, главы государств, известные deutscher
+# министры и публичные фигуры с unambiguous full-name знанием. Региональные /
+# local политики — остаются strict (там реально риск fabrication).
+_KNOWN_FULL_NAMES = {
+    # Германия — кабинет
+    "boris pistorius", "friedrich merz", "olaf scholz", "robert habeck",
+    "annalena baerbock", "christian lindner", "karl lauterbach",
+    "nancy faeser", "hubertus heil", "lisa paus", "cem özdemir", "cem oezdemir",
+    "marco buschmann", "volker wissing", "klara geywitz", "steffi lemke",
+    "svenja schulze", "bettina stark-watzinger", "wolfgang schmidt",
+    "ulrich kelber", "lars klingbeil", "saskia esken",
+    "alice weidel", "tino chrupalla", "sahra wagenknecht",
+    "markus söder", "markus soeder",
+    "frank-walter steinmeier", "bärbel bas", "baerbel bas",
+    "katherina reiche", "ricarda lang", "omid nouripour",
+    "warken", "nina warken",
+    # Государства — главы
+    "wolodymyr selenskyj", "wolodymyr selensky", "wladimir selenskyj",
+    "wladimir putin", "donald trump", "joe biden", "kamala harris",
+    "emmanuel macron", "rishi sunak", "keir starmer", "giorgia meloni",
+    "pedro sánchez", "pedro sanchez", "viktor orbán", "viktor orban",
+    "andrzej duda", "donald tusk", "alexander van der bellen",
+    "karl nehammer", "edi rama", "milorad dodik", "aleksandar vučić",
+    "benjamin netanjahu", "benjamin netanyahu", "naftali bennett",
+    "ali chamenei", "ebrahim raisi", "masoud pezeshkian",
+    "recep tayyip erdoğan", "recep tayyip erdogan",
+    "kim jong un", "fumio kishida", "xi jinping",
+    # EU / международные
+    "ursula von der leyen", "charles michel", "kaja kallas", "josep borrell",
+    "antónio costa", "antonio costa", "roberta metsola", "jens stoltenberg",
+    "mark rutte", "alexander stubb",
+    # СНГ / Украина — известные политики и военные
+    "андрій єрмак", "andrij yermak", "андрей ермак",
+    "руслан стефанчук", "денис шмигаль", "ірина верещук",
+    "валерій залужний", "olexander syrskyj", "олександр сирський",
+    "kyrylo budanow", "кирило буданов",
+    # Россия — публичные политики
+    "сергій лавров", "sergej lavrov", "sergei lavrov",
+    "дмитро пєсков", "dmitri peskow", "dmitry peskov",
+    "wjatscheslaw wolodin", "viacheslav volodin",
+    # Известные регулярно в новостях персоны
+    "elon musk", "jeff bezos", "mark zuckerberg", "tim cook",
+    "sundar pichai", "satya nadella", "sam altman",
 }
 
 
@@ -951,6 +1252,152 @@ def _unsupported_generated_full_names(generated_text: str, source_text: str) -> 
     return sorted({full for full, _last in _unsupported_generated_full_name_pairs(generated_text, source_text)})
 
 
+def _detect_fabricated_proper_nouns(generated_text: str, source_text: str, story_card: dict | None, supporting_text: str = "") -> list[str]:
+    """2026-05-12 W1.3: catch fully fabricated proper-noun pairs.
+
+    R8 Phase 1 2026-05-14: дополнительный `supporting_text` для cross-reference
+    с supporting source dossier (titles + domains). Reduces FP rate ~40% за
+    счёт расширения trusted_tokens — имена которые есть в supporting sources
+    теперь не флагаются как fabricated.
+
+    ESC post 10149 invented "Linda Lampenius", "Pete Parkkonen", "Liekinheitin",
+    "Noam Bettan", "Michelle" — none in source nor in story_card.entities_people.
+    Existing `_unsupported_generated_full_names` only catches «source has LastName,
+    AI added FirstName». This catches «AI invented WHOLE name».
+
+    Algorithm:
+    1. Collect all 2-word capitalized pairs from generated text (likely names).
+    2. Build trusted-name allowlist:
+       - All names appearing word-by-word в source_text
+       - All entities в story_card.entities_people / .entities.people
+       - _KNOWN_FULL_NAMES whitelist
+    3. For each generated pair: if NEITHER first nor last word is в trusted-set
+       AND first not in _NAME_SKIP_FIRST_WORDS AND last not in _NAME_SKIP_LAST_WORDS
+       → fabrication candidate.
+
+    Conservative: false negatives OK (better miss than block legitimate names);
+    false positives bad (would block real news with proper figures).
+    """
+    if not generated_text or not source_text:
+        return []
+    # Collect trusted-name token set
+    trusted_tokens: set[str] = set()
+    # From source (split by non-word chars, lowercase)
+    for tok in re.findall(r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüßéèêíìîáàâóòôúùû\-']{2,}", source_text):
+        trusted_tokens.add(tok.lower())
+    # From story_card.entities_people
+    if isinstance(story_card, dict):
+        people = story_card.get("entities_people") or story_card.get("entities", {}).get("people") or []
+        if isinstance(people, list):
+            for p in people:
+                if isinstance(p, dict):
+                    name = str(p.get("name") or "").strip()
+                    for part in re.split(r"\s+", name):
+                        if len(part) >= 3:
+                            trusted_tokens.add(part.lower())
+        # Also entities_organizations и places — songs/works могут быть там
+        for key in ("entities_organizations", "entities_places", "topics", "tags"):
+            items = story_card.get(key) or []
+            if isinstance(items, list):
+                for it in items:
+                    if isinstance(it, dict):
+                        name = str(it.get("name") or "").strip()
+                    else:
+                        name = str(it).strip()
+                    for part in re.split(r"\s+", name):
+                        if len(part) >= 3:
+                            trusted_tokens.add(part.lower())
+    # Also key_facts текст
+    if isinstance(story_card, dict):
+        facts = story_card.get("key_facts") or []
+        if isinstance(facts, list):
+            for f in facts:
+                if isinstance(f, str):
+                    for tok in re.findall(r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüßéèêíìîáàâóòôúùû\-']{2,}", f):
+                        trusted_tokens.add(tok.lower())
+    # R8 Phase 1 2026-05-14: supporting source dossier text (titles + domains).
+    # Если AI-generated name появляется в supporting title — это confirmed real
+    # person mentioned by independent sources. Reduces FP epidemic от German
+    # compound nouns где совпадение случайное.
+    if supporting_text:
+        for tok in re.findall(r"[A-ZÄÖÜ][A-Za-zÄÖÜäöüßéèêíìîáàâóòôúùû\-']{2,}", supporting_text):
+            trusted_tokens.add(tok.lower())
+    # 2026-05-13 (revised): overlap-aware token-pair detection.
+    # Старая реализация с `re.finditer` consume'ила match — добавив "Laut" в
+    # `_NAME_SKIP_FIRST_WORDS`, regex матчил `(Laut, Linda)` как пару (skip),
+    # и `Linda Lampenius` уже НЕ попадал в следующий проход. ESC-style real
+    # fabrication (Lampenius+Parkkonen) пропускалась незамеченной.
+    # Fix: токенизация всех capitalized слов с позициями, перебор смежных пар.
+    token_pattern = re.compile(
+        r"\b([A-ZÄÖÜ][A-Za-zÄÖÜäöüßéèêíìîáàâóòôúùû\-']{2,})\b"
+    )
+    # Collect (token, start_pos, end_pos) tuples
+    tokens: list[tuple[str, int, int]] = [
+        (m.group(1), m.start(1), m.end(1)) for m in token_pattern.finditer(generated_text)
+    ]
+    # R8 Phase 2 2026-05-14: pre-compute spaCy PERSON entity set для filtering
+    # compound-noun false positives. Если candidate pair НЕ в этом set'е, скорее
+    # всего это German compound noun (Bundesverteidigungsminister Pistorius),
+    # не fabrication. Skip flagging.
+    spacy_persons: set[str] | None = None
+    nlp = _get_de_nlp()
+    if nlp is not None:
+        try:
+            doc = nlp(generated_text)
+            spacy_persons = {
+                ent.text.lower()
+                for ent in doc.ents
+                if ent.label_ == "PER"
+            }
+            # Also add individual PERSON tokens for partial-match lookups.
+            for ent in doc.ents:
+                if ent.label_ == "PER":
+                    for word in ent.text.split():
+                        if len(word) >= 3:
+                            spacy_persons.add(word.lower())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("spaCy NER pass failed, falling back to heuristic: %s", exc)
+            spacy_persons = None
+
+    fabricated: list[str] = []
+    seen: set[str] = set()
+    for i in range(len(tokens) - 1):
+        first, fstart, fend = tokens[i]
+        last, lstart, lend = tokens[i + 1]
+        # Should be syntactically adjacent (only whitespace between).
+        between = generated_text[fend:lstart]
+        if not between or not between.isspace():
+            continue
+        if first.isupper() or last.isupper():
+            continue  # all-caps acronyms
+        if first in _NAME_SKIP_FIRST_WORDS or last in _NAME_SKIP_LAST_WORDS:
+            continue
+        if "-" in first:
+            continue
+        full = f"{first} {last}"
+        if full in seen:
+            continue
+        seen.add(full)
+        if full.lower() in _KNOWN_FULL_NAMES:
+            continue
+        first_known = first.lower() in trusted_tokens
+        last_known = last.lower() in trusted_tokens
+        if first_known or last_known:
+            continue
+        # R8 Phase 2: spaCy PERSON entity gate. Если spaCy не считает pair
+        # PERSON entity — это compound noun, не fabrication. Skip.
+        if spacy_persons is not None:
+            is_person = (
+                full.lower() in spacy_persons
+                or first.lower() in spacy_persons
+                or last.lower() in spacy_persons
+            )
+            if not is_person:
+                continue
+        fabricated.append(full)
+    return sorted(set(fabricated))
+
+
 def _unsupported_generated_full_name_pairs(generated_text: str, source_text: str) -> list[tuple[str, str]]:
     source = source_text or ""
     unsupported: list[tuple[str, str]] = []
@@ -973,6 +1420,13 @@ def _unsupported_generated_full_name_pairs(generated_text: str, source_text: str
             continue
         full = f"{first} {last}"
         if re.search(rf"\b{re.escape(full)}\b", source):
+            continue
+        # 2026-05-12: well-known public figures whitelist. Boris Pistorius,
+        # Friedrich Merz, Wladimir Putin etc. — общеизвестные фигуры. AI
+        # обогащает текст полным именем когда source говорит только фамилию —
+        # это легитимно, не fabrication. 13 «Boris Pistorius» false-positive
+        # сегодня вызвали блокировку легитимных rewrite-ов.
+        if full.lower() in _KNOWN_FULL_NAMES:
             continue
         # If the source only names the surname, adding a first name is a new fact.
         if re.search(rf"\b{re.escape(last)}\b", source) and not re.search(rf"\b{re.escape(first)}\b", source):

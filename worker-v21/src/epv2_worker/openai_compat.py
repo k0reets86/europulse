@@ -42,6 +42,37 @@ def completion_total_tokens(response: Any) -> int:
         return 0
 
 
+def completion_cached_tokens(response: Any) -> int:
+    """2026-05-14: cached prompt tokens (OpenAI auto prompt caching, 50% off).
+
+    SDK 1.14 не парсит prompt_tokens_details в typed object, но API возвращает
+    raw data в response.usage. Access via model_dump() — works for older SDK.
+    Returns 0 если caching не активен или не доступен.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0
+    # Try typed access first (newer SDK)
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is not None:
+        cached = getattr(details, "cached_tokens", None)
+        if cached is not None:
+            try:
+                return max(0, int(cached))
+            except (TypeError, ValueError):
+                pass
+    # Fallback: dict access via model_dump (works for older SDK)
+    try:
+        if hasattr(usage, "model_dump"):
+            usage_dict = usage.model_dump()
+            details_dict = usage_dict.get("prompt_tokens_details") or {}
+            cached = details_dict.get("cached_tokens", 0) if isinstance(details_dict, dict) else 0
+            return max(0, int(cached))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return 0
+
+
 def completion_text(response: Any) -> str:
     try:
         content = response.choices[0].message.content

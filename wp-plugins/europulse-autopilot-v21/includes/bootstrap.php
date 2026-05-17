@@ -49,6 +49,8 @@ final class EPV2_Bootstrap {
 			'EPV2_Installer' => 'core/class-epv2-installer.php',
 			'EPV2_Upgrader' => 'core/class-epv2-upgrader.php',
 			'EPV2_Worker_Client' => 'core/class-epv2-worker-client.php',
+			'EPV2_CLI_Commands' => 'core/class-epv2-cli-commands.php',
+			'EPV2_Alerts' => 'core/class-epv2-alerts.php',
 
 			'EPV2_Admin' => 'admin/class-epv2-admin.php',
 			'EPV2_REST' => 'api/class-epv2-rest.php',

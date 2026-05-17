@@ -24,7 +24,12 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from .openai_compat import completion_text, reasoning_extra_body
+from .openai_compat import (
+    completion_cached_tokens,
+    completion_text,
+    completion_total_tokens,
+    reasoning_extra_body,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +115,8 @@ class StoryCard:
     editorial_reason: str = ""
     provider: str = ""
     model: str = ""
+    tokens: int = 0
+    cached_tokens: int = 0
     success: bool = False
     error: str = ""
 
@@ -278,7 +285,8 @@ async def _call_openai(
     model: str,
     messages: list[dict[str, str]],
     is_reasoning: bool,
-) -> str:
+) -> tuple[str, int, int]:
+    """Return (text, total_tokens, cached_tokens)."""
     client = AsyncOpenAI(api_key=api_key, timeout=45)
     create_kwargs: dict[str, Any] = {
         "model": model,
@@ -297,14 +305,19 @@ async def _call_openai(
         create_kwargs["temperature"] = 0.2
         create_kwargs["max_tokens"] = 1200
     response = await client.chat.completions.create(**create_kwargs)
-    return completion_text(response)
+    return (
+        completion_text(response),
+        completion_total_tokens(response),
+        completion_cached_tokens(response),
+    )
 
 
 async def _call_deepseek(
     *,
     api_key: str,
     messages: list[dict[str, str]],
-) -> str:
+) -> tuple[str, int, int]:
+    """Return (text, total_tokens, cached_tokens). DeepSeek не отдаёт cached."""
     client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com", timeout=45)
     response = await client.chat.completions.create(
         model="deepseek-chat",
@@ -313,7 +326,11 @@ async def _call_deepseek(
         temperature=0.2,
         max_tokens=1200,
     )
-    return completion_text(response)
+    return (
+        completion_text(response),
+        completion_total_tokens(response),
+        0,
+    )
 
 
 def _coerce_card(raw: dict[str, Any]) -> StoryCard:
@@ -439,7 +456,7 @@ async def build_story_card(
     openai_api_key: str = "",
     deepseek_api_key: str = "",
     provider_order: tuple[str, ...] = ("openai", "deepseek"),
-    openai_model: str = "gpt-5-mini",
+    openai_model: str = "gpt-4o-mini",
 ) -> StoryCard:
     """Run one upfront AI call to build a story card. Tries providers in order.
 
@@ -468,7 +485,7 @@ async def build_story_card(
                     or openai_model.startswith("o3")
                     or openai_model.startswith("o4")
                 )
-                raw_text = await _call_openai(
+                raw_text, used_tokens, used_cached = await _call_openai(
                     api_key=openai_api_key,
                     model=openai_model,
                     messages=messages,
@@ -479,7 +496,7 @@ async def build_story_card(
             elif provider == "deepseek":
                 if not deepseek_api_key:
                     continue
-                raw_text = await _call_deepseek(
+                raw_text, used_tokens, used_cached = await _call_deepseek(
                     api_key=deepseek_api_key,
                     messages=messages,
                 )
@@ -500,6 +517,8 @@ async def build_story_card(
             card.success = True
             card.provider = used_provider
             card.model = used_model
+            card.tokens = used_tokens
+            card.cached_tokens = used_cached
             return card
         except Exception as exc:  # noqa: BLE001
             last_error = f"{provider}_error: {exc}"

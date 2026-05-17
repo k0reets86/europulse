@@ -103,6 +103,109 @@ final class EPV2_Categorizer {
 		return $refined;
 	}
 
+	/**
+	 * Hierarchical category augmentation (2026-05-12, operator request).
+	 *
+	 * WP taxonomy hierarchy (term_id verified в БД):
+	 *   wirtschaft (24)  → auto (31377), it (31383), technologie (31389)
+	 *   deutschland (14) → muenchen (1), bayern (12)
+	 *
+	 * Категоризатор (и AI) возвращали плоский slug. Раньше item «Tesla
+	 * E-Auto Verkauf» получал только wirtschaft, хотя подкатегория Auto
+	 * существует. Аналогично «Rechenzentrum für KI» → wirtschaft без
+	 * Technologie. Эта функция расширяет category-array в обе стороны:
+	 *  - parent + sub-keyword → add sub (Tesla под wirtschaft → +auto)
+	 *  - sub-slug без parent → add parent (consistency)
+	 */
+	public static function expand_with_subcategories(array $categories, string $title, string $content): array {
+		$primary = array_map([self::class, 'canonical_slug'], array_map('strval', $categories));
+		$primary = array_values(array_unique(array_filter($primary, static fn(string $s) => $s !== '')));
+		if ($primary === []) {
+			return [];
+		}
+		$text = mb_strtolower($title . ' ' . wp_strip_all_tags($content));
+		$has = static function (array $needles) use ($text): bool {
+			foreach ($needles as $n) {
+				if (self::keyword_matches($text, (string) $n)) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		$sub_keywords_under_wirtschaft = [
+			'auto' => [
+				'tesla', 'elektroauto', 'elektroautos', 'e-auto', 'e-autos', 'elektromobil',
+				'vw', 'volkswagen', 'audi', 'porsche', 'bmw', 'mercedes', 'daimler', 'stellantis',
+				'renault', 'opel', 'ford', 'fiat', 'toyota', 'hyundai', 'kia', 'byd', 'nio',
+				'pkw', 'lkw-maut', 'automobil', 'autoindustrie', 'autobauer', 'kfz',
+				'autozulieferer', 'bosch', 'continental', 'zf friedrichshafen',
+				'autosalon', 'iaa', 'gigafactory', 'batteriewerk',
+				'akku-zellfertigung', 'ladestation', 'ladesäule', 'ladesaeule',
+				'elektromobilität', 'elektromobilitaet', 'verbrenner-aus',
+			],
+			'it' => [
+				'cybersecurity', 'cyber-attack', 'cyberattack', 'hackerangriff', 'hacker',
+				'ransomware', 'phishing', 'zero day', 'zero-day', 'exploit', 'malware',
+				'software-update', 'softwareupdate', 'patchday',
+				'datenleck', 'datenpanne', 'data breach',
+				'cloud-anbieter', 'aws', 'azure', 'google cloud',
+				'sap', 'oracle', 'github', 'gitlab',
+				'open source', 'open-source', 'kubernetes', 'docker',
+				'pwn2own', 'zero day initiative', 'cve-',
+			],
+			'technologie' => [
+				'künstliche intelligenz', 'kuenstliche intelligenz', 'ki-', 'ai-',
+				'machine learning', 'maschinelles lernen', 'deep learning',
+				'llm', 'large language model', 'chatgpt', 'gpt-', 'claude', 'gemini',
+				'rechenzentrum', 'data center', 'datacenter', 'high performance computing',
+				'halbleiter', 'semiconductor', 'tsmc', 'asml', 'nvidia',
+				'quantencomputer', 'quantum computer', 'quanten-',
+				'robotik', 'robotics', 'humanoid', 'autonomes fahren',
+				'5g', '6g-', 'glasfaser',
+				'blockchain', 'web3', 'metaverse',
+				'startup', 'tech-startup', 'silicon valley',
+			],
+		];
+		$sub_keywords_under_deutschland = [
+			'muenchen' => ['münchen', 'munich', 'мюнх'],
+			'bayern' => ['bayern', 'bavaria', 'бавар'],
+		];
+
+		$result = $primary;
+		if (in_array('wirtschaft', $primary, true)) {
+			foreach ($sub_keywords_under_wirtschaft as $sub_slug => $kws) {
+				if ($has($kws) && ! in_array($sub_slug, $result, true)) {
+					$result[] = $sub_slug;
+				}
+			}
+		}
+		if (in_array('deutschland', $primary, true)) {
+			foreach ($sub_keywords_under_deutschland as $sub_slug => $kws) {
+				if ($has($kws) && ! in_array($sub_slug, $result, true)) {
+					$result[] = $sub_slug;
+				}
+			}
+		}
+
+		$child_to_parent = [
+			'auto' => 'wirtschaft',
+			'it' => 'wirtschaft',
+			'technologie' => 'wirtschaft',
+			'muenchen' => 'deutschland',
+			'bayern' => 'deutschland',
+		];
+		foreach ($result as $slug) {
+			if (isset($child_to_parent[$slug]) && ! in_array($child_to_parent[$slug], $result, true)) {
+				$idx = array_search($slug, $result, true);
+				if ($idx !== false) {
+					array_splice($result, $idx, 0, [$child_to_parent[$slug]]);
+				}
+			}
+		}
+		return array_values(array_unique($result));
+	}
+
 	public static function detect(string $title, string $content, string $source_bias = ''): string {
 		$text = mb_strtolower($title . ' ' . wp_strip_all_tags($content));
 		$title_text = mb_strtolower(wp_strip_all_tags($title));
@@ -117,7 +220,18 @@ final class EPV2_Categorizer {
 				'citizen money', 'migrant', 'migration office', 'мiгрант', 'біжен', 'дозвіл на проживання', 'німеччин'
 			],
 			'ukraine' => ['ukraine', 'ukrain', 'kyiv', 'київ', 'україн', 'zelensky', 'selensky', 'russland', 'russia', 'kreml', 'moskau', 'львів', 'львов', 'lviv'],
-			'politik' => ['bundestag', 'wahl', 'polit', 'parliament', 'regierung', 'коаліц', 'trump', 'nato', 'hormus', 'sanktion', 'coalition', 'koalition', 'cdu', 'spd', 'gruene', 'greens', 'demokratie', 'steinmeier', 'bundespräsident', 'bundesregierung', 'gesetzentwurf', 'digitalausschuss', 'transparenzgesetz', 'politische werbung', 'politische-werbung', 'eu-verordnung'],
+			'politik' => ['bundestag', 'wahl', 'polit', 'parliament', 'regierung', 'коаліц', 'trump', 'nato', 'hormus', 'sanktion', 'coalition', 'koalition', 'cdu', 'spd', 'gruene', 'greens', 'demokratie', 'steinmeier', 'bundespräsident', 'bundesregierung', 'gesetzentwurf', 'digitalausschuss', 'transparenzgesetz', 'politische werbung', 'politische-werbung', 'eu-verordnung',
+				// 2026-05-12 W1.4: Koalitionsausschuss раньше попадал в community
+				// потому что "ausschuss" matched community keywords. Добавляем явно.
+				'koalitionsausschuss', 'kabinettsausschuss', 'kabinett', 'kanzleramt',
+				'ministerpräsident', 'ministerpräsidentin', 'ländersache', 'bundesrat',
+				'fraktion', 'fraktionssitzung', 'parteitag', 'landtag', 'landesregierung',
+				'merz', 'scholz', 'habeck', 'baerbock', 'pistorius', 'lindner',
+				'söder', 'soeder', 'schwesig', 'wüst', 'wuest', 'kretschmann',
+				'klingbeil', 'esken', 'lang', 'nouripour',
+				'eu-kommission', 'european commission', 'european parliament', 'europäisches parlament',
+				'von der leyen', 'kallas', 'metsola', 'michel', 'tusk',
+			],
 			'wirtschaft' => ['wirtschaft', 'inflation', 'econom', 'gdp', 'market', 'компан', 'інфляц', 'kapitalmarkt', 'spritpreis', 'kraftstoffpreis', 'dax', 'aktie', 'aktien', 'investor', 'investoren', 'ölpreis', 'oil price', 'energy price', 'energiepreis', 'paypal', 'gaspreis', 'gaspreise', 'tarif', 'tarife', 'börse', 'finanz', 'sondervermögen', 'infrastrukturfonds', 'wechsel des anbieter', 'anbieterwechsel', 'tesla', 'elektroauto', 'elektroautos', 'e-auto', 'e-autos', 'elektromobil', 'rechenzentrum', 'data center', 'datacenter', 'tiktok', 'bitcoin', 'krypto', 'crypto'],
 			'world' => ['welt', 'world', 'global', 'amerika', 'usa', 'united states', 'washington', 'china', 'beijing', 'taiwan', 'india', 'pakistan', 'asia', 'nahost', 'middle east', 'gaza', 'libanon', 'lebanon', 'iran', 'israel', 'syrien', 'syria', 'afrika', 'africa', 'latin america', 'lateinamerika', 'brisbane', 'australia', 'australien', 'palace', 'royal', 'monarchy', 'king', 'queen', 'prince', 'princess', 'illinois', 'britain', 'british', 'london', 'hormuz', 'straße von hormuz', 'strasse von hormuz', 'japan', 'tokio', 'tokyo',
 				// More countries / regions that historically defaulted to
@@ -152,7 +266,16 @@ final class EPV2_Categorizer {
 			'münchen' => ['münchen', 'munich', 'мюнх'],
 			'bayern' => ['bayern', 'bavaria', 'бавар'],
 			'europa' => ['europa', 'europe', 'europarl', 'eu-', 'європ'],
-			'kultur' => ['kultur', 'culture', 'концерт', 'festival', 'museum', 'theater', 'theatre', 'theaterpreis', 'preis des bundes', 'bundes-theaterpreis', 'kunst', 'ausstellung', 'premiere', 'bühne', 'haus erhält förderung'],
+			'kultur' => ['kultur', 'culture', 'концерт', 'festival', 'museum', 'theater', 'theatre', 'theaterpreis', 'preis des bundes', 'bundes-theaterpreis', 'kunst', 'ausstellung', 'premiere', 'bühne', 'haus erhält förderung',
+				// 2026-05-12 W1.4: ESC/Eurovision keywords — раньше попадали в sport
+				// из-за «Halbfinale» в looks_like_sport_context. Теперь явный kultur boost.
+				'eurovision', 'esc', 'song contest', 'songcontest', 'eurovision song contest',
+				'cannes', 'berlinale', 'venedig festival', 'venice festival', 'film festival',
+				'oscar', 'oscars', 'goldene palme', 'goldener bär', 'gewinner', 'wettbewerb der nationen',
+				'romanverfilmung', 'roman', 'literatur',
+				'symphonie', 'oper', 'opernhaus', 'musical',
+				'sänger', 'sängerin', 'komponist', 'komponistin', 'pianist',
+			],
 			'sport' => ['sport', 'fußball', 'football', 'bundesliga', 'теніс', 'fc bayern', 'schiedsrichter', 'leverkusen', 'hoeneß', 'matthäus', 'uli hoeneß', 'lothar matthäus'],
 		];
 
@@ -587,12 +710,31 @@ final class EPV2_Categorizer {
 		]))));
 
 		if ($kind === 'sport') {
-			if (
-				preg_match('/\b(match|spiel|anpfiff|rückspiel|hinspiel|achtelfinale|viertelfinale|halbfinale|schiedsrichter|trainer|galatasaray|liverpool|bundesliga|champions league|paralymp)\b/u', $eventText) === 1
-				|| count((array) ($event['participants'] ?? [])) >= 2
-			) {
+			// 2026-05-12 fix (audit W1.4): «halbfinale/viertelfinale/finale»
+			// также применяется к ESC (Eurovision), shows tipa "Voice of Germany",
+			// Bachelor, judicial proceedings. ESC 2026 item categorized as Sport,
+			// потому что "Halbfinale in Wien" matched. Drop these standalone —
+			// требовать sport-noun adjacency.
+			$has_sport_match = preg_match(
+				'/\b(match|spiel|anpfiff|rückspiel|hinspiel|schiedsrichter|trainer|galatasaray|liverpool|bundesliga|champions league|paralymp|fußball|fussball|handball|basketball|tennis|formel|formel-?1|nba|nhl|nfl)\b/u',
+				$eventText
+			) === 1;
+			$has_finale_word = preg_match('/\b(achtelfinale|viertelfinale|halbfinale|finale)\b/u', $eventText) === 1;
+			$has_music_signal = preg_match('/\b(eurovision|esc|song contest|songcontest|musik|musikwettbewerb|popmusik|sänger|sängerin|band|konzert|festival|orchester|symphonie|album|hit|chart)\b/u', $eventText) === 1;
+			$has_show_signal = preg_match('/\b(the voice|show|moderator|moderation|jury|casting|reality|staffel|kandidat|sendung|fernsehen|tv-?show)\b/u', $eventText) === 1;
+			$has_judicial = preg_match('/\b(verhandlung|gerichts|gericht|prozess|urteil|anwalt|kläger|beklagter|staatsanwalt|strafgericht)\b/u', $eventText) === 1;
+
+			$finale_is_sport = $has_finale_word && $has_sport_match
+				&& ! $has_music_signal && ! $has_show_signal && ! $has_judicial;
+			$has_participants = count((array) ($event['participants'] ?? [])) >= 2;
+			$participants_are_sport = $has_participants && ! $has_music_signal && ! $has_show_signal;
+
+			if ($has_sport_match || $finale_is_sport || $participants_are_sport) {
 				return 'sport';
 			}
+			// If we're here, sport kind is suspect — let downstream fallback decide
+			// (story_card primary should win when it differs from a misclassified
+			// dossier kind).
 		}
 
 		if ($kind === 'kultur') {
@@ -678,6 +820,17 @@ final class EPV2_Categorizer {
 	}
 
 	private static function looks_like_sport_context(string $text): bool {
+		// 2026-05-12 W1.4: «halbfinale/viertelfinale/achtelfinale» применимы
+		// и к ESC (Eurovision), shows, judicial. Раньше любой «Halbfinale» →
+		// sport context → +14 sport score. ESC post 10149 = Sport bug.
+		// Now: проверяем сначала ESC/music/show signals — если есть, не sport.
+		$has_music_show_signal = preg_match(
+			'/\b(eurovision|esc|song contest|songcontest|musik|musikwettbewerb|sänger|sängerin|the voice|tv-show|show|moderator|moderation|jury|casting|reality|festival|konzert|opernhaus)\b/u',
+			$text
+		) === 1;
+		if ($has_music_show_signal) {
+			return false;
+		}
 		return preg_match('/\b(fc bayern|psg|paris saint-germain|bundesliga|dfb|uefa|champions league|europa league|conference league|schiri|schiedsrichter|trainer|transfer|halbfinale|viertelfinale|achtelfinale|anpfiff|livereportage|rückspiel|hinspiel|premier league|premiere league|lothar matthäus|matthäus|hoeneß|handball|basketball|nhl|nba|euroleague)\b/u', $text) === 1;
 	}
 

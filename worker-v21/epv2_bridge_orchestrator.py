@@ -6,11 +6,13 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from typing import Any
 
 
 SITE_URL = os.getenv("EPV2_SITE_URL", "http://127.0.0.1").rstrip("/")
@@ -287,6 +289,117 @@ def ensure_server_orchestrator(state: dict) -> None:
         log("server orchestrator enabled", result=result)
 
 
+# 2026-05-12 W4.1: separate publish thread.
+# Раньше main loop делал process (30-120s wp-cli subprocess) → publish ждал
+# завершения process. Publish fires every 20-30s; если process активен 120s,
+# publish пропускает 4-6 окон. Result: ready_publish items сидят 10+ мин когда
+# pipeline должен публиковать с 25s interval.
+#
+# Solution: publish runs в отдельном Thread. Thread не блокирует main loop's
+# process/collect/maintenance. PHP-side publish_lock уже предотвращает double-publish
+# (EPV2_Lock_Manager::is_active('publish') check).
+
+_publish_thread_stop = threading.Event()
+# 2026-05-13 hardening:
+#   _publish_thread holds singleton ref → idempotent start, restartable on death.
+#   _publish_thread_last_beat = wall-clock seconds of last completed iteration.
+#   Main loop reads this; if > 5×interval old, considers thread dead and respawns.
+_publish_thread: threading.Thread | None = None
+_publish_thread_last_beat: float = 0.0
+
+
+def publish_thread_loop() -> None:
+    """Independent publish loop — fires every PUBLISH_RETRY_COOLDOWN_SECONDS
+    regardless of what main loop is doing.
+
+    Uses PHP-side publish_lock for mutex; if lock active, endpoint returns
+    quickly без actual publish (no harm от double-fire).
+
+    2026-05-13: hardened — outer try/except wraps the whole body so any
+    exception (including from wait() / time.sleep / system-level) gets logged
+    and loop continues. Previous version had per-iteration try/except but
+    a stray exception in the wait() would still kill the thread.
+    """
+    global _publish_thread_last_beat
+    log("publish_thread starting", interval=PUBLISH_RETRY_COOLDOWN_SECONDS)
+    consecutive_errors = 0
+    while not _publish_thread_stop.is_set():
+        try:
+            # 2026-05-13 (revised): heartbeat ставится ПОСЛЕ успешного state-fetch,
+            # не перед. Иначе если /bridge/state виснет 60+ сек, watchdog видит
+            # свежий heartbeat и не respawn'ит застрявший поток.
+            state = request_json("/bridge/state")
+            _publish_thread_last_beat = time.time()
+            if state.get("automation_paused"):
+                _publish_thread_stop.wait(PUBLISH_RETRY_COOLDOWN_SECONDS)
+                continue
+            if not should_publish(state, utc_now()):
+                _publish_thread_stop.wait(PUBLISH_RETRY_COOLDOWN_SECONDS)
+                continue
+            try:
+                result = request_json("/bridge/publish", method="POST", payload={})
+                _publish_thread_last_beat = time.time()  # confirm work-completion
+                log("publish thread executed", next_ready_publish=state.get("next_ready_publish"), result=result.get("result", result))
+                consecutive_errors = 0
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                log("publish thread http error", status=exc.code, detail=detail[:500])
+                # 2026-05-13: 503 от WordPress (maintenance mode, plugin updating)
+                # обычно проходит за секунды. Одна inline-повторная попытка через
+                # 3 сек до следующего нормального интервала.
+                if exc.code in (502, 503, 504):
+                    _publish_thread_stop.wait(3)
+                    if not _publish_thread_stop.is_set():
+                        try:
+                            result = request_json("/bridge/publish", method="POST", payload={})
+                            log("publish thread retry succeeded", status=exc.code, result=result.get("result", result))
+                            consecutive_errors = 0
+                        except Exception as retry_exc:  # noqa: BLE001
+                            log("publish thread retry failed", error=str(retry_exc))
+                            consecutive_errors += 1
+                else:
+                    consecutive_errors += 1
+        except Exception as exc:  # noqa: BLE001
+            # Catches network errors, JSON decode errors, anything from wait/sleep,
+            # KeyError on state dict, etc. Critical: must NOT crash the thread.
+            log("publish thread iteration error", error=str(exc), error_type=type(exc).__name__)
+            consecutive_errors += 1
+        # Back-off если консекутивные ошибки накопились (5+ = system in pain,
+        # дать ему передохнуть подольше).
+        backoff = PUBLISH_RETRY_COOLDOWN_SECONDS
+        if consecutive_errors >= 5:
+            backoff = min(60, PUBLISH_RETRY_COOLDOWN_SECONDS * 4)
+            log("publish thread backing off", consecutive_errors=consecutive_errors, sleep=backoff)
+        try:
+            _publish_thread_stop.wait(backoff)
+        except Exception as exc:  # noqa: BLE001
+            log("publish thread wait error", error=str(exc))
+            time.sleep(1)
+    log("publish_thread stopped")
+
+
+def start_publish_thread() -> threading.Thread:
+    """Idempotent: returns existing alive thread or starts a fresh one."""
+    global _publish_thread, _publish_thread_last_beat
+    if _publish_thread is not None and _publish_thread.is_alive():
+        log("publish_thread already alive, skipping start")
+        return _publish_thread
+    _publish_thread_last_beat = time.time()
+    _publish_thread = threading.Thread(target=publish_thread_loop, name="epv2_publish_loop", daemon=True)
+    _publish_thread.start()
+    return _publish_thread
+
+
+def publish_thread_healthy() -> bool:
+    """Returns True if thread is alive AND has emitted a heartbeat recently
+    (≤ 5× interval ago). False signals dead/stuck — caller should respawn.
+    """
+    if _publish_thread is None or not _publish_thread.is_alive():
+        return False
+    stale_threshold = PUBLISH_RETRY_COOLDOWN_SECONDS * 5
+    return (time.time() - _publish_thread_last_beat) < stale_threshold
+
+
 def should_process(state: dict) -> bool:
     has_processable = state.get("has_processable_items")
     if isinstance(has_processable, bool):
@@ -327,22 +440,79 @@ def should_process_from_idle(state: dict, now_ts: float, last_process: float) ->
     return now_ts - last_process >= IDLE_PROCESS_COOLDOWN_SECONDS
 
 
+def _install_signal_handlers() -> None:
+    """2026-05-13: graceful shutdown. SIGTERM (systemd stop) and SIGINT (Ctrl-C)
+    set the publish_thread stop event and exit with status 0. Without this,
+    daemon publish_thread получает SIGKILL через TimeoutStop и может оставить
+    висящий 'publishing' row в БД. Watchdog подбирает, но это маскирует баг.
+    """
+    def _handler(signum: int, frame: Any) -> None:  # noqa: ARG001
+        log("shutdown signal received", signum=signum)
+        _publish_thread_stop.set()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
+
+
 def main() -> int:
     if not BRIDGE_TOKEN:
         print("Missing EPV2_BRIDGE_TOKEN", file=sys.stderr)
         return 1
 
     log("orchestrator starting", site_url=SITE_URL, loop_seconds=LOOP_SECONDS)
+    # 2026-05-13: signal handlers for graceful shutdown.
+    _install_signal_handlers()
+    # 2026-05-12 W4.1: start parallel publish thread.
+    start_publish_thread()
     last_collect = time.time()
     last_process = 0.0
     last_publish = 0.0
     last_maintenance = 0.0
     last_breaking_scan = 0.0
     last_breaking_scan_minute = -1  # track which minute we already fired in
+    last_publish_thread_check = 0.0  # track when we last verified thread health
 
     while True:
         now = utc_now()
         now_ts = time.time()
+        # 2026-05-13: publish_thread watchdog. Раз в минуту проверяем, что
+        # поток жив и эмитит heartbeat. Если умер или завис (stale heartbeat) —
+        # респавним. Так молчаливая смерть потока больше не блокирует pipeline
+        # на часы (как было сегодня утром — 25 минут без публикаций после
+        # 08:46:14 пока я ручкой не рестартанул весь оркестратор).
+        if now_ts - last_publish_thread_check >= 60:
+            thread_alive_before_check = publish_thread_healthy()
+            if not thread_alive_before_check:
+                log("publish_thread dead or stale, respawning")
+                # 2026-05-13 (revised): proper teardown sequence — set stop event,
+                # try to join existing thread (2 sec timeout), затем clear+spawn.
+                # Без этого stuck thread в долгом urlopen остаётся зомби: is_alive=True
+                # после `_publish_thread_stop.clear()`, idempotent guard в
+                # `start_publish_thread()` (is_alive check) пропускает спавн — застряли.
+                _publish_thread_stop.set()
+                if _publish_thread is not None and _publish_thread.is_alive():
+                    try:
+                        _publish_thread.join(timeout=2.0)
+                    except Exception as join_exc:  # noqa: BLE001
+                        log("publish_thread join error", error=str(join_exc))
+                _publish_thread_stop.clear()
+                start_publish_thread()
+            # R7 2026-05-14: эмитим heartbeat в WP option для PHP-side visibility.
+            # Admin notice ловит stale heartbeat >90s.
+            last_beat_age = max(0, int(now_ts - _publish_thread_last_beat))
+            try:
+                request_json(
+                    "/bridge/heartbeat",
+                    method="POST",
+                    payload={
+                        "thread_alive": bool(thread_alive_before_check),
+                        "last_beat_age_s": last_beat_age,
+                    },
+                )
+            except Exception as hb_exc:  # noqa: BLE001
+                log("heartbeat post failed", error=str(hb_exc))
+            last_publish_thread_check = now_ts
+
         try:
             state = request_json("/bridge/state")
             if state.get("automation_paused"):
@@ -381,10 +551,22 @@ def main() -> int:
             # подберёт его. Runs 24/7 with privilege bypass (looser cap).
             breaking_minutes = state.get("breaking_watch_minutes") or [0, 30]
             current_minute = now.minute
+            # 2026-05-12 — overshoot guard. Previously condition was strictly
+            # `current_minute in breaking_minutes`. Если loop iteration совпала
+            # с длительным wp-cli process subprocess (item recycle 60+s), :00 или
+            # :30 minute boundary могло пройти ВНУТРИ subprocess'а. К моменту
+            # когда top of loop запускается снова, current_minute уже =1 или 31,
+            # и breaking_scan молча скипается на этот цикл. Поднял bridge state
+            # `has_breaking_watch=false` диагностика подтвердила: 18:00 scan не
+            # fired, плагин не зарегистрировал. Добавляю overshoot: fire если
+            # с последнего scan прошло >= 32 минут (стандартный интервал 30m +
+            # запас) даже если не на :00/:30 boundary.
+            elapsed_since_last_breaking = now_ts - last_breaking_scan
+            breaking_overshoot = elapsed_since_last_breaking >= 32 * 60
             if (
-                current_minute in breaking_minutes
+                (current_minute in breaking_minutes or breaking_overshoot)
                 and current_minute != last_breaking_scan_minute
-                and now_ts - last_breaking_scan >= 120  # safety debounce
+                and elapsed_since_last_breaking >= 120  # safety debounce
             ):
                 try:
                     result = request_json("/bridge/breaking_scan", method="POST", payload={})
@@ -394,11 +576,11 @@ def main() -> int:
                 except Exception as exc:
                     log("breaking scan error", error=str(exc))
 
-            if should_publish(state, utc_now()) and now_ts - last_publish >= PUBLISH_RETRY_COOLDOWN_SECONDS:
-                result = request_json("/bridge/publish", method="POST", payload={})
-                log("publish executed", next_ready_publish=state.get("next_ready_publish"), result=result)
-                last_publish = time.time()
-                state = request_json("/bridge/state")
+            # 2026-05-13 (revised): main-loop publish call УДАЛЁН. publish_thread
+            # покрывает все publish-кейсы каждые 15 сек с inline retry на 503/504.
+            # Двойной publish из main loop + publish_thread = 3 канал и race за PHP
+            # publish_lock. Лог замусоривался "publish executed" дважды на каждый
+            # реальный publish event.
 
             if should_process(state) and (
                 now_ts - last_process >= process_every
@@ -427,10 +609,8 @@ def main() -> int:
                 )
                 last_process = now_ts
 
-            if should_publish(state, utc_now()) and time.time() - last_publish >= PUBLISH_RETRY_COOLDOWN_SECONDS:
-                result = request_json("/bridge/publish", method="POST", payload={})
-                log("publish executed", next_ready_publish=state.get("next_ready_publish"), result=result)
-                last_publish = time.time()
+            # 2026-05-13 (revised): второй post-process publish-block тоже удалён.
+            # publish_thread проверяет ready_publish independently каждые 15 сек.
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             log("bridge http error", status=exc.code, detail=detail[:1000])

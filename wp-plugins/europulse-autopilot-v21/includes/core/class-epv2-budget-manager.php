@@ -501,7 +501,11 @@ final class EPV2_Budget_Manager {
 			'dimensions' => ['importance', 'informativeness', 'freshness', 'source_confidence'],
 		];
 		$cards = [
-			'politik' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'source_confidence', 'timeliness', 'informativeness']],
+			// 2026-05-17 evening: publish_c 40 → 42 gentle tightening.
+			// Avg published score 49.2 = большой запас. Items 40-41 уходят
+			// в C-low. Ukraine оставлен 40 (war news имеет ценность даже
+			// при low scores).
+			'politik' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 42, 'dimensions' => ['public_impact', 'source_confidence', 'timeliness', 'informativeness']],
 			// publish_c raised 40→45: Welt = world news, only the genuinely
 			// resonant stories belong here. Niche-American / military-incident
 			// items now slip from C-review into C-low and never make it past
@@ -509,7 +513,10 @@ final class EPV2_Budget_Manager {
 			'welt' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 45, 'dimensions' => ['public_impact', 'international_relevance', 'source_confidence', 'timeliness']],
 			'ukraine' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['war_relevance', 'human_impact', 'source_confidence', 'timeliness']],
 			'europa' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'policy_relevance', 'source_confidence']],
-			'deutschland' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'reader_relevance', 'informativeness']],
+			// 2026-05-17 evening: publish_c 40 → 42. Avg published score 39.67
+			// (с хвостом до 36 в min) — поднимаем порог чтобы зарезать
+			// слабые. Сегодня 3/3 deutschland publishes были borderline.
+			'deutschland' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 42, 'dimensions' => ['public_impact', 'reader_relevance', 'informativeness']],
 			// publish_c history:
 			//   ff4309d 2026-05-09 morning: raised 40→44 (operator quality bar)
 			//   2026-05-09 evening:        reverted 44→40 (throughput drop)

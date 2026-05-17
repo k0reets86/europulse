@@ -253,7 +253,7 @@ final class EPV2_Manual_Mode {
 			'category_final' => implode(',', $draft['categories']),
 			'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 			'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
-			'ai_tokens' => (int) ($payload['_meta']['tokens'] ?? 0),
+			'ai_tokens' => class_exists('EPV2_AI_Processor') ? EPV2_AI_Processor::payload_total_tokens($payload) : (int) ($payload['_meta']['tokens'] ?? 0),
 			'error_message' => '',
 		]);
 

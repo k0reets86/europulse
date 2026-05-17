@@ -50,6 +50,13 @@ final class EPV2_Watchdog {
 	 */
 	public static function auto_reset_legacy_quarantine(int $limit = 20): array {
 		$result = ['scanned' => 0, 'reset' => 0, 'items' => []];
+		// POLICY 2026-05-14 (R1): в auto mode "fail = reject immediately,
+		// no revival". Watchdog revival rejected → new прямо нарушает policy
+		// (сегодня 58+ items revive'нуто за день, каждый = заново 15-25K
+		// tokens через AI chain). Skip полностью в auto mode.
+		if ((string) EPV2_Settings::get('mode', 'semi') === 'auto') {
+			return $result;
+		}
 		global $wpdb;
 		$queue_table = $wpdb->prefix . 'epv2_queue';
 		$runs_table = $wpdb->prefix . 'epv2_runs';
@@ -117,9 +124,23 @@ final class EPV2_Watchdog {
 				   AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.last_item_id')) AS UNSIGNED) = %d",
 				$id
 			));
-			// 4. flip back to `new`
+			// 4. flip back to `new` with CLEAR error_message — это recovery,
+			// не ошибка. Раньше watchdog оставлял текст «Auto-reset by watchdog:
+			// legacy reason X already fixed in code» как error_message, и operator
+			// видел эту информационную пометку как блокер в админ UI («странные
+			// новости с комментариями в новых»). Trace остаётся в admin_notes
+			// _system._reset_note для diagnostics, но без UI-блокирующего text.
+			$reset_notes = json_decode((string) ($row->admin_notes ?? ''), true);
+			$reset_notes = is_array($reset_notes) ? $reset_notes : [];
+			$reset_notes['_system'] = is_array($reset_notes['_system'] ?? null) ? $reset_notes['_system'] : [];
+			$reset_notes['_system']['_reset_note'] = sprintf(
+				'watchdog_legacy_reset matched="%s" at=%s',
+				$matched,
+				gmdate('Y-m-d H:i:s')
+			);
 			EPV2_Queue::mark_state($id, 'new', [
-				'error_message' => 'Auto-reset by watchdog: legacy reason "' . $matched . '" already fixed in code.',
+				'admin_notes' => wp_json_encode($reset_notes, JSON_UNESCAPED_UNICODE),
+				'error_message' => '',
 			]);
 			$result['reset']++;
 			$result['items'][] = [
@@ -210,6 +231,64 @@ final class EPV2_Watchdog {
 				'Stuck active item #%d released (state=%s, idle > %d min)',
 				$active_id, $current_state, $stale_minutes
 			), ['item_id' => $active_id, 'state' => $current_state]);
+		}
+		return $result;
+	}
+
+	/**
+	 * 2026-05-12: clear orphaned workflow_owner_token on state='new' items.
+	 *
+	 * Bug discovered: item 2203 (38 hours old) had stale `workflow_owner_token`
+	 * + `workflow_step` в admin_notes. Это заставляло селектор делать
+	 * `resume_active_owner` именно его каждый цикл → fresh items (2818-2832)
+	 * 81+ минут не processed.
+	 *
+	 * release_stuck_active_item проверяет только `epv2_active_automation_item`
+	 * option pointer. Если pointer уже cleared но workflow_owner_token остался
+	 * в admin_notes — watchdog не trogает его. Item зомби-active forever.
+	 *
+	 * Fix: scan state='new' items с workflow_owner_token и updated_at > N min ago,
+	 * clear token + step. Селектор fallback на claim_new и подберёт fresh items.
+	 */
+	public static function clear_orphaned_workflow_owners(int $stale_minutes = 30, int $limit = 50): array {
+		$result = ['cleared' => 0, 'items' => []];
+		global $wpdb;
+		$active_id = (int) get_option('epv2_active_automation_item', 0);
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT id, admin_notes, updated_at FROM {$wpdb->prefix}epv2_queue
+			 WHERE state='new'
+			   AND admin_notes LIKE '%workflow_owner_token%'
+			   AND updated_at < DATE_SUB(NOW(), INTERVAL %d MINUTE)
+			 ORDER BY updated_at ASC
+			 LIMIT %d",
+			max(1, $stale_minutes),
+			max(1, min(200, $limit))
+		));
+		foreach ((array) $rows as $row) {
+			$id = (int) ($row->id ?? 0);
+			if ($id <= 0) continue;
+			// Skip if this IS the current legitimate active pointer.
+			if ($id === $active_id) continue;
+			$notes = json_decode((string) ($row->admin_notes ?? ''), true);
+			$notes = is_array($notes) ? $notes : [];
+			if (! is_array($notes['_system'] ?? null)) continue;
+			$tok = (string) ($notes['_system']['workflow_owner_token'] ?? '');
+			if ($tok === '') continue;
+			$notes['_system']['workflow_owner_token'] = '';
+			$notes['_system']['workflow_heartbeat_at'] = '';
+			$notes['_system']['workflow_step'] = '';
+			$notes['_system']['workflow_step_attempts'] = 0;
+			$wpdb->update($wpdb->prefix . 'epv2_queue', [
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+			], ['id' => $id]);
+			$result['cleared']++;
+			$result['items'][] = $id;
+		}
+		if ($result['cleared'] > 0 && class_exists('EPV2_Logger')) {
+			EPV2_Logger::info('queue', sprintf(
+				'clear_orphaned_workflow_owners: %d items unblocked (ids=%s)',
+				$result['cleared'], implode(',', $result['items'])
+			));
 		}
 		return $result;
 	}

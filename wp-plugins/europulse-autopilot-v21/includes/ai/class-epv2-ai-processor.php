@@ -1106,6 +1106,44 @@ final class EPV2_AI_Processor {
 				}
 				$reused_existing_context = $existing_payload !== [];
 				if ($reused_existing_context) {
+					// 2026-05-17 resume re-validation: row-level admin_notes
+					// .selection — source of truth для текущей classification
+					// (обновляется Story Card / classifier'ом). Payload-level
+					// stored_selection — frozen snapshot at AI-write time.
+					// Если row.selection.decision был перекалиброван в
+					// low/reject между AI work и resume (классическая race:
+					// item был review при первом проходе, Story Card
+					// дал D-tier reject после rebuild), resume не должен
+					// подхватить stale review/strong decision из payload.
+					// Без этой проверки items с current decision=reject
+					// проходят в publish (наблюдалось item 4001 welt
+					// score=29 decision=reject — published).
+					$row_admin_notes = json_decode((string) ($item->admin_notes ?? ''), true) ?: [];
+					$row_selection = is_array($row_admin_notes['selection'] ?? null) ? $row_admin_notes['selection'] : [];
+					$row_decision = sanitize_key((string) ($row_selection['decision'] ?? ''));
+					$row_score = (int) ($row_selection['score'] ?? 0);
+					$row_top_story = ! empty($row_selection['top_story_candidate']);
+					$row_breaking = ! empty($row_selection['breaking_candidate']) || ! empty($row_selection['breaking_watch']);
+					if (
+						in_array($row_decision, ['low', 'reject'], true)
+						&& ! $row_top_story
+						&& ! $row_breaking
+					) {
+						$stored_decision = sanitize_key((string) ($stored_selection['decision'] ?? ''));
+						self::log_process_item_step('resume_blocked_post_reclassification', (int) $item->id, [
+							'stored_decision' => $stored_decision,
+							'row_decision' => $row_decision,
+							'row_score' => $row_score,
+						]);
+						EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+							'error_message' => sprintf(
+								'Selection re-classified to %s (score %d) after AI rebuild; payload not published.',
+								$row_decision,
+								$row_score
+							),
+						]);
+						continue;
+					}
 					$analysis = $stored_selection !== [] ? $stored_selection : [
 						'score' => 0,
 						'decision' => 'resume_existing_payload',

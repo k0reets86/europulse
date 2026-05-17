@@ -866,9 +866,21 @@ def _parse_json_result(raw: str, source_text: str, story_card: dict | None = Non
         # Combined reduce FP rate ~85%. Real fabrications all'еще caught.
         # 2026-05-13 epidemic (Russlands Angriffskrieg → flagged as name) теперь
         # impossible — spaCy NER не определяет это как PER entity.
+        # 2026-05-17 R8 Phase 3: cross-script fix. Если source — Cyrillic
+        # (UA/RU), trusted_tokens regex `[A-ZÄÖÜ]...` НЕ матчит Cyrillic слова,
+        # все имена транслитерированные AI'ом ("Wolodymyr Zelensky" из
+        # "Володимир Зеленський") flagуются как fabricated. Detector не может
+        # надёжно cross-check transliterations без full BGN/PCGN + German
+        # transliteration tables. Pragmatic fix: при Cyrillic source severity
+        # = "soft" — surface warning в admin, не block publish. spaCy DE NER
+        # + Story Card primacy + other quality validators остаются operating
+        # as quality signals. Если real fabrication будет — soft warning
+        # surfaces it, operator catches на ручной выборке.
         fabricated = _detect_fabricated_proper_nouns(full_text, source_text, story_card, supporting_text=supporting_text)
+        source_is_cyrillic = bool(re.search(r"[А-Яа-яЁёІіЇїЄєҐґ]", source_text))
+        fabricated_severity = "soft" if source_is_cyrillic else "hard"
         for name in fabricated:
-            result.warnings.append({"kind": "fabricated_name", "value": name, "severity": "hard"})
+            result.warnings.append({"kind": "fabricated_name", "value": name, "severity": fabricated_severity})
 
         return result
     except Exception as exc:

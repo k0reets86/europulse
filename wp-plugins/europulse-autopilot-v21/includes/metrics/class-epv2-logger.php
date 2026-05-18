@@ -32,7 +32,45 @@ final class EPV2_Logger {
 	}
 
 	public static function info(string $module, string $message, array $context = []): void {
+		if (self::should_throttle_info($module, $message, $context)) {
+			return;
+		}
 		self::log('info', $module, $message, $context);
+	}
+
+	private static function should_throttle_info(string $module, string $message, array $context = []): bool {
+		$ttl = 0;
+		if ($module === 'rest' && $message === 'bridge token auth ok') {
+			$ttl = 300;
+		} elseif ($module === 'process_item' && $message === 'process item step') {
+			$ttl = 60;
+		} elseif ($module === 'process_entry' && $message === 'process_scheduled step') {
+			$ttl = 60;
+		} elseif ($module === 'queue_selector') {
+			$ttl = 60;
+		}
+		if ($ttl <= 0) {
+			return false;
+		}
+		$signature = [
+			'module' => $module,
+			'message' => $message,
+			'route' => (string) ($context['route'] ?? ''),
+			'method' => (string) ($context['method'] ?? ''),
+			'step' => (string) ($context['step'] ?? ''),
+			'stage' => (string) ($context['stage'] ?? ''),
+		];
+		$key = 'epv2_log_t_' . md5(wp_json_encode($signature));
+		static $request_seen = [];
+		if (isset($request_seen[$key])) {
+			return true;
+		}
+		$request_seen[$key] = true;
+		if (get_transient($key)) {
+			return true;
+		}
+		set_transient($key, '1', $ttl);
+		return false;
 	}
 
 	public static function warning(string $module, string $message, array $context = []): void {

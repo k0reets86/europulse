@@ -15,3 +15,8 @@ venv/
 logs/
 *.log
 .codex
+.claude/
+prepare
+*.bak_pre_*
+monitoring/snap-*.tsv
+monitoring/baseline-*.tsv

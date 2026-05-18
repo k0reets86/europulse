@@ -140,9 +140,9 @@ final class EPV2_REST {
 		}
 		$matched = hash_equals($expected, $provided);
 		if ($matched && class_exists('EPV2_Logger')) {
-			// Audit trail: log every successful token auth so a leaked
-			// secret or unexpected caller is observable post-hoc. The
-			// token itself is never logged.
+			// Audit trail: EPV2_Logger throttles this high-frequency success
+			// event per route so bridge health checks do not bloat epv2_log.
+			// The token itself is never logged.
 			$user_id = get_current_user_id();
 			EPV2_Logger::info('rest', 'bridge token auth ok', [
 				'route'    => (string) $request->get_route(),

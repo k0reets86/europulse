@@ -18,6 +18,12 @@ from .openai_compat import (
     completion_total_tokens,
     reasoning_extra_body,
 )
+from .provider_health import (
+    provider_available,
+    provider_unavailable_reason,
+    register_provider_failure,
+    register_provider_success,
+)
 
 
 _SENTENCE_TERMINAL_RE = re.compile(r"[.!?»\"…]\s*$", re.UNICODE)
@@ -63,6 +69,7 @@ class SEOResult:
     tokens: int = 0
     # R5 2026-05-14: OpenAI prompt caching tracking.
     cached_tokens: int = 0
+    error: str = ""
 
 
 _SYSTEM = """Du bist ein SEO-Experte für die Nachrichtenplattform EuroPulse.today.
@@ -125,11 +132,16 @@ Erstelle SEO-Metadaten."""
     for provider, api_key, model in candidates:
         if not api_key:
             continue
+        if not provider_available(provider):
+            logger.warning("SEO generation via %s skipped: cooldown %s", provider, provider_unavailable_reason(provider))
+            continue
         result = await _call(user, api_key, provider, model)
         if result.success:
             result.provider = provider
             result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
+            register_provider_success(provider)
             return result
+        register_provider_failure(provider, result.error or "empty seo result")
 
     # Graceful fallback: derive from title
     slug = _slugify(title_de)
@@ -184,7 +196,7 @@ async def _call(user_prompt: str, api_key: str, provider: str, model: str) -> SE
         )
     except Exception as exc:
         logger.warning("SEO generation via %s failed: %s", provider, exc)
-        return SEOResult()
+        return SEOResult(error=str(exc))
 
 
 def _slugify(text: str) -> str:

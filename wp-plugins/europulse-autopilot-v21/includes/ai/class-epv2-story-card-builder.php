@@ -41,6 +41,16 @@ final class EPV2_Story_Card_Builder {
 		}
 
 		$body_source = self::pick_body_text( $item, $dossier );
+		$ai_provider = (string) EPV2_Settings::get( 'ai_provider', 'openai' );
+		$ai_model = (string) EPV2_Settings::get( 'ai_model', 'gpt-4o-mini' );
+		$fallback_provider = (string) EPV2_Settings::get( 'ai_fallback_provider', '' );
+		$fallback_model = (string) EPV2_Settings::get( 'ai_fallback_model', '' );
+		$openai_model = 'gpt-4o-mini';
+		if ( $ai_provider === 'openai' && $ai_model !== '' ) {
+			$openai_model = $ai_model;
+		} elseif ( $fallback_provider === 'openai' && $fallback_model !== '' ) {
+			$openai_model = $fallback_model;
+		}
 		$payload = [
 			'queue_id'        => (int) ( $item->id ?? 0 ),
 			'title'           => (string) ( $item->original_title ?? '' ),
@@ -52,7 +62,11 @@ final class EPV2_Story_Card_Builder {
 			'category_bias'   => (string) ( $item->category_proposed ?? $item->category_final ?? '' ),
 			'openai_api_key'  => self::ai_key( 'openai' ),
 			'deepseek_api_key' => self::ai_key( 'deepseek' ),
-			'openai_model'    => (string) ( EPV2_Settings::get( 'ai_model', 'gpt-4o-mini' ) ?: 'gpt-4o-mini' ),
+			'ai_provider'     => $ai_provider,
+			'ai_model'        => $ai_model,
+			'ai_fallback_provider' => $fallback_provider,
+			'ai_fallback_model' => $fallback_model,
+			'openai_model'    => $openai_model,
 			'worker_token'    => self::worker_token(),
 		];
 

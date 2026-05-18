@@ -19,6 +19,12 @@ from .openai_compat import (
     completion_total_tokens,
     reasoning_extra_body,
 )
+from .provider_health import (
+    provider_available,
+    provider_unavailable_reason,
+    register_provider_failure,
+    register_provider_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -582,6 +588,9 @@ Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "card_l
     for provider, api_key, model in candidates:
         if not api_key:
             continue
+        if not provider_available(provider):
+            provider_errors.append(f"{provider}/{model or 'default'}: cooldown {provider_unavailable_reason(provider)}")
+            continue
         if provider == "deepseek":
             result = await _call_deepseek(user_prompt, api_key, source_text, max_tok, model or "deepseek-chat", story_card=story_card, dossier_block=dossier_block)
         else:
@@ -589,8 +598,10 @@ Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "card_l
         if result.success:
             result.provider = provider
             result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
+            register_provider_success(provider)
             _annotate_uniqueness(result, source_text=source_text, story_card=story_card, language="de")
             return result
+        register_provider_failure(provider, result.error)
         provider_errors.append(f"{provider}/{model or 'default'}: {result.error}")
         logger.warning("Rewrite via %s failed: %s", provider, result.error)
 

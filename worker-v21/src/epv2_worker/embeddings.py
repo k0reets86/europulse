@@ -17,6 +17,13 @@ from typing import Any
 
 import httpx
 
+from .provider_health import (
+    provider_available,
+    provider_unavailable_reason,
+    register_provider_failure,
+    register_provider_success,
+)
+
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = "text-embedding-3-small"
@@ -67,6 +74,9 @@ async def compute_embedding(
     """
     if not openai_api_key:
         return {}
+    if not provider_available("openai"):
+        logger.warning("embedding skipped: openai cooldown %s", provider_unavailable_reason("openai"))
+        return {}
     text = _prepare_text_for_embedding(title=title, excerpt=excerpt, content=content)
     if not text:
         return {}
@@ -88,6 +98,7 @@ async def compute_embedding(
             data = response.json()
     except httpx.HTTPStatusError as exc:
         body = exc.response.text if exc.response is not None else ""
+        register_provider_failure("openai", body or exc)
         logger.warning(
             "embedding HTTP error model=%s status=%s body=%s",
             EMBEDDING_MODEL,
@@ -96,6 +107,7 @@ async def compute_embedding(
         )
         return {}
     except Exception as exc:  # noqa: BLE001
+        register_provider_failure("openai", exc)
         logger.warning("embedding error model=%s err=%s", EMBEDDING_MODEL, exc)
         return {}
     items = data.get("data") or []
@@ -110,6 +122,7 @@ async def compute_embedding(
         )
         return {}
     usage = data.get("usage") or {}
+    register_provider_success("openai")
     return {
         "model": EMBEDDING_MODEL,
         "dim": EMBEDDING_DIM,

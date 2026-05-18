@@ -30,6 +30,12 @@ from .openai_compat import (
     completion_total_tokens,
     reasoning_extra_body,
 )
+from .provider_health import (
+    provider_available,
+    provider_unavailable_reason,
+    register_provider_failure,
+    register_provider_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +481,9 @@ async def build_story_card(
     )
     last_error = ""
     for provider in provider_order:
+        if not provider_available(provider):
+            last_error = f"{provider}_cooldown: {provider_unavailable_reason(provider)}"
+            continue
         try:
             if provider == "openai":
                 if not openai_api_key:
@@ -508,10 +517,12 @@ async def build_story_card(
                 parsed = json.loads(raw_text or "{}")
             except json.JSONDecodeError as exc:
                 last_error = f"json_decode({provider}): {exc}"
+                register_provider_failure(provider, exc)
                 logger.warning("Story card JSON parse failed via %s: %s", provider, exc)
                 continue
             if not isinstance(parsed, dict):
                 last_error = f"non_object({provider})"
+                register_provider_failure(provider, last_error)
                 continue
             card = _coerce_card(parsed)
             card.success = True
@@ -519,9 +530,11 @@ async def build_story_card(
             card.model = used_model
             card.tokens = used_tokens
             card.cached_tokens = used_cached
+            register_provider_success(provider)
             return card
         except Exception as exc:  # noqa: BLE001
             last_error = f"{provider}_error: {exc}"
+            register_provider_failure(provider, exc)
             logger.warning("Story card via %s failed: %s", provider, exc)
             continue
 

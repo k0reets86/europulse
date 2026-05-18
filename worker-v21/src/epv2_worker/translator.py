@@ -18,6 +18,12 @@ from .openai_compat import (
     completion_total_tokens,
     reasoning_extra_body,
 )
+from .provider_health import (
+    provider_available,
+    provider_unavailable_reason,
+    register_provider_failure,
+    register_provider_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -348,12 +354,17 @@ async def translate_from_german(
     for provider, api_key, model in candidates:
         if not api_key:
             continue
+        if not provider_available(provider):
+            logger.warning("Translation via %s skipped: cooldown %s", provider, provider_unavailable_reason(provider))
+            continue
         result = await _call(user, system, api_key, provider, model, target_lang, source_text)
         if result.success:
             result.provider = provider
             result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
+            register_provider_success(provider)
             _annotate_translation_uniqueness(result, source_text=source_text, target_lang=target_lang)
             return result
+        register_provider_failure(provider, result.error)
 
     return TranslationResult(error="All providers failed")
 

@@ -16,6 +16,7 @@ from .pipeline import run_pipeline, build_normalized_payload
 from .contracts import WorkerRequest
 from .story_card import build_story_card
 from .embeddings import compute_embedding
+from .provider_health import provider_health_snapshot
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="EPV2 Worker", version="2.1")
@@ -51,7 +52,7 @@ class ProcessRequest(BaseModel):
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "2.1"}
+    return {"status": "ok", "version": "2.1", "providers": provider_health_snapshot()}
 
 
 class AnalyzeStoryRequest(BaseModel):
@@ -65,8 +66,35 @@ class AnalyzeStoryRequest(BaseModel):
     category_bias: str = ""
     openai_api_key: str = ""
     deepseek_api_key: str = ""
+    ai_provider: str = ""
+    ai_model: str = ""
+    ai_fallback_provider: str = ""
+    ai_fallback_model: str = ""
     openai_model: str = "gpt-4o-mini"
     worker_token: str = ""
+
+
+def _story_provider_order(req: AnalyzeStoryRequest) -> tuple[str, ...]:
+    keys = {
+        "openai": bool((req.openai_api_key or "").strip()),
+        "deepseek": bool((req.deepseek_api_key or "").strip()),
+    }
+    primary_raw = (req.ai_provider or "").strip().lower()
+    fallback_raw = (req.ai_fallback_provider or "").strip().lower()
+    primary = primary_raw or "openai"
+    fallback = fallback_raw
+    order: list[str] = []
+    if primary in keys and keys[primary]:
+        order.append(primary)
+    if fallback in keys and keys[fallback] and fallback not in order:
+        order.append(fallback)
+    if order and (primary_raw or fallback_raw):
+        return tuple(order)
+    return tuple(provider for provider in ("openai", "deepseek") if keys[provider])
+
+
+async def _empty_embedding() -> dict[str, Any]:
+    return {}
 
 
 @app.post("/analyze_story")
@@ -91,6 +119,7 @@ async def analyze_story(
         # пишется в payload._meta.semantic_embedding на PHP side для future
         # similarity-based dedup. Phase 1 = generate + store only (no usage).
         import asyncio
+        provider_order = _story_provider_order(req)
         card_task = build_story_card(
             title=req.title,
             excerpt=req.excerpt,
@@ -101,13 +130,18 @@ async def analyze_story(
             category_bias=req.category_bias,
             openai_api_key=req.openai_api_key,
             deepseek_api_key=req.deepseek_api_key,
+            provider_order=provider_order,
             openai_model=req.openai_model or "gpt-4o-mini",
         )
-        emb_task = compute_embedding(
-            title=req.title,
-            excerpt=req.excerpt,
-            content=req.content,
-            openai_api_key=req.openai_api_key,
+        emb_task = (
+            compute_embedding(
+                title=req.title,
+                excerpt=req.excerpt,
+                content=req.content,
+                openai_api_key=req.openai_api_key,
+            )
+            if "openai" in provider_order
+            else _empty_embedding()
         )
         card, embedding = await asyncio.gather(card_task, emb_task)
     except Exception as exc:  # noqa: BLE001

@@ -81,12 +81,16 @@ class PipelineContext:
             "deepseek": str(flags.get("ai_fallback_model", "")) or "deepseek-chat",
         }
         order: list[tuple[str, str, str]] = []
-        primary = str(flags.get("ai_provider", "openai"))
-        fallback = str(flags.get("ai_fallback_provider", ""))
+        primary_raw = str(flags.get("ai_provider", "")).strip()
+        fallback_raw = str(flags.get("ai_fallback_provider", "")).strip()
+        primary = primary_raw or "openai"
+        fallback = fallback_raw
         if primary in keys and keys[primary]:
             order.append((primary, keys[primary], models[primary]))
         if fallback in keys and keys[fallback] and fallback != primary:
             order.append((fallback, keys[fallback], fallback_models[fallback]))
+        if order and (primary_raw or fallback_raw):
+            return order
         for provider, key in keys.items():
             if key and provider not in {candidate[0] for candidate in order}:
                 order.append((provider, key, "gpt-4o-mini" if provider == "openai" else "deepseek-chat"))

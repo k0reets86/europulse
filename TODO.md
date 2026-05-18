@@ -1,5 +1,35 @@
 # CRITICAL DIRECTIVE
 
+## Current Runtime Status 2026-05-18 20:05 UTC — post-repair checkpoint
+
+- [x] Create a single new-session entrypoint: `LLM_START_HERE.md`.
+- [x] Stage provider-order repair so DeepSeek-primary does not silently call OpenAI fallback paths.
+- [x] Add worker provider cooldown and `/health` provider snapshot.
+- [x] Skip OpenAI embeddings when OpenAI is not in the explicit provider order.
+- [x] Add cooldown checks to story_card, rewrite, translation, SEO, and embeddings.
+- [x] Throttle high-frequency REST/process/queue info logs.
+- [x] Make healthcheck pause-aware and write `epv2_active_alerts`.
+- [x] Record frontend foundation and shared home-pool cache work in repo.
+- [ ] Finish local commits for the stabilization package and handoff.
+- [ ] Fix blocked package maintenance:
+  - current blocker: old `msmtp` debconf prompt `msmtp/apparmor`
+  - intended answer: `false`
+  - finish with non-interactive `dpkg --configure -a`, then verify `dpkg --audit`
+- [ ] Decide whether to clear swap after package maintenance is clean.
+  - current observed state: RAM has headroom, swap still about `1.1G/2.0G`
+  - treat `swapoff -a && swapon -a` as explicit maintenance, not automatic
+- [ ] Before unpausing automation, verify:
+  - provider settings are DeepSeek-primary as intended
+  - worker `/health` includes provider snapshot
+  - `epv2_active_alerts` is empty or only accepted warnings
+  - no active old cron duplicate is running
+- [ ] Controlled restart sequence:
+  - start `epv2-worker`
+  - start `epv2-orchestrator`
+  - unpause only while watching the first cycle
+
+Do not start new feature work before these operational blockers are closed.
+
 ## Current Runtime Status 2026-05-06 10:15 UTC — Story Card now drives categorizer + tags + rewriter + media
 
 - [x] Story Card built and persisted (commit `46a1e5c`).

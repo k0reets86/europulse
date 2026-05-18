@@ -1,5 +1,34 @@
 # SESSION HANDOFF
 
+## Latest Handoff 2026-05-18 20:05 UTC — Provider/memory incident repair + LLM entrypoint
+
+- First file for a new LLM session is now `/root/projects/europulse/LLM_START_HERE.md`. It defines read order, current runtime state, and next actions. Read it before older handoff sections.
+- Active repo branch: `review/plugin-audit`. Runtime paths remain:
+  - repo: `/root/projects/europulse`
+  - live WP root: `/var/www/europulse/public`
+  - live plugin: `/var/www/europulse/public/wp-content/plugins/europulse-autopilot-v21`
+  - repo plugin source: `/root/projects/europulse/wp-plugins/europulse-autopilot-v21`
+  - worker: `/root/projects/europulse/worker-v21`
+- Incident context: worker hit the `1.0G` systemd memory peak and used swap because OpenAI quota was exhausted while the worker still called OpenAI across story_card, embeddings, rewrite, translation, and SEO paths.
+- Repair package staged for commit:
+  - WordPress story-card builder sends `ai_provider`, `ai_model`, `ai_fallback_provider`, `ai_fallback_model` into `/analyze_story`.
+  - Worker honors explicit provider order; DeepSeek-primary no longer silently appends OpenAI unless configured.
+  - OpenAI embeddings are skipped unless OpenAI is in the provider order.
+  - New worker provider cooldown tracks quota/rate/error failures and exposes provider state through `/health`.
+  - Rewriter, translator, SEO, story_card, and embeddings now check provider cooldown and record provider failures/successes.
+  - `EPV2_Logger::info()` throttles high-frequency REST/process/queue info logs to stop `ep_epv2_log` growth.
+  - `ops/epv2-healthcheck.sh` is pause-aware and writes `epv2_active_alerts`.
+  - `wp-mu-plugins/europulse-foundation` contains the current frontend foundation, including shared home-pool rendering and short persistent pool cache for the latest/news archives.
+- Current live status observed 2026-05-18:
+  - `epv2_automation_paused=1`, `epv2_collect_paused=1`
+  - `nginx`, `php8.3-fpm`, `mariadb` active
+  - `epv2-worker`, `epv2-orchestrator` inactive intentionally while paused
+  - active alert: only `swap_high`
+  - memory about `2.1G/3.7G` used, `1.6G` available; swap about `1.1G/2.0G` used
+- Remaining operational blocker:
+  - `apt/dpkg` is stuck on old `msmtp` whiptail prompt (`msmtp/apparmor`, default false). This blocks package maintenance. Next operator/LLM should preseed false and finish `dpkg --configure -a` non-interactively before more apt work.
+- Do not unpause automation until package maintenance and swap decision are handled, then restart worker/orchestrator under watch.
+
 ## Current Canonical Runtime
 
 - Project repo: `/root/projects/europulse`

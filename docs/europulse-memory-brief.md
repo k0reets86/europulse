@@ -2,6 +2,24 @@
 
 This file gives MemPalace a compact operational picture of the Europulse system.
 
+## Latest Checkpoint 2026-05-18 20:05 UTC
+
+- For a new LLM session, start with `/root/projects/europulse/LLM_START_HERE.md`.
+- Current branch: `review/plugin-audit`.
+- Active checkpoint: post-incident stabilization after `epv2-worker` reached the `1.0G` systemd memory ceiling while OpenAI quota was exhausted.
+- Repair focus:
+  - DeepSeek/provider-order is explicit end-to-end.
+  - OpenAI is no longer silently appended when the configured provider order does not include it.
+  - OpenAI embeddings are skipped unless OpenAI is selected.
+  - Worker provider cooldown is shared by story_card/rewrite/translation/SEO/embeddings and exposed through `/health`.
+  - High-frequency logs are throttled.
+  - Healthcheck is pause-aware and writes `epv2_active_alerts`.
+- Observed runtime:
+  - automation paused and collect paused
+  - worker/orchestrator intentionally inactive while paused
+  - only active alert is `swap_high`
+  - `apt/dpkg` is blocked on `msmtp/apparmor`; preseed `false` and finish `dpkg --configure -a` before more apt work.
+
 ## Core Paths
 
 - Project repo: `/root/projects/europulse`

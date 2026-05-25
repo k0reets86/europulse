@@ -284,10 +284,41 @@ def _classify_content_type(title: str, content: str, lang: str) -> str:
     best = "news"
     best_count = 0
     for ctype, kws in _TYPE_KEYWORDS.items():
-        count = sum(1 for kw in kws if kw in combined)
+        hits = _keyword_hits(combined, kws)
+        count = len(hits)
+        if ctype == "sport" and not _sport_signal_is_strong_enough(hits):
+            continue
         # Require at least 2 keyword matches to override 'news', so that a single
         # coincidental term doesn't mis-categorize a general news article.
         if count >= 2 and count > best_count:
             best_count = count
             best = ctype
     return best
+
+
+def _keyword_hits(text: str, keywords: list[str]) -> set[str]:
+    hits: set[str] = set()
+    for keyword in keywords:
+        kw = keyword.strip().lower()
+        if not kw:
+            continue
+        pattern = r"(?<!\w)" + re.escape(kw).replace(r"\ ", r"\s+") + r"(?!\w)"
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            hits.add(kw)
+    return hits
+
+
+_WEAK_SPORT_KEYWORDS = {
+    "liga", "league", "match", "goal", "sieg", "niederlage", "tor",
+    "ліга", "матч", "гол",
+}
+
+
+def _sport_signal_is_strong_enough(hits: set[str]) -> bool:
+    if not hits:
+        return False
+    strong_hits = hits - _WEAK_SPORT_KEYWORDS
+    # One unmistakable sport word in the title/body can be real, but weak
+    # terms like "match", "league", "goal" or "Sieg" are common in politics
+    # and business copy. Do not let them flip content_type by themselves.
+    return len(strong_hits) >= 1 and len(hits) >= 2

@@ -25,7 +25,16 @@ WP_PATH = os.getenv("EPV2_WP_PATH", "/var/www/europulse/public").strip()
 WP_CLI = os.getenv("EPV2_WP_CLI", "/usr/local/bin/wp").strip()
 PROCESS_TIMEOUT_SECONDS = max(180, int(os.getenv("EPV2_PROCESS_TIMEOUT_SECONDS", "900")))
 COLLECT_TIMEOUT_SECONDS = max(300, int(os.getenv("EPV2_COLLECT_TIMEOUT_SECONDS", "1200")))
+BREAKING_SCAN_TIMEOUT_SECONDS = max(60, int(os.getenv("EPV2_BREAKING_SCAN_TIMEOUT_SECONDS", "180")))
 PUBLISH_RETRY_COOLDOWN_SECONDS = max(15, int(os.getenv("EPV2_PUBLISH_RETRY_COOLDOWN_SECONDS", "30")))
+MIN_PROCESS_MEM_AVAILABLE_KB = max(256, int(os.getenv("EPV2_MIN_PROCESS_MEM_AVAILABLE_MB", "768"))) * 1024
+MIN_COLLECT_MEM_AVAILABLE_KB = max(256, int(os.getenv("EPV2_MIN_COLLECT_MEM_AVAILABLE_MB", "768"))) * 1024
+MIN_BREAKING_MEM_AVAILABLE_KB = max(256, int(os.getenv("EPV2_MIN_BREAKING_MEM_AVAILABLE_MB", "768"))) * 1024
+MIN_PUBLISH_MEM_AVAILABLE_KB = max(128, int(os.getenv("EPV2_MIN_PUBLISH_MEM_AVAILABLE_MB", "384"))) * 1024
+MIN_JOB_SWAP_FREE_KB = max(0, int(os.getenv("EPV2_MIN_JOB_SWAP_FREE_MB", "256"))) * 1024
+WORKER_HEALTH_URL = os.getenv("EPV2_WORKER_HEALTH_URL", "http://127.0.0.1:8765/health").strip()
+WORKER_HEALTH_TIMEOUT_SECONDS = max(1, int(os.getenv("EPV2_WORKER_HEALTH_TIMEOUT_SECONDS", "3")))
+WORKER_UNHEALTHY_COOLDOWN_SECONDS = max(15, int(os.getenv("EPV2_WORKER_UNHEALTHY_COOLDOWN_SECONDS", "60")))
 
 
 def utc_now() -> datetime:
@@ -49,6 +58,78 @@ def log(message: str, **fields: object) -> None:
     if fields:
         payload["fields"] = fields
     print(json.dumps(payload, ensure_ascii=True), flush=True)
+
+
+def memory_snapshot() -> dict[str, int]:
+    wanted = {"MemAvailable", "SwapFree"}
+    values: dict[str, int] = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                name, _, rest = line.partition(":")
+                if name in wanted:
+                    parts = rest.strip().split()
+                    if parts:
+                        values[name] = int(parts[0])
+    except (OSError, ValueError):
+        return {}
+    return values
+
+
+def memory_guard_ok(kind: str, min_mem_available_kb: int) -> bool:
+    snapshot = memory_snapshot()
+    mem_available = snapshot.get("MemAvailable", 0)
+    swap_free = snapshot.get("SwapFree", 0)
+    ok = mem_available >= min_mem_available_kb and swap_free >= MIN_JOB_SWAP_FREE_KB
+    if not ok:
+        log(
+            f"{kind} skipped low memory",
+            mem_available_mb=round(mem_available / 1024, 1),
+            min_mem_available_mb=round(min_mem_available_kb / 1024, 1),
+            swap_free_mb=round(swap_free / 1024, 1),
+            min_swap_free_mb=round(MIN_JOB_SWAP_FREE_KB / 1024, 1),
+        )
+    return ok
+
+
+_worker_unhealthy_until = 0.0
+
+
+def worker_guard_ok(kind: str) -> bool:
+    """Short-circuit expensive WP-CLI jobs when the AI worker is down.
+
+    If we run process/collect while FastAPI is wedged, PHP burns minutes in
+    cURL timeouts and queue items accrue technical attempts until watchdogs
+    reject them as chronic recyclers. Treat worker health as a prerequisite
+    for all jobs that can call /process or /analyze_story.
+    """
+    global _worker_unhealthy_until
+    now = time.time()
+    if now < _worker_unhealthy_until:
+        log(
+            f"{kind} skipped worker unhealthy cooldown",
+            retry_after_s=max(0, int(_worker_unhealthy_until - now)),
+        )
+        return False
+    try:
+        req = urllib.request.Request(WORKER_HEALTH_URL, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=WORKER_HEALTH_TIMEOUT_SECONDS) as response:
+            status = response.getcode()
+            body = response.read(2048).decode("utf-8", errors="replace")
+        if status != 200:
+            raise RuntimeError(f"worker health HTTP {status}: {body[:300]}")
+        payload = json.loads(body or "{}")
+        if payload.get("status") != "ok":
+            raise RuntimeError(f"worker health status={payload.get('status')}")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _worker_unhealthy_until = time.time() + WORKER_UNHEALTHY_COOLDOWN_SECONDS
+        log(
+            f"{kind} skipped worker unhealthy",
+            error=str(exc)[:300],
+            cooldown_s=WORKER_UNHEALTHY_COOLDOWN_SECONDS,
+        )
+        return False
 
 
 def bridge_url(path: str) -> str:
@@ -230,6 +311,50 @@ def run_collect_job() -> dict:
     return payload
 
 
+def run_breaking_scan_job() -> dict:
+    code = (
+        "if (class_exists('EPV2_Lock_Manager') && EPV2_Lock_Manager::is_active('collect')) { "
+        "echo wp_json_encode(['ok'=>true,'action'=>'breaking_scan','runner'=>'wp-cli','skipped'=>'active_lock'], JSON_UNESCAPED_UNICODE); "
+        "return; "
+        "} "
+        "$started = microtime(true); "
+        "$result = EPV2_Collector::run_breaking_scan(); "
+        "echo wp_json_encode(['ok'=>true,'action'=>'breaking_scan','runner'=>'wp-cli','duration_ms'=>(int)round((microtime(true)-$started)*1000),'result'=>$result], JSON_UNESCAPED_UNICODE);"
+    )
+    process = subprocess.Popen(
+        [WP_CLI, "--path=" + WP_PATH, "--allow-root", "eval", code],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=BREAKING_SCAN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+        recovery = recover_timed_out_collect_job()
+        log("breaking_scan timeout recovered", recovery=recovery)
+        raise TimeoutError(
+            f"wp-cli breaking_scan timed out after {BREAKING_SCAN_TIMEOUT_SECONDS} seconds and process group was killed"
+        ) from exc
+    stdout = (stdout or "").strip()
+    stderr = (stderr or "").strip()
+    try:
+        payload = json.loads(stdout.rsplit("\n", 1)[-1]) if stdout else {}
+    except json.JSONDecodeError:
+        payload = {"ok": False, "action": "breaking_scan", "runner": "wp-cli", "raw_stdout": stdout[-1000:]}
+    payload["returncode"] = process.returncode
+    if stderr:
+        payload["stderr"] = stderr[-1000:]
+    if process.returncode != 0:
+        raise RuntimeError(f"wp-cli breaking_scan failed: rc={process.returncode} stderr={stderr[-1000:]}")
+    return payload
+
+
 def run_process_job(ignore_retry_after: bool = False) -> dict:
     code = (
         f"EPV2_AI_Processor::process_scheduled(true, {'true' if ignore_retry_after else 'false'}); "
@@ -335,6 +460,10 @@ def publish_thread_loop() -> None:
                 continue
             if not should_publish(state, utc_now()):
                 _publish_thread_stop.wait(PUBLISH_RETRY_COOLDOWN_SECONDS)
+                continue
+            if not memory_guard_ok("publish", MIN_PUBLISH_MEM_AVAILABLE_KB):
+                _publish_thread_last_beat = time.time()
+                _publish_thread_stop.wait(min(60, PUBLISH_RETRY_COOLDOWN_SECONDS * 2))
                 continue
             try:
                 result = request_json("/bridge/publish", method="POST", payload={})
@@ -541,6 +670,14 @@ def main() -> int:
                 and collect_window_open
                 and now_ts - last_collect >= collect_every
             ):
+                if not worker_guard_ok("collect"):
+                    last_collect = time.time()
+                    time.sleep(LOOP_SECONDS)
+                    continue
+                if not memory_guard_ok("collect", MIN_COLLECT_MEM_AVAILABLE_KB):
+                    last_collect = time.time()
+                    time.sleep(LOOP_SECONDS)
+                    continue
                 result = run_collect_job()
                 log("collect executed", result=result)
                 last_collect = time.time()
@@ -564,13 +701,24 @@ def main() -> int:
             elapsed_since_last_breaking = now_ts - last_breaking_scan
             breaking_overshoot = elapsed_since_last_breaking >= 32 * 60
             if (
-                (current_minute in breaking_minutes or breaking_overshoot)
+                not state.get("collect_paused")
+                and (current_minute in breaking_minutes or breaking_overshoot)
                 and current_minute != last_breaking_scan_minute
                 and elapsed_since_last_breaking >= 120  # safety debounce
             ):
+                if not worker_guard_ok("breaking_scan"):
+                    last_breaking_scan = now_ts
+                    last_breaking_scan_minute = current_minute
+                    time.sleep(LOOP_SECONDS)
+                    continue
+                if not memory_guard_ok("breaking_scan", MIN_BREAKING_MEM_AVAILABLE_KB):
+                    last_breaking_scan = now_ts
+                    last_breaking_scan_minute = current_minute
+                    time.sleep(LOOP_SECONDS)
+                    continue
                 try:
-                    result = request_json("/bridge/breaking_scan", method="POST", payload={})
-                    log("breaking scan executed", minute=current_minute, result=result.get("result", {}))
+                    result = run_breaking_scan_job()
+                    log("breaking scan executed", minute=current_minute, result=result.get("result", result))
                     last_breaking_scan = now_ts
                     last_breaking_scan_minute = current_minute
                 except Exception as exc:
@@ -586,11 +734,27 @@ def main() -> int:
                 now_ts - last_process >= process_every
                 or should_process_from_idle(state, now_ts, last_process)
             ):
+                if not worker_guard_ok("process"):
+                    last_process = time.time()
+                    time.sleep(LOOP_SECONDS)
+                    continue
+                if not memory_guard_ok("process", MIN_PROCESS_MEM_AVAILABLE_KB):
+                    last_process = time.time()
+                    time.sleep(LOOP_SECONDS)
+                    continue
                 result = run_process_job()
                 log("process executed", active_item=state.get("active_automation_item"), result=result)
                 last_process = time.time()
                 refreshed_state = request_json("/bridge/state")
                 if should_process_immediately(state, refreshed_state):
+                    if not worker_guard_ok("process_handoff"):
+                        state = refreshed_state
+                        time.sleep(LOOP_SECONDS)
+                        continue
+                    if not memory_guard_ok("process_handoff", MIN_PROCESS_MEM_AVAILABLE_KB):
+                        state = refreshed_state
+                        time.sleep(LOOP_SECONDS)
+                        continue
                     handoff_result = run_process_job()
                     log(
                         "process immediate handoff executed",

@@ -1295,6 +1295,9 @@ final class EPV2_Collector {
 	 */
 	public static function run_breaking_scan(): array {
 		global $wpdb;
+		if (class_exists('EPV2_Jobs') && EPV2_Jobs::collect_paused()) {
+			return ['skipped' => 'collect_paused'];
+		}
 		$state_new = (int) $wpdb->get_var(
 			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue WHERE state = 'new'"
 		);

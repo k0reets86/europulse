@@ -529,28 +529,44 @@ final class EPV2_AI_Processor {
 					$pipeline_stage === 'rebuild_bundle'
 					&& in_array($existing_selection_decision, ['reject', 'low'], true)
 				) {
-					$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
-					$notes_for_terminal = is_array(json_decode((string) $fresh_item->admin_notes, true)) ? json_decode((string) $fresh_item->admin_notes, true) : [];
-					$notes_for_terminal['_system'] = is_array($notes_for_terminal['_system'] ?? null) ? $notes_for_terminal['_system'] : [];
-					$notes_for_terminal['_system']['workflow_terminal_reason'] = 'selection_publish_blocked';
-					$notes_for_terminal['_system']['workflow_step_status'] = 'terminal';
-					$notes_for_terminal['_system']['workflow_owner_token'] = '';
-					EPV2_Queue::mark_state((int) $item->id, 'rejected', [
-						'admin_notes' => wp_json_encode($notes_for_terminal, JSON_UNESCAPED_UNICODE),
-						'error_message' => sprintf(
-							'Материал снят на rebuild_bundle: предварительный selection decision "%s" не пересматривается перезапуском.',
-							$existing_selection_decision
-						),
-					]);
-					self::log_process_item_step('rebuild_bundle_short_circuit_selection_reject', (int) $item->id, [
-						'run_id' => $run,
-						'selection_decision' => $existing_selection_decision,
-						'attempts_saved' => max(0, 6 - $existing_attempts),
-					]);
-					$count++;
-					$run_payload['processed_item_id'] = (int) $item->id;
-					$run_payload['result'] = 'rebuild_bundle_short_circuit_selection_reject';
-					break;
+					$story_card_for_selection = is_array($payload_for_stage['_meta']['story_card'] ?? null)
+						? $payload_for_stage['_meta']['story_card']
+						: [];
+					$card_estimate_for_selection = strtolower((string) ($story_card_for_selection['publishable_estimate'] ?? ''));
+					$rescue_selection_drift =
+						(int) ($item->story_score ?? 0) >= 40
+						|| in_array($card_estimate_for_selection, ['high', 'medium'], true);
+					if ($rescue_selection_drift) {
+						self::log_process_item_step('rebuild_bundle_selection_short_circuit_rescued', (int) $item->id, [
+							'run_id' => $run,
+							'selection_decision' => $existing_selection_decision,
+							'story_score' => (int) ($item->story_score ?? 0),
+							'story_card_estimate' => $card_estimate_for_selection,
+						]);
+					} else {
+						$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
+						$notes_for_terminal = is_array(json_decode((string) $fresh_item->admin_notes, true)) ? json_decode((string) $fresh_item->admin_notes, true) : [];
+						$notes_for_terminal['_system'] = is_array($notes_for_terminal['_system'] ?? null) ? $notes_for_terminal['_system'] : [];
+						$notes_for_terminal['_system']['workflow_terminal_reason'] = 'selection_publish_blocked';
+						$notes_for_terminal['_system']['workflow_step_status'] = 'terminal';
+						$notes_for_terminal['_system']['workflow_owner_token'] = '';
+						EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+							'admin_notes' => wp_json_encode($notes_for_terminal, JSON_UNESCAPED_UNICODE),
+							'error_message' => sprintf(
+								'Материал снят на rebuild_bundle: предварительный selection decision "%s" не пересматривается перезапуском.',
+								$existing_selection_decision
+							),
+						]);
+						self::log_process_item_step('rebuild_bundle_short_circuit_selection_reject', (int) $item->id, [
+							'run_id' => $run,
+							'selection_decision' => $existing_selection_decision,
+							'attempts_saved' => max(0, 6 - $existing_attempts),
+						]);
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'rebuild_bundle_short_circuit_selection_reject';
+						break;
+					}
 				}
 				if (
 					$pipeline_stage === 'rebuild_bundle'
@@ -1100,16 +1116,19 @@ final class EPV2_AI_Processor {
 				// prompt'е. Без этой проверки stale payload reused as-is через
 				// gate.mode=ai_publish_finish_resume и устаревшие формулировки
 				// проходят на сайт (видели 7 violation постов в production).
-				$payload_prompt_version = (string) ($existing_payload['_meta']['editorial_prompt_version'] ?? '');
-				if ($existing_payload !== [] && $payload_prompt_version !== self::EDITORIAL_PROMPT_VERSION) {
-					self::log_process_item_step('drop_stale_payload_version_mismatch', (int) $item->id, [
-						'stored' => $payload_prompt_version,
-						'current' => self::EDITORIAL_PROMPT_VERSION,
-					]);
-					$existing_payload = [];
-					$stored_selection = [];
-				}
-				$reused_existing_context = $existing_payload !== [];
+					$payload_prompt_version = (string) ($existing_payload['_meta']['editorial_prompt_version'] ?? '');
+					if ($existing_payload !== [] && $payload_prompt_version !== self::EDITORIAL_PROMPT_VERSION) {
+						$semantic_seed_payload = self::semantic_seed_payload_from($existing_payload);
+						self::log_process_item_step('drop_stale_payload_version_mismatch', (int) $item->id, [
+							'stored' => $payload_prompt_version,
+							'current' => self::EDITORIAL_PROMPT_VERSION,
+							'preserved_story_card' => ! empty($semantic_seed_payload['_meta']['story_card']) ? 1 : 0,
+						]);
+						$existing_payload = $semantic_seed_payload;
+						$stored_selection = [];
+					}
+					$has_editorial_payload = $existing_payload !== [] && ! self::payload_is_semantic_seed_only($existing_payload);
+					$reused_existing_context = $has_editorial_payload;
 				if ($reused_existing_context) {
 					// 2026-05-17 resume re-validation: row-level admin_notes
 					// .selection — source of truth для текущей classification
@@ -1199,9 +1218,9 @@ final class EPV2_AI_Processor {
 					'gate_mode' => (string) ($gate['mode'] ?? ''),
 				]);
 				$fresh_selection_decision = sanitize_key((string) ($analysis['decision'] ?? ''));
-				if (
-					$existing_payload === []
-					&& in_array($fresh_selection_decision, ['low', 'reject'], true)
+					if (
+						! $has_editorial_payload
+						&& in_array($fresh_selection_decision, ['low', 'reject'], true)
 					&& empty($analysis['top_story_candidate'])
 					&& empty($analysis['breaking_candidate'])
 					&& empty($analysis['breaking_watch'])
@@ -1273,8 +1292,8 @@ final class EPV2_AI_Processor {
 					'category' => $category,
 					'reused_category' => $reused_existing_context ? 1 : 0,
 				]);
-				if ($existing_payload === []) {
-					self::log_process_item_step('before_baseline_payload', (int) $item->id, ['run_id' => $run, 'duration_ms' => self::duration_ms_since($item_started_at)]);
+					if (! $has_editorial_payload) {
+						self::log_process_item_step('before_baseline_payload', (int) $item->id, ['run_id' => $run, 'duration_ms' => self::duration_ms_since($item_started_at)]);
 					self::log_process_item_step('before_baseline_dossier', (int) $item->id, ['run_id' => $run, 'duration_ms' => self::duration_ms_since($item_started_at)]);
 					$baseline_dossier = EPV2_Source_Enricher::enrich_item($source_item, ['fast_mode' => true]);
 					self::log_process_item_step('after_baseline_dossier', (int) $item->id, ['run_id' => $run, 'duration_ms' => self::duration_ms_since($item_started_at)]);
@@ -1290,18 +1309,20 @@ final class EPV2_AI_Processor {
 					$baseline_payload['_meta']['selection'] = $analysis;
 					$baseline_payload['_meta']['breaking_watch'] = ! empty($analysis['breaking_watch']);
 					$baseline_payload['_meta']['breaking'] = ! empty($analysis['breaking_candidate']);
-					$baseline_payload['_meta']['top_story'] = ! empty($analysis['top_story_candidate']);
-					$baseline_payload['_meta']['story_format'] = sanitize_text_field((string) ($item->story_format ?? ''));
-					$baseline_payload['_meta']['cluster_id'] = (int) ($item->cluster_id ?? 0);
-					$baseline_payload['_meta']['topic_label'] = sanitize_text_field((string) ($item->topic_label ?? ''));
-					$baseline_payload = self::normalize_payload_quotes($baseline_payload);
+						$baseline_payload['_meta']['top_story'] = ! empty($analysis['top_story_candidate']);
+						$baseline_payload['_meta']['story_format'] = sanitize_text_field((string) ($item->story_format ?? ''));
+						$baseline_payload['_meta']['cluster_id'] = (int) ($item->cluster_id ?? 0);
+						$baseline_payload['_meta']['topic_label'] = sanitize_text_field((string) ($item->topic_label ?? ''));
+						$baseline_payload = self::merge_semantic_seed_payload($baseline_payload, $existing_payload);
+						$baseline_payload = self::normalize_payload_quotes($baseline_payload);
 					$baseline_payload = self::align_selection_with_payload_category($baseline_payload);
 					$baseline_payload['_meta']['context_memory'] = self::payload_context_memory_light($baseline_payload);
 					self::log_process_item_step('before_baseline_persist', (int) $item->id, ['run_id' => $run, 'duration_ms' => self::duration_ms_since($item_started_at)]);
-					self::persist_intermediate_payload((int) $item->id, $baseline_payload, $analysis, $gate);
-					self::log_process_item_step('after_baseline_persist', (int) $item->id, ['run_id' => $run, 'duration_ms' => self::duration_ms_since($item_started_at)]);
-					$existing_payload = $baseline_payload;
-				}
+						self::persist_intermediate_payload((int) $item->id, $baseline_payload, $analysis, $gate);
+						self::log_process_item_step('after_baseline_persist', (int) $item->id, ['run_id' => $run, 'duration_ms' => self::duration_ms_since($item_started_at)]);
+						$existing_payload = $baseline_payload;
+						$has_editorial_payload = true;
+					}
 				if (! empty($gate['mode']) && $gate['mode'] === 'reject') {
 					$gate['allow'] = true;
 					$gate['mode'] = 'ai_forced_enrichment';
@@ -4613,11 +4634,11 @@ final class EPV2_AI_Processor {
 		return self::refresh_stage_checklist($payload);
 	}
 
-	private static function working_category_seed(object $item, array $payload = []): string {
-		$payload_categories = implode(',', array_values(array_filter((array) ($payload['categories'] ?? []))));
-		if ($payload_categories !== '') {
-			return $payload_categories;
-		}
+		private static function working_category_seed(object $item, array $payload = []): string {
+			$payload_categories = implode(',', array_values(array_filter((array) ($payload['categories'] ?? []))));
+			if ($payload_categories !== '') {
+				return $payload_categories;
+			}
 		$selection_category = sanitize_text_field((string) ($payload['_meta']['selection']['category'] ?? ''));
 		if ($selection_category !== '') {
 			return $selection_category;
@@ -4630,10 +4651,58 @@ final class EPV2_AI_Processor {
 		if ($proposed !== '') {
 			return $proposed;
 		}
-		return 'deutschland';
-	}
+			return 'deutschland';
+		}
 
-	public static function item_is_auto_rework_candidate(object $item, array $payload = []): bool {
+		private static function semantic_seed_payload_from(array $payload): array {
+			$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			$seed_meta = [];
+			if (is_array($meta['story_card'] ?? null) && $meta['story_card'] !== []) {
+				$seed_meta['story_card'] = $meta['story_card'];
+			}
+			if (is_array($meta['source_dossier'] ?? null) && $meta['source_dossier'] !== []) {
+				$seed_meta['source_dossier'] = $meta['source_dossier'];
+			}
+			if (is_array($meta['context_memory'] ?? null) && $meta['context_memory'] !== []) {
+				$seed_meta['context_memory'] = $meta['context_memory'];
+			}
+			return $seed_meta !== [] ? ['_meta' => $seed_meta] : [];
+		}
+
+		private static function payload_is_semantic_seed_only(array $payload): bool {
+			if ($payload === []) {
+				return false;
+			}
+			$non_meta = $payload;
+			unset($non_meta['_meta']);
+			$non_meta = array_filter($non_meta, static fn($value) => ! empty($value));
+			if ($non_meta !== []) {
+				return false;
+			}
+			$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			if (empty($meta['story_card'])) {
+				return false;
+			}
+			unset($meta['story_card'], $meta['source_dossier'], $meta['context_memory']);
+			$meta = array_filter($meta, static fn($value) => ! empty($value));
+			return $meta === [];
+		}
+
+		private static function merge_semantic_seed_payload(array $payload, array $seed): array {
+			$seed_meta = is_array($seed['_meta'] ?? null) ? $seed['_meta'] : [];
+			if ($seed_meta === []) {
+				return $payload;
+			}
+			$payload['_meta'] = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+			foreach (['story_card', 'source_dossier', 'context_memory'] as $key) {
+				if (empty($payload['_meta'][$key]) && is_array($seed_meta[$key] ?? null) && $seed_meta[$key] !== []) {
+					$payload['_meta'][$key] = $seed_meta[$key];
+				}
+			}
+			return $payload;
+		}
+
+		public static function item_is_auto_rework_candidate(object $item, array $payload = []): bool {
 		if (self::looks_like_shell_item($item)) {
 			return false;
 		}
@@ -6588,7 +6657,7 @@ final class EPV2_AI_Processor {
 				(array) ($meta['warnings'] ?? [])
 			);
 			foreach ($messages as $message) {
-				if (preg_match('/all ai providers failed|ai provider unavailable|provider unavailable/i', (string) $message) === 1) {
+				if (preg_match('/all\s+(?:ai\s+)?providers\s+failed|translation failed:\s*all providers failed|ai provider unavailable|provider unavailable/i', (string) $message) === 1) {
 					return true;
 				}
 			}
@@ -8528,28 +8597,85 @@ final class EPV2_AI_Processor {
 		return $mode === 'auto';
 	}
 
+	private static function prompt_word_count(string $text): int {
+		$text = trim((string) preg_replace('/\s+/u', ' ', wp_strip_all_tags($text)));
+		if ($text === '') {
+			return 0;
+		}
+		return count(array_values(array_filter(preg_split('/\s+/u', $text) ?: [])));
+	}
+
+	private static function prompt_text_chars(string $text): int {
+		$text = trim((string) preg_replace('/\s+/u', ' ', wp_strip_all_tags($text)));
+		return mb_strlen($text);
+	}
+
+	private static function source_scope_for_prompt(object $item, array $dossier): array {
+		$primary = is_array($dossier['primary'] ?? null) ? $dossier['primary'] : [];
+		$primary_word_estimate = 0;
+		foreach ([
+			(string) ($primary['content'] ?? ''),
+			(string) ($primary['excerpt'] ?? ''),
+			(string) ($item->original_content ?? ''),
+			(string) ($item->original_excerpt ?? ''),
+		] as $candidate) {
+			$primary_word_estimate = max($primary_word_estimate, self::prompt_word_count($candidate));
+		}
+
+		$real_supporting = 0;
+		$title_only_supporting = 0;
+		foreach (['supporting', 'related'] as $bucket) {
+			foreach ((array) ($dossier[$bucket] ?? []) as $entry) {
+				if (! is_array($entry)) {
+					continue;
+				}
+				$supporting_text = trim((string) ($entry['content'] ?? '') . ' ' . (string) ($entry['excerpt'] ?? ''));
+				$words = self::prompt_word_count($supporting_text);
+				$chars = self::prompt_text_chars($supporting_text);
+				if ($words >= 20 || $chars >= 120) {
+					$real_supporting++;
+					continue;
+				}
+				if (trim((string) ($entry['title'] ?? '') . ' ' . (string) ($entry['url'] ?? '')) !== '') {
+					$title_only_supporting++;
+				}
+			}
+		}
+
+		$source_bound = $primary_word_estimate < 120 && $real_supporting < 2;
+		return [
+			'primary_word_estimate' => $primary_word_estimate,
+			'real_supporting_text_sources' => $real_supporting,
+			'title_or_url_only_supporting' => $title_only_supporting,
+			'source_bound_brief_required' => $source_bound,
+			'source_bound_body_words_max' => $source_bound ? 170 : 0,
+			'source_bound_body_chars_max' => $source_bound ? 650 : 0,
+		];
+	}
+
 	private static function build_messages(object $item, array $categories, string $style, array $dossier = [], bool $reduced_context = false): array {
 		$categories = array_values(array_filter($categories));
 		$prompts = EPV2_Settings::get('prompts', []);
 		$story_format = sanitize_text_field((string) ($item->story_format ?? ''));
 		$zone = in_array($story_format, ['analysis', 'developing'], true) ? $story_format : 'news';
-		$primary_category = (string) ($categories[0] ?? self::working_category_seed($item));
-		$budget_context = [
-			'source_count' => 1 + count((array) ($dossier['supporting'] ?? [])),
-			'event_kind' => (string) ($dossier['event_context']['kind'] ?? ''),
-			'title' => (string) $item->original_title,
-			'excerpt' => (string) $item->original_excerpt,
-			'content' => (string) $item->original_content,
-			'datetime_text' => (string) ($dossier['event_context']['datetime_text'] ?? ''),
-			'venue' => (string) ($dossier['event_context']['venue'] ?? ''),
-			'stage' => (string) ($dossier['event_context']['stage'] ?? ''),
-		];
-		$budget_de = EPV2_Site_Profile::text_budget('de', $zone, $primary_category, $budget_context);
-		$budget_uk = EPV2_Site_Profile::text_budget('uk', $zone, $primary_category, $budget_context);
-		$budget_en = EPV2_Site_Profile::text_budget('en', $zone, $primary_category, $budget_context);
-		$custom_prompt = $story_format === 'analysis'
-			? (string) ($prompts['analysis_rewrite'] ?? $prompts['auto_rewrite'] ?? $prompts['news_default'] ?? '')
-			: (string) ($prompts['auto_rewrite'] ?? $prompts['news_default'] ?? '');
+			$primary_category = (string) ($categories[0] ?? self::working_category_seed($item));
+			$budget_context = [
+				'source_count' => 1 + count((array) ($dossier['supporting'] ?? [])),
+				'event_kind' => (string) ($dossier['event_context']['kind'] ?? ''),
+				'title' => (string) $item->original_title,
+				'excerpt' => (string) $item->original_excerpt,
+				'content' => (string) $item->original_content,
+				'datetime_text' => (string) ($dossier['event_context']['datetime_text'] ?? ''),
+				'venue' => (string) ($dossier['event_context']['venue'] ?? ''),
+				'stage' => (string) ($dossier['event_context']['stage'] ?? ''),
+			];
+			$budget_de = EPV2_Site_Profile::text_budget('de', $zone, $primary_category, $budget_context);
+			$budget_uk = EPV2_Site_Profile::text_budget('uk', $zone, $primary_category, $budget_context);
+			$budget_en = EPV2_Site_Profile::text_budget('en', $zone, $primary_category, $budget_context);
+			$source_scope = self::source_scope_for_prompt($item, $dossier);
+			$custom_prompt = $story_format === 'analysis'
+				? (string) ($prompts['analysis_rewrite'] ?? $prompts['auto_rewrite'] ?? $prompts['news_default'] ?? '')
+				: (string) ($prompts['auto_rewrite'] ?? $prompts['news_default'] ?? '');
 		$topic_label = sanitize_text_field((string) ($item->topic_label ?? ''));
 		$use_source_url = ! empty(EPV2_Settings::get('gemini_use_source_url_in_prompt', true));
 		$require_citations = ! empty(EPV2_Settings::get('gemini_require_citations', false));
@@ -8565,30 +8691,33 @@ final class EPV2_AI_Processor {
 		};
 		$url_hint = $use_source_url ? 'При анализе учитывай URL первоисточника и, если инструмент модели это поддерживает, используй web/url context для проверки фактов.' : '';
 		$citation_hint = $require_citations ? 'Если провайдер умеет grounding, опирайся на него. Внутрь текста статьи цитаты не вставляй, но допускается вернуть ссылки/опоры в raw-метаданных ответа.' : '';
-		$shape_hint = match ((string) ($budget_de['shape'] ?? 'news')) {
-			'bulletin' => 'Это короткая информационная заметка. Держи рабочий диапазон примерно 300-450 слов, 4-7 абзацев. Важны точность, польза и ясность, а не искусственная длина.',
-			'service_note' => 'Это сервисная или community-заметка. Нужны конкретика, сроки, место, последствия для читателя и практическая польза. Не раздувай текст пустым контекстом. Рабочая длина обычно 350-650 слов.',
-			'preview' => 'Это preview/event-материал. Если подтверждено, добавь когда, где, стадия, участники, что дальше и при желании короткий дополнительный контекст. Рабочая длина обычно 450-800 слов.',
-			'article' => 'Это полноценная новость-статья, а не короткая заметка. Нужен плотный, но не раздутый материал с ясным объяснением последствий. Рабочая длина обычно 450-800 слов.',
-			default => 'Длина должна соответствовать реальной наполненности материала: короткая новость 300-450 слов, стандартная 450-800, developing story 800-1200, аналитика 1400-2200.',
-		};
-		$war_tone_hint = 'Если тема связана с войной России против Украины, ударами по военным объектам, потерями российской армии, оккупированным Крымом или действиями украинской обороны, держи тон сухим, фактическим и стратегическим. Не используй сочувствующие или траурные формулы по отношению к потерям российской армии и военным объектам агрессора. Не создавай ложного морального симметризма. Допустимо ясно указывать, что Украина обороняется от российской агрессии, а удары по российской военной инфраструктуре являются частью этой войны. При этом не скатывайся в лозунги: только точные факты, контекст и последствия.';
-		$source_hint = 'Если исходный сигнал короткий или бедный, обязательно усили материал на основе первоисточника и ещё 1-3 подтверждающих публикаций из досье. Старайся ссылаться по смыслу на первоисточник и опираться именно на него как на основную фактуру. Если в досье есть короткая подтверждённая цитата с атрибуцией, используй одну такую цитату естественно внутри текста, а не как служебный блок. Когда в статье появляется прямая речь, указывай не только автора, но и площадку или контекст: например, что человек заявил это в интервью конкретному изданию, в заявлении для конкретного источника или по данным конкретной публикации. Не повторяй такую отсылку в каждом абзаце, но не оставляй цитату без ясной привязки. Для media_url используй только реальное релевантное изображение из первоисточника или из подтверждающих источников по той же теме. Не предлагай generated cover, абстрактный сток и декоративную заглушку для обычной news automation. Если у изображения есть авторство или подпись в источнике, сохрани это в raw-поле caption/source_label, если провайдер ответа это поддерживает. Если в source_dossier.event_context есть подтверждённые детали события, используй их естественно и только по делу: когда проходит матч или событие, где оно проходит, кто участвует, какая стадия, кто судит, что ждёт победителя дальше. Не выдумывай отсутствующие детали и не перенасыщай текст спортивным или сервисным фоном. Исходные тексты и сигналы могут быть на любом языке, но итоговый мастер-текст должен быть нормальным немецким newsroom-материалом без следов исходного языка. ' . $war_tone_hint . ' ' . $shape_hint;
+			$shape_hint = match ((string) ($budget_de['shape'] ?? 'news')) {
+				'bulletin' => 'Это короткая информационная заметка. Держи рабочий диапазон примерно 300-450 слов, 4-7 абзацев. Важны точность, польза и ясность, а не искусственная длина.',
+				'service_note' => 'Это сервисная или community-заметка. Нужны конкретика, сроки, место, последствия для читателя и практическая польза. Не раздувай текст пустым контекстом. Рабочая длина обычно 350-650 слов.',
+				'preview' => 'Это preview/event-материал. Если подтверждено, добавь когда, где, стадия, участники, что дальше и при желании короткий дополнительный контекст. Рабочая длина обычно 450-800 слов.',
+				'article' => 'Это полноценная новость-статья, а не короткая заметка. Нужен плотный, но не раздутый материал с ясным объяснением последствий. Рабочая длина обычно 450-800 слов.',
+				default => 'Длина должна соответствовать реальной наполненности материала: короткая новость 300-450 слов, стандартная 450-800, developing story 800-1200, аналитика 1400-2200.',
+			};
+			$war_tone_hint = 'Если тема связана с войной России против Украины, ударами по военным объектам, потерями российской армии, оккупированным Крымом или действиями украинской обороны, держи тон сухим, фактическим и стратегическим. Не используй сочувствующие или траурные формулы по отношению к потерям российской армии и военным объектам агрессора. Не создавай ложного морального симметризма. Допустимо ясно указывать, что Украина обороняется от российской агрессии, а удары по российской военной инфраструктуре являются частью этой войны. При этом не скатывайся в лозунги: только точные факты, контекст и последствия.';
+			$source_bound_hint = ! empty($source_scope['source_bound_brief_required'])
+				? 'SOURCE_SCOPE: source_bound_brief_required=true. Это обязательный режим короткой source-bound заметки: 2-3 коротких абзаца, примерно 90-170 слов, body до ~650 символов, только факты из original_* и реально загруженного source_dossier текста.'
+				: 'SOURCE_SCOPE: source_bound_brief_required=false. Даже в этом режиме title/url-only supporting entries не являются фактической опорой для новых деталей.';
+			$source_hint = 'Если исходный сигнал короткий или бедный, НЕ расширяй его автоматически. Усиливать материал можно только теми подтверждающими источниками, где в source_dossier есть реальный excerpt/content, а не только title/url. URL-only и title-only supporting entries служат лишь сигналом поиска/подтверждения темы: они не разрешают добавлять новые даты, числа, имена, места, причины, последствия, цитаты или фон. Если source_scope.source_bound_brief_required=true, пиши только короткую source-bound Kurzmeldung: 2-3 коротких абзаца, около 90-170 слов, без анализа, без общего фона и без "что дальше", если этого нет в источнике. Старайся ссылаться по смыслу на первоисточник и опираться именно на него как на основную фактуру. Если в досье есть короткая подтверждённая цитата с атрибуцией, используй одну такую цитату естественно внутри текста, а не как служебный блок. Когда в статье появляется прямая речь, указывай не только автора, но и площадку или контекст: например, что человек заявил это в интервью конкретному изданию, в заявлении для конкретного источника или по данным конкретной публикации. Не повторяй такую отсылку в каждом абзаце, но не оставляй цитату без ясной привязки. Для media_url используй только реальное релевантное изображение из первоисточника или из подтверждающих источников по той же теме. Не предлагай generated cover, абстрактный сток и декоративную заглушку для обычной news automation. Если у изображения есть авторство или подпись в источнике, сохрани это в raw-поле caption/source_label, если провайдер ответа это поддерживает. Если в source_dossier.event_context есть подтверждённые детали события, используй их естественно и только по делу: когда проходит матч или событие, где оно проходит, кто участвует, какая стадия, кто судит, что ждёт победителя дальше. Не выдумывай отсутствующие детали и не перенасыщай текст спортивным или сервисным фоном. Исходные тексты и сигналы могут быть на любом языке, но итоговый мастер-текст должен быть нормальным немецким newsroom-материалом без следов исходного языка. ' . $source_bound_hint . ' ' . $war_tone_hint . ' ' . $shape_hint;
 		$final_editorial_guard = 'Финальные жёсткие правила важнее любых пользовательских промптов ниже: не пиши списки служебных разделов, не добавляй подзаголовки "Контекст/Почему это важно/Что дальше", не растягивай короткий сигнал. Обычная новость должна быть умной, но лёгкой: короткие абзацы, простые предложения, без воды, без повторов и без фраз "es bleibt abzuwarten", "weitere Details werden bekannt", "Fans können sich freuen". Каждый существенный факт должен быть взят из original_* или source_dossier. Если фактов мало, пиши коротко и точно, а не длинно.';
 		$original_excerpt = self::trim_input_text((string) $item->original_excerpt, 1200);
-		$original_content = self::trim_input_text((string) $item->original_content, $reduced_context ? 4500 : 9000);
-		$input_dossier = self::compact_source_dossier($dossier, $reduced_context);
-		return [
+			$original_content = self::trim_input_text((string) $item->original_content, $reduced_context ? 4500 : 9000);
+			$input_dossier = self::compact_source_dossier($dossier, $reduced_context);
+			return [
 				[
 					'role' => 'system',
 					'content' => 'Ты редакционный AI для новостного сайта EuroPulse. Верни только JSON. Не добавляй комментарии. Не копируй исходный текст дословно. Сначала создай сильный мастер-материал только на немецком языке. Это глубокий фактологический рерайт, а не выдумка: все твёрдые факты должны опираться на original_* или source_dossier. Запрещено придумывать даты, годы, время, место, числа, имена, должности, цитаты, причины, последствия, организации, участников, результаты и будущие шаги. Если в исходнике написано "gestern", "morgen", "am Abend", "kurz vor der Wahl" или другая относительная дата, не превращай её в конкретную календарную дату, если конкретной даты нет в исходнике. Если детали не хватает, пиши обобщённо или пропусти её; лучше короткий точный материал, чем длинный текст с заполнителями. Пиши как современное европейское цифровое медиа: профессионально, ясно, живо и плавно. Запрещены канцелярит, чиновничья сухость, язык пресс-релиза, советский бюллетень и рубленая структура из служебных подзаголовков. Не пиши блоками вида "Почему это важно:", "Контекст:", "Расширенный контекст:", "Что дальше:". Вместо этого строй цельную статью с естественными переходами, как в DW, Tagesschau, BBC, Reuters, AP или Al Jazeera. Начинай материал с проблемы, изменения, риска или главного последствия для читателя. Заголовок должен сообщать новость, а не просто тему: субъект + действие + главный поворот или последствие. Обычно держи заголовок в диапазоне 6-14 слов и без пустых общих формул. Лид должен состоять ровно из двух предложений и сразу объяснять, о чём статья и почему это важно. Для dek/lead держи рабочий диапазон примерно 25-55 слов суммарно. Основной текст строй по редакционному приоритету: сначала главный факт, затем подтверждение, затем ключевые детали, затем последствия, затем контекст и следующий шаг. Не перегружай текст полными официальными названиями законов и номерами параграфов, если это можно передать человеческим языком без потери точности. Для обычной новости не раздувай длину искусственно: если фактуры немного, лучше 4-7 сильных абзацев с плотной информацией, чем длинный пустой текст. Нужны человеческий ритм, сильный лид, понятные переходы, практическая польза для читателя и ясное объяснение, почему тема важна. Избегай длинных предложений: предпочитай короткие и средние конструкции. Соблюдай реальные лимиты интерфейса сайта: заголовки и лиды должны помещаться в карточки и слайдер без грязного обрезания. Если текст не помещается, не обрубай смысл, а переформулируй короче и чище. Особенно строго следи за украинской версией: она должна полностью влезать в самые узкие карточки сайта без троеточий и обрубленных хвостов. ' . $style_hint . ' ' . $format_hint . ' ' . $url_hint . ' ' . $citation_hint . ' ' . $source_hint . ' ' . $custom_prompt . ' ' . $final_editorial_guard . ' Формат JSON: {"categories":["slug1","slug2"],"media_url":"...","languages":{"de":{"title":"","excerpt":"","content":"","media_url":""}}}',
 				],
-			[
-				'role' => 'user',
-				'content' => wp_json_encode([
-					'suggested_categories' => $categories,
-					'original_title' => (string) $item->original_title,
-					'original_excerpt' => $original_excerpt,
+				[
+					'role' => 'user',
+					'content' => wp_json_encode([
+						'suggested_categories' => $categories,
+						'original_title' => (string) $item->original_title,
+						'original_excerpt' => $original_excerpt,
 						'original_content' => $original_content,
 						'original_url' => (string) $item->original_url,
 						'source_dossier' => $input_dossier,
@@ -8598,8 +8727,8 @@ final class EPV2_AI_Processor {
 						'instructions' => [
 							'categories_max' => 3,
 							'de_title_max_chars' => $budget_de['title_chars'],
-						'uk_title_max_chars' => $budget_uk['title_chars'],
-						'en_title_max_chars' => $budget_en['title_chars'],
+							'uk_title_max_chars' => $budget_uk['title_chars'],
+							'en_title_max_chars' => $budget_en['title_chars'],
 							'excerpt_max_chars' => $budget_de['lead_chars'],
 							'excerpt_card_max_chars_de' => $budget_de['card_excerpt_chars'],
 							'excerpt_card_max_chars_uk' => $budget_uk['card_excerpt_chars'],
@@ -8612,12 +8741,13 @@ final class EPV2_AI_Processor {
 							'opening_mode' => 'start_with_problem_or_consequence',
 							'sentence_length' => 'short_to_medium',
 							'analysis_sources_target' => $story_format === 'analysis' ? 5 : 0,
+							'source_scope' => $source_scope,
 							'story_shape' => (string) ($budget_de['shape'] ?? 'news'),
 							'de_content_min_chars' => (int) ($budget_de['content_min_chars'] ?? 700),
 							'de_content_target_chars' => (int) ($budget_de['content_target_chars'] ?? 1500),
 						],
 					], JSON_UNESCAPED_UNICODE),
-			],
+				],
 		];
 	}
 

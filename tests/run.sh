@@ -6,13 +6,17 @@
 #   ./tests/run.sh state_machine   # run specific suite
 #
 # Tests are wp eval-file invocations — need WP context.
+#
+# By default suites live under /root/projects/europulse, which www-data cannot
+# traverse on hardened servers. Use root WP-CLI with --allow-root unless a
+# readable test path and EPV2_TEST_WP_USER are explicitly provided.
 
 set -e
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 WP_PATH="/var/www/europulse/public"
 
 if [ -z "$1" ]; then
-    SUITES=("state_machine_test" "selection_test" "category_authority_test" "publish_gate_test")
+    SUITES=("state_machine_test" "selection_test" "category_authority_test" "publish_gate_test" "home_pool_test" "quality_gate_test")
 else
     SUITES=("$1_test")
 fi
@@ -30,7 +34,11 @@ for suite in "${SUITES[@]}"; do
         continue
     fi
     echo "=== Running $suite ==="
-    cd "$WP_PATH" && sudo -u www-data wp eval-file "$suite_file"
+    if [ -n "${EPV2_TEST_WP_USER:-}" ]; then
+        cd "$WP_PATH" && sudo -u "$EPV2_TEST_WP_USER" wp eval-file "$suite_file"
+    else
+        cd "$WP_PATH" && wp --allow-root eval-file "$suite_file"
+    fi
     echo ""
 done
 

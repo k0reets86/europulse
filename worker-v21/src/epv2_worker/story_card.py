@@ -450,6 +450,83 @@ def _coerce_card(raw: dict[str, Any]) -> StoryCard:
     return card
 
 
+_ENTITY_ALIASES: dict[str, tuple[str, ...]] = {
+    "zelensky": ("zelensky", "zelenskyy", "selenskyj", "зеленський", "зеленського"),
+    "selenskyj": ("zelensky", "zelenskyy", "selenskyj", "зеленський", "зеленського"),
+    "putin": ("putin", "путін", "путина"),
+    "merz": ("merz", "мерц", "мерца"),
+    "trump": ("trump", "трамп", "трампа"),
+    "yermak": ("yermak", "jermak", "єрмак", "єрмака"),
+    "jermak": ("yermak", "jermak", "єрмак", "єрмака"),
+    "halushchenko": ("halushchenko", "haluschtschenko", "галущенко"),
+    "haluschtschenko": ("halushchenko", "haluschtschenko", "галущенко"),
+    "mindich": ("mindich", "minditsch", "міндіч", "міндич"),
+    "minditsch": ("mindich", "minditsch", "міндіч", "міндич"),
+    "merkel": ("merkel", "меркель"),
+    "ukraine": ("ukraine", "україна", "україни", "україною", "ukrain"),
+    "russia": ("russia", "russland", "росія", "росії", "росією", "рф"),
+    "united": ("united states", "usa", "us", "сша", "американ"),
+    "states": ("united states", "usa", "us", "сша", "американ"),
+    "european": ("european union", "eu", "єс", "європейський союз"),
+    "union": ("european union", "eu", "єс", "європейський союз"),
+    "europe": ("europe", "europa", "європа", "європи", "європей"),
+    "nato": ("nato", "нато"),
+    "israel": ("israel", "israelisch", "ізраїль", "ізраїлю"),
+    "australia": ("australia", "australien", "австралія", "австралії"),
+}
+
+
+def _fold_for_grounding(text: str) -> str:
+    text = (text or "").lower()
+    text = text.replace("’", "'")
+    text = re.sub(r"https?://\S+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _entity_appears_in_source(name: str, source_text: str) -> bool:
+    folded = _fold_for_grounding(source_text)
+    if not folded:
+        return False
+    raw_parts = [p for p in re.split(r"[\s\-]+", _fold_for_grounding(name)) if len(p) >= 3]
+    if not raw_parts:
+        return False
+    for part in raw_parts:
+        aliases = _ENTITY_ALIASES.get(part, (part,))
+        if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", folded, flags=re.U) for alias in aliases):
+            return True
+    return False
+
+
+def _ground_card_in_source(card: StoryCard, source_text: str) -> StoryCard:
+    """Remove high-risk semantic-card inventions before downstream use.
+
+    The story card is allowed to structure a story, not enrich it from memory.
+    If an extracted person/place/organisation cannot be found in the raw source
+    text or a conservative alias map, keep the article publishable but do not
+    pass that invented entity as an invariant to rewrite/translation stages.
+    """
+    before_people = len(card.entities_people)
+    card.entities_people = [
+        person for person in card.entities_people
+        if _entity_appears_in_source(str(person.get("name") or ""), source_text)
+    ]
+    before_orgs = len(card.entities_organizations)
+    card.entities_organizations = [
+        org for org in card.entities_organizations
+        if _entity_appears_in_source(str(org.get("name") or ""), source_text)
+    ]
+    before_places = len(card.entities_places)
+    card.entities_places = [
+        place for place in card.entities_places
+        if _entity_appears_in_source(str(place), source_text)
+    ]
+    removed = (before_people - len(card.entities_people)) + (before_orgs - len(card.entities_organizations)) + (before_places - len(card.entities_places))
+    if removed > 0:
+        note = f"grounded_story_card_removed_{removed}_unsupported_entities"
+        card.publishable_reason = (card.publishable_reason + "; " + note).strip("; ")
+    return card
+
+
 async def build_story_card(
     *,
     title: str,
@@ -525,6 +602,8 @@ async def build_story_card(
                 register_provider_failure(provider, last_error)
                 continue
             card = _coerce_card(parsed)
+            source_text = "\n".join([title or "", excerpt or "", body or ""])
+            card = _ground_card_in_source(card, source_text)
             card.success = True
             card.provider = used_provider
             card.model = used_model

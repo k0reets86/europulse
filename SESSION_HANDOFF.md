@@ -1,6 +1,696 @@
 # SESSION HANDOFF
 
-## Latest Handoff 2026-05-18 20:05 UTC — Provider/memory incident repair + LLM entrypoint
+## Latest Handoff 2026-05-25 19:40 UTC — fresh translation/source audit clean; UK grammar repair deployed
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User asked to inspect what was done and verify plugin/news/translation quality against originals without hallucinations.
+- Read-only live checks:
+  - services/site healthy: public IP `200 OK`, `epv2-worker` health OK after restart, `epv2-orchestrator` active, active alerts option empty;
+  - queue after final checks: `published=168`, `rejected=25`, `new=10`, `ready_publish=1`, `retry_process=1`;
+  - `ai_budget` remains in hard stop (`rewritten_today=626`, `tokens_today=15851731`, limits `500` / `5000000`), so budget pressure is real and should not be misdiagnosed as a quality-gate crash.
+- Live quality audits:
+  - 80-row audit had hard findings none; warnings were old `published_item_source_risk` backlog plus legacy replay, not new-pipeline hallucinations;
+  - fresh audit since `2026-05-25 19:00:00 UTC` checked `5` published rows across `politik`, `sport`, `ukraine`, `welt`: `findings.hard=[]`, `findings.warn=[]`, `findings.info=[]`;
+  - current reject examples are mostly desired source/selection/stage blockers (`source_expansion_risk`, `thin_source_dossier`, `selection_low/reject`, `stage_attempt_limit`, `worker_blockers`).
+- Manual source/translation spot-check:
+  - queue `6632` matched its Ukrainska Pravda original facts: Lawrow/Rubio call, planned systematic strikes, evacuation recommendation, 24 May attack counts, casualties/building damage were all present in source;
+  - found a real UK grammar defect, not a hallucination: `своє дипломатичне персонал` in post `17658`.
+- Implemented/deployed narrow fix:
+  - worker `worker-v21/src/epv2_worker/translator.py` now repairs the observed `своє дипломатичне персонал` class and treats `персонал` as masculine in the Ukrainian gender normalizer;
+  - PHP `EPV2_Quality_Gate::repair_rendered_text()` now has a matching `uk_grammar` safety-net repair;
+  - `detect_bad_brand_transliterations()` now uses case-sensitive matching so canonical `Українська правда` is not falsely flagged by the bad-key `Українська Правда`;
+  - added `tests/suites/quality_gate_test.php`; `tests/run.sh` default suite now includes it.
+- Live deployment/repair:
+  - live backup: `/root/tmp/europulse-live-backups/20260525-uk-grammar-personal/class-epv2-quality-gate.php` plus `.before-case-detector`;
+  - DB backup table before content repair: `ep_epv2_post_repair_backup_20260525_uk_grammar_personal`;
+  - post `17658` repaired through `EPV2_Post_Audit::repair_rendered_text_after_publish`; final post-audit returned `pass`, score `100`, no blockers/warnings;
+  - visible bad-personal counter is now `0`.
+- Validation:
+  - `python3 -m py_compile worker-v21/src/epv2_worker/translator.py`;
+  - `PYTHONPATH=worker-v21/src worker-v21/.venv/bin/python -m unittest worker-v21/tests/test_translator_quality_regressions.py` => `5` tests OK;
+  - PHP lint clean for repo/live `class-epv2-quality-gate.php` and `tests/suites/quality_gate_test.php`;
+  - `tests/run.sh quality_gate`, `tests/run.sh publish_gate`, `tests/run.sh home_pool` all passed;
+  - final worker health OK and publish thread heartbeat recovered to `thread_alive=true`.
+- Operational note:
+  - one overly broad diagnostic SQL join was killed after it held a metadata lock; processlist is clean afterward. Prefer simple queue queries or the audit script instead of multi-joining postmeta/terms for fresh published samples.
+
+## Latest Handoff 2026-05-25 09:00 UTC — homepage selection regression covered; stale payload selection fixed
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User asked to continue autonomously, improve automation/quality, preserve Latin proper names, and write memory before limits. No manual `collect`, `process`, or `publish` was run. No published content was drafted/quarantined/deleted.
+- Added and deployed a tighter homepage selection resolver:
+  - repo/live `wp-mu-plugins/europulse-foundation/includes/core.php`;
+  - new `europulse_home_resolve_selection()` makes final post meta authoritative and uses queue notes only as fallback;
+  - avoids mixing a post decision with a stale queue score;
+  - live backup: `/root/tmp/europulse-live-backups/20260525-home-selection-resolver/core.php`;
+  - PHP lint clean, PHP-FPM reloaded, WP object cache flushed.
+- Added homepage regression suite:
+  - `tests/suites/home_pool_test.php`;
+  - verifies post selection overrides stale queue selection, queue selection is fallback only, and live fixture `6395` remains eligible and uses post meta in home pool;
+  - `tests/run.sh` default suite now includes `home_pool_test`;
+  - `tests/run.sh home_pool` passed before later WP-CLI escalation usage-limit blocked a redundant rerun.
+- Found and fixed a fresh reject false-positive source:
+  - `EPV2_Publish_Gate::selection_decision()` previously preferred stale `payload._meta.selection.decision` over canonical `queue.admin_notes.selection.decision`;
+  - recent rejected rows showed this clearly:
+    - `6462` payload `reject:30`, notes `review:46`;
+    - `6465` payload `low:41`, notes `review:40`;
+    - `6454` payload `low:40`, notes `review:49`;
+  - repo/live `wp-plugins/europulse-autopilot-v21/includes/publish/class-epv2-publish-gate.php` now prefers `admin_notes.selection.decision` and falls back to payload only if notes are absent;
+  - live backup: `/root/tmp/europulse-live-backups/20260525-publish-gate-selection-precedence/class-epv2-publish-gate.php`;
+  - PHP lint clean, PHP-FPM reloaded.
+- Regression/verification:
+  - `tests/suites/publish_gate_test.php` now covers canonical `admin_notes` overriding stale payload selection;
+  - `tests/run.sh publish_gate` passed `7` checks after live deploy;
+  - read-only gate replay after deploy:
+    - `6461` still `decision=low`, blockers `selection_low,payload_contract,thin_source_dossier` (expected);
+    - `6462` now `decision=review`, blockers `payload_contract,thin_source_dossier,source_expansion_risk`;
+    - `6465` now `decision=review`, blockers `length_below_kind_minimum,sources_below_kind_minimum,source_expansion_risk`;
+    - `6454` now `decision=review`, blockers `source_expansion_risk`.
+- Audit tooling follow-up:
+  - `scripts/epv2_live_quality_audit.php` now calls publish gate with context `audit_replay` instead of `ready_publish`, so future audits should not create `publish_gate_shadow` rows as a side effect;
+  - the audit JSON now also includes `queue_state_counts`, `budget_state`, `recent_rejects`, and `reject_warn_counts`;
+  - `recent_rejects` flags stale payload-vs-notes selection, stage attempt limits, and worker blockers;
+  - `php -l scripts/epv2_live_quality_audit.php` passed;
+  - this updated audit script was not re-run live because later WP-CLI escalations hit the platform usage-limit policy.
+- Live audits/checks:
+  - fresh audit since `2026-05-25 06:15:00 UTC`: `4` published rows across `deutschland`, `ukraine`, `welt`, `wirtschaft`; hard findings none; only `6332` flagged as old `thin_source_dossier/source_expansion_risk`;
+  - large audit `120` published rows across `bayern`, `deutschland`, `kultur`, `politik`, `sport`, `ukraine`, `welt`, `wirtschaft`: hard findings none; warnings mostly old `published_item_source_risk=86`, `legacy_payload_contract_replay=1`;
+  - queue counts at one read-only check: `published=203`, `rejected=18`;
+  - public IP `http://204.168.148.47/` returned `200 OK`; `http://127.0.0.1/` redirects to the public IP; bridge REST without token returns expected `401`.
+- Service state:
+  - `epv2-worker` active since `2026-05-24 20:12:03 UTC`, health pings in logs return `200`;
+  - `epv2-orchestrator` active since `2026-05-24 23:38:35 UTC`, currently idle/no processable items in logs;
+  - orchestrator maintenance logs continue firing `alerts_fired: ["ai_budget"]`; next session should inspect budget settings/state before assuming collection/processing is stuck.
+- Important limit:
+  - later escalated WP-CLI reruns hit the platform usage-limit policy. Do not try to route around that. Continue with approved/read-only checks when available, or wait for approvals to reset.
+- Still unresolved:
+  - old known-bad published groups remain live and require explicit user approval before draft/quarantine: `6352, 6332, 6354, 6092, 6325, 6296, 6230, 5694, 5589, 6300, 6244`;
+  - monitor the next autonomous cycle to confirm the stale payload selection fix reduces false `selection_low/reject` blockers;
+  - calibrate `source_expansion_risk` / `thin_source_dossier` false positives only on fresh items, not old published replay;
+  - inspect the `ai_budget` alert and budget/limit settings;
+  - repo remains dirty with many older unrelated changes; do not revert user/previous-session work.
+
+## Latest Handoff 2026-05-25 07:00 UTC — site visibility bug fixed; title-only gate deployed; regression/audit tooling added
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User asked to continue without confirmations, check/fix plugin and site, preserve proper names in Latin script, and avoid breaking working automation. No manual `collect`, `process`, or `publish` was run.
+- Fixed live site visibility bug for queue `6395`:
+  - `6395` was not missing from WordPress: DE/UK/EN posts `17315/17316/17317` were `publish`;
+  - homepage/latest hid it because `europulse_autopilot_home_pool()` read stale `selection.decision=low` from `queue.admin_notes`, while final post meta was `europulse_selection_decision=review`, score `46`;
+  - `wp-mu-plugins/europulse-foundation/includes/core.php` now prefers final post meta `europulse_selection_decision/europulse_selection_score` and uses queue notes only as fallback;
+  - deployed live to `/var/www/europulse/public/wp-content/mu-plugins/europulse-foundation/includes/core.php`, PHP lint clean, PHP-FPM reloaded, WP object cache and Nginx fastcgi cache cleared;
+  - proof via WP-CLI: `europulse_home_zone_ids('latest', 8)` now includes `17315|6395|Russland greift Charkiw und Sumy mit Drohnen an`.
+- Deployed the previously repo-only title-only source guard:
+  - live `EPV2_Publish_Gate` now blocks no-real-support/title-only cases as `source_expansion_risk` when `primary_body_chars < 120`, `primary_total_chars < 260`, and generated DE body is `> 280` chars;
+  - backup: `/root/tmp/europulse-live-backups/20260525-title-only-source-gate/class-epv2-publish-gate.php`;
+  - live PHP lint clean, repo/live diff clean, PHP-FPM reloaded.
+- Automation health:
+  - `epv2-worker` and `epv2-orchestrator` active;
+  - autonomous publish-slot proved working: queue `6436` moved from `ready_publish` to `published` at `2026-05-25 06:27:40 UTC`, creating posts `17375/17376/17377`;
+  - queue after checks: `published=205`, `rejected=34`, `new=4`.
+- Reject interpretation:
+  - high reject volume is not a service crash; current major reasons are `selection_low/reject`, `source_expansion_risk`, `thin_source_dossier`, and `auto_reject_review_policy`;
+  - these are expected after the stricter source/quality gates, but still need false-positive calibration.
+- Added automation/QA tooling:
+  - `tests/suites/publish_gate_test.php` regression suite covers title-only source expansion, real-support allowance, long-primary allowance, and source profile behavior;
+  - `tests/run.sh` now defaults to `wp --allow-root eval-file` because files under `/root` are not readable by `www-data`; `EPV2_TEST_WP_USER=www-data` remains available for readable paths;
+  - `scripts/epv2_live_quality_audit.php` checks a configurable sample of published rows for missing translations, broken Ukrainian source/brand names, Cyrillic in English, source-risk blockers, queue/post selection mismatches, and latest visibility hints;
+  - audit supports `EPV2_AUDIT_SINCE='YYYY-MM-DD HH:MM:SS'` for fresh-cycle checks and now prefers `ai_payload` over `publish_payload` so replay does not falsely evaluate post-id metadata as article content.
+- Added dashboard visibility hint:
+  - `wp-plugins/europulse-autopilot-v21/includes/admin/class-epv2-admin.php` now shows a `Сайт` column in lightweight queue tables;
+  - published rows get `Latest`, `Slider`, `Архив`, `Скрыт`, or `Нет поста` with a tooltip showing post id, final post selection decision/score, and stale queue decision mismatch when present;
+  - deployed live, backup: `/root/tmp/europulse-live-backups/20260525-admin-site-visibility/class-epv2-admin.php`;
+  - live PHP lint clean, PHP-FPM reloaded, WP-CLI render proof returned `HAS_SITE_COLUMN`, `HAS_LATEST_BADGE`, `HAS_6395_ROW`.
+- Validation:
+  - `php -l` passed for live/repo `core.php`, live/repo `class-epv2-publish-gate.php`, `tests/suites/publish_gate_test.php`, and `scripts/epv2_live_quality_audit.php`;
+  - `tests/run.sh publish_gate` passed all `6` checks;
+  - `PYTHONPATH=worker-v21/src worker-v21/.venv/bin/python -m unittest worker-v21/tests/test_rewriter_thin_source.py worker-v21/tests/test_translator_quality_regressions.py` => `5` tests OK.
+- Live quality audit result:
+  - `EPV2_AUDIT_LIMIT=80 wp --allow-root eval-file scripts/epv2_live_quality_audit.php --path=/var/www/europulse/public` checked `80` published groups across `ukraine`, `welt`, `politik`, `deutschland`, `kultur`, `sport`, `wirtschaft`;
+  - hard findings: none;
+  - warnings after payload-source fix: `published_item_source_risk=58`, `legacy_payload_contract_replay=2`; these are mostly old published payloads that would be blocked by today's source rules. Treat as retro-audit backlog, not a fresh pipeline failure;
+  - fresh audit since `2026-05-25 06:15:00 UTC` checked `2` rows: `6436` was clean, `6332` still flags `thin_source_dossier/source_expansion_risk` as expected known-bad old content.
+- Still unresolved:
+  - old known-bad published groups remain live and require explicit user approval before draft/quarantine: `6352, 6332, 6354, 6092, 6325, 6296, 6230, 5694, 5589, 6300, 6244`;
+  - false-positive calibration for `thin_source_dossier` / `source_expansion_risk` on new items is still needed;
+  - dashboard still lacks a clear "site visibility / hidden reason" indicator.
+
+## Latest Handoff 2026-05-24 20:14 UTC — source-bound prompt deployed; repo-only title-only gate patch pending live deploy
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User asked to keep checking/fixing without confirmations, but do not break what works. No manual `collect`, `process`, or `publish` was run.
+- Fresh service/site state after work:
+  - public IP `http://204.168.148.47/` returns `200 OK`;
+  - `epv2-worker` restarted at `20:12 UTC`, active, listening on `127.0.0.1:8765`; logs show repeated `/health 200 OK`;
+  - direct escalated `curl` to worker health was rejected by approval usage limit, so do not retry/route around it;
+  - `epv2-orchestrator` active and autonomous; it processed `6367` after restart;
+  - PHP-FPM reload after AI prompt deploy succeeded.
+- Quality/audit housekeeping:
+  - accidental diagnostic call with `context=ready_publish` created `214` `publish_gate_shadow` rows; backed up to `/tmp/epv2_accidental_shadow_audit_backup_20260524_1958.json` and deleted `214` rows.
+- Implemented/deployed source-bound prompt prevention:
+  - `worker-v21/src/epv2_worker/rewriter.py`: sources under `120` words now force `length_profile=brief`, force composed prompt kind to `news_brief`, cap `max_tok` to `1024`, and inject a German `SOURCE-BOUND BRIEF` guard saying title/url-only supporting links are not factual support;
+  - `wp-plugins/europulse-autopilot-v21/includes/ai/class-epv2-ai-processor.php`: adds `source_scope_for_prompt()` and sends `source_scope` in instructions;
+  - the dangerous prompt sentence "обязательно усили материал..." is replaced with a rule that short/thin signals must not be expanded unless supporting sources contain real `excerpt/content`; title/url-only entries cannot justify new dates, numbers, names, places, causes, consequences, quotes, or background;
+  - live AI processor backup: `/root/tmp/europulse-live-backups/20260524-source-bound-prompt/class-epv2-ai-processor.php`;
+  - repo/live AI processor diff clean; live PHP lint clean; PHP-FPM reloaded; worker restarted.
+- Validation:
+  - `python3 -m py_compile worker-v21/src/epv2_worker/rewriter.py`;
+  - `php -l wp-plugins/europulse-autopilot-v21/includes/ai/class-epv2-ai-processor.php`;
+  - `php -l /var/www/europulse/public/wp-content/plugins/europulse-autopilot-v21/includes/ai/class-epv2-ai-processor.php`;
+  - `PYTHONPATH=worker-v21/src worker-v21/.venv/bin/python -m unittest worker-v21/tests/test_rewriter_thin_source.py worker-v21/tests/test_translator_quality_regressions.py` => `5` tests OK.
+- Fresh autonomous proof/observations:
+  - queue snapshot after restart included `published=211`, `rejected=24`, `new=18`;
+  - active alerts option showed automation/collect not paused and no active alerts at `20:08:48Z`;
+  - `6367` was rejected after attempts with `stage_attempt_limit_build_de_master` and blockers including `source_expansion_risk`; this is desired behavior for a thin FAZ/Haffner item.
+- New gap found:
+  - `6332` is still published and was updated/published around `20:00 UTC`; its payload has empty primary `content/excerpt`, supporting sources are URL-only, and `related` contains unrelated noise;
+  - current live gate can still allow title-only sources when the generated DE body is short enough, because old `thin_source_dossier` did not catch the noisy `related/source_count` case.
+- Implemented but NOT deployed:
+  - repo `wp-plugins/europulse-autopilot-v21/includes/publish/class-epv2-publish-gate.php` now treats title-only/no-real-support cases as `source_expansion_risk` when `primary_body_chars < 120`, `primary_total_chars < 260`, and generated DE body is `> 280` chars;
+  - repo PHP lint passes;
+  - live backup prepared before deploy attempt: `/root/tmp/europulse-live-backups/20260524-title-only-source-gate/class-epv2-publish-gate.php`;
+  - live deploy failed because escalation approval hit the usage-limit policy. Do not bypass this. Next session should deploy normally when approvals are available, lint live, reload PHP-FPM, and verify in diagnostic context.
+- Unresolved live-content issue:
+  - the `11` manually confirmed hallucination queue groups remain published as `33` WP posts;
+  - explicit user approval is required before drafting/quarantining them: `6352, 6332, 6354, 6092, 6325, 6296, 6230, 5694, 5589, 6300, 6244`.
+
+## Latest Handoff 2026-05-24 19:36 UTC — source-expansion hallucination gate deployed, visible UK proper names repaired
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User asked for a careful anti-hallucination audit: German and translations must match the source, and own names/proper names should not be translated or Cyrillicized.
+- No manual `collect`, `process`, or `publish` was run.
+- Large sample:
+  - checked `44` published queue groups across multiple categories: `ukraine`, `welt`, `politik`, `deutschland`, `wirtschaft`, `kultur`, `sport`, `leben-in-deutschland`, `bayern`, `muenchen`;
+  - automated flags showed many source/number/quote/proper-name risks;
+  - manual review confirmed severe source-expansion hallucinations on short/empty sources with URL-only supporting entries.
+- Confirmed bad representative IDs:
+  - `6352` SPIEGEL Ukraine UNSC item expanded a short source into unsupported deaths/injuries/building damage/weapons/context;
+  - `6332` Ukrinform DE had title only and generated a full article;
+  - `6354`, `6092`, `6325`, `6296`, `6230`, `5694`, `5589`, `6300`, `6244` showed similar unsupported expansion or invented details.
+- Implemented/deployed:
+  - `EPV2_Publish_Gate` now computes a source support profile and blocks `source_expansion_risk` when there is no real supporting text, the primary source is short, and DE content expands beyond the safe ratio/floor;
+  - `thin_source_dossier` is now active in publish gate;
+  - `_meta.top_story` no longer bypasses source checks; urgent breaking may still bypass only the old thin-source check, not `source_expansion_risk`;
+  - live backup: `/root/tmp/europulse-live-backups/20260524-anti-hallucination/class-epv2-publish-gate.php`;
+  - repo/live diff clean, PHP lint passed, PHP-FPM reloaded.
+- Proof:
+  - all confirmed bad IDs now block in live gate evaluation:
+    `6332 => thin_source_dossier`;
+    `6352, 6354, 6092, 6325, 6296, 6230, 5694, 5589, 6300, 6244 => source_expansion_risk`.
+- Proper-name preservation:
+  - worker/PHP maps extended for `EuroPulse`, `Wall Street`, `The New York Times`, `The Washington Post`, `Reuters`, `Bloomberg`, `BBC`, and Wall Street variants;
+  - keep-Latin tokens extended so hybrid repair does not turn canonical names back into Cyrillic;
+  - validation passed: worker compile, translator regression unittest (`4` tests), PHP lint.
+- Visible old-post repair:
+  - dry-run found `17` published UK posts with old `ОйроПулсе`, broken `гттп`, Wall Street/proper-name defects;
+  - backup JSON: `/tmp/epv2_rendered_repair_backup_20260524_1939.json`;
+  - repaired all `17` through `EPV2_Post_Audit::repair_rendered_text_after_publish()`;
+  - spot checks: post `8900` now starts `Wall Street: ...`, post `5992` excerpt ends with `Wall Street`;
+  - follow-up SQL found no remaining visible hits for the checked defects.
+- Unresolved live-content issue:
+  - the `11` manually confirmed hallucination queue groups remain published as `33` WP posts;
+  - attempted draft/quarantine was blocked by execution policy because unpublishing live posts requires explicit user approval;
+  - target queue IDs if approval is given: `6352, 6332, 6354, 6092, 6325, 6296, 6230, 5694, 5589, 6300, 6244`.
+- Final service/site state:
+  - public IP `http://204.168.148.47/` returns `200 OK`;
+  - `epv2-worker` active after restart at `19:34 UTC`, `/health` OK, RSS about `76M`;
+  - `epv2-orchestrator` active and idle with no processable items;
+  - `php8.3-fpm` active, `slow=0`;
+  - queue snapshot: `published=214`, `rejected=34`;
+  - `epv2_active_alerts` empty.
+- Next:
+  - observe autonomous cycles after `2026-05-24 19:36 UTC`;
+  - check whether `source_expansion_risk` has false positives on valid compact briefs;
+  - get explicit user approval before drafting/quarantining the `11` known-bad published groups;
+  - if needed, tune only the ratio/floor thresholds;
+  - do not remove the source-support guard and do not broaden other hard blockers until fresh data is reviewed.
+
+## Latest Handoff 2026-05-24 18:46 UTC — read-only check clean, Ukrainiska Pravda guard deployed
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User said "проверяй"; performed read-only service/site/queue/quality checks and one narrow preventive patch based on observed shadow data. No manual `collect`, `process`, or `publish` was run.
+- Service/site state:
+  - `europulse-autopilot-v21` active;
+  - `epv2-worker` active; after final restart at `18:45 UTC`, `/health` OK with RSS about `100.3M`, no recycle scheduled;
+  - `epv2-orchestrator` active and autonomously collecting/processing/publishing;
+  - `php8.3-fpm` active, `slow=0`;
+  - public IP returned `200 OK`;
+  - `epv2_automation_paused=0`, `epv2_collect_paused=0`;
+  - `epv2_active_alerts` empty.
+- Queue snapshot after final restart:
+  - `new=15`, `new/publish_finish=1`, `ready_publish=2`, `published=210`, `rejected=29` split across stages;
+  - no `processing` / `publishing` state in the snapshot.
+- Quality after the `12:47 UTC` worker restart:
+  - `post_publish_rendered`: `28` item groups / `84` rows, all `pass 100`, no rendered review rows;
+  - `publish_gate_shadow`: `102 pass`, `139 review`;
+  - main review blockers are expected shadow classes: `thin_source_dossier`, incomplete language/media payloads, `unsupported_numbers`, generic stock media;
+  - remaining `uk_bad_brand_transliteration` examples were in shadow/rejected or thin-source payloads, mostly `Украінска/Українска Правда=>Українська правда`, with some old `Київ Пост=>Kyiv Post`.
+- Implemented and deployed preventive guard:
+  - worker normalizer now handles `Украінска`, `Украінська`, `Українска`, `Українська Правда` variants via explicit map and regex;
+  - PHP quality gate safety-map now handles the same variants;
+  - regression test expanded for `Українска Правда`;
+  - validation passed: worker `py_compile`, translator regression unittest (`3` tests), PHP lint;
+  - live backup before PHP copy: `/root/tmp/europulse-live-backups/20260524-1846/class-epv2-quality-gate.php`;
+  - repo/live quality gate diff clean, PHP-FPM reloaded, worker restarted.
+- Live smoke:
+  - `EPV2_Quality_Gate::repair_rendered_text("<p>Про це повідомляє Українска Правда і Київ Пост.</p>", "uk")`
+    returned `<p>Про це повідомляє Українська правда і Kyiv Post.</p>` with `uk_brand_transliteration=true`.
+- Next:
+  - observe fresh autonomous rows after `2026-05-24 18:46 UTC`;
+  - specifically check whether new shadow rows still show `uk_bad_brand_transliteration` for `Ukrainska Pravda` or `Kyiv Post`;
+  - rendered layer is currently clean, so do not backfill unless a visible published defect appears;
+  - keep hard blocking/review routing disabled until fresh shadow data is clean enough.
+
+## Latest Handoff 2026-05-24 12:42 UTC — Latin proper-name preservation + HTML block spacing deployed
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User clarified the editorial rule: Latin-script proper names, especially publishers/brands like `Kyiv Post`, must not be phonetically rewritten into Cyrillic in Ukrainian copy.
+- Fresh post-12:15 audit found one new rendered UK review row:
+  - queue `6216`, post `16927`, old audit score `79`;
+  - blocker `uk_sentence_glue`;
+  - examples `и.Г`, `т.С`;
+  - root cause was compact HTML boundaries such as `</p><h2>` and `</h2><p>`, not actual sentence text.
+- Implemented in repo:
+  - `worker-v21/src/epv2_worker/translator.py`
+    - prompt now forbids Cyrillicizing Latin-script publisher/brand/product/organization names;
+    - `Kyivpost` / `KyivPost` normalize to `Kyiv Post`;
+    - `Тагесспігел` and close variants normalize to `Tagesspiegel` after fresh shadow row `2266`;
+    - keep-Latin token list extended for common publishers/brands/products;
+    - Ukrainian normalizer inserts blank-line separators between `</p><h2>`, `</h2><p>`, and `</p><p>`;
+  - `wp-plugins/europulse-autopilot-v21/includes/quality/class-epv2-quality-gate.php`
+    - rendered repair adds the same HTML block spacing for UK posts;
+    - UK brand map covers more `Kyiv Post` Cyrillic variants;
+  - `worker-v21/tests/test_translator_quality_regressions.py`
+    - regression now covers `Kyivpost -> Kyiv Post` and block spacing.
+- Validation passed:
+  - `python3 -m py_compile worker-v21/src/epv2_worker/translator.py`;
+  - `PYTHONPATH=worker-v21/src worker-v21/.venv/bin/python -m unittest worker-v21/tests/test_translator_quality_regressions.py` passed (`3` tests);
+  - repo and live PHP lint passed for `class-epv2-quality-gate.php`.
+- Deployed live:
+  - backup before copy: `/root/tmp/europulse-live-backups/20260524-1240/class-epv2-quality-gate.php`;
+  - repo/live diff clean;
+  - `php8.3-fpm` reloaded;
+  - `epv2-worker` restarted at `2026-05-24 12:39 UTC` for the main translator changes, and again at `12:45 UTC` after the `Tagesspiegel` worker guard.
+- Smoke/health:
+  - worker `/health` OK after latest restart: RSS about `100.3M`, no recycle scheduled;
+  - public IP returned `200 OK`;
+  - live repair smoke converted `<p>Kyiv Post...</p><h2>...</h2><p>Киівпост...</p>` to separated blocks and `Kyiv Post`.
+- Fresh autonomous proof after the restart:
+  - queue `6213` published; posts `16956/16957/16958` all have `post_publish_rendered pass 100`;
+  - queue `6220` produced `publish_gate_shadow pass 96`;
+  - queue `6214` terminal review/reject was expected, with context `worker_terminal_outcome`, `thin_source_dossier`, missing translations/media, and no UK brand/glue defect.
+- Targeted backfill:
+  - backup table `ep_epv2_post_repair_backup_20260524_html_block_spacing_quality` with `3` rows;
+  - repaired posts `16926`, `16927`, `16928` only, changing `post_content` but not `post_modified`;
+  - compact block tags count is now `0`;
+  - latest audit rows for `16926/16927/16928` are `post_publish_rendered pass 100`;
+  - `16927` latest UK signals: `sentence_glue_count=0`, `placeholder_link_count=0`, `broken_transliterated_url_count=0`, `bad_brand_count=0`.
+- Current queue snapshot after checks:
+  - after the 12:45 restart and fresh publish: `new=6`, `ready_publish=2`, `published=197`, `rejected=35` split across stages.
+- Active alerts option empty; automation/collect remain enabled.
+- Next:
+  - do not manually force `collect`, `process`, or `publish`;
+  - observe fresh autonomous rows after `2026-05-24 12:42 UTC`;
+  - recalculate UK repair warning rate after a larger sample;
+  - continue upstream proper-name preservation if new Latin names are Cyrillicized;
+  - keep hard blocking/review routing disabled until fresh shadow/rendered data is clean.
+
+## Latest Handoff 2026-05-24 12:15 UTC — fresh cycle active, placeholder-anchor repair deployed
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User asked what is next by plan while checking plugin/site state.
+- Read-only status:
+  - `europulse-autopilot-v21` is active;
+  - worker `/health` OK, RSS about `226.5M`, no recycle scheduled;
+  - orchestrator active and autonomously processing;
+  - public IP returned `200 OK`;
+  - automation/collect enabled, active alerts option empty.
+- Fresh data after `2026-05-24 00:24:00`:
+  - `33` item groups / `99` rendered rows;
+  - UK repair warnings down to `4/33 = 12.1%`, still above the roughly `5%` target;
+  - broken transliterated URLs and bad source-name forms remained `0`;
+  - found `2` placeholder cases inside anchor text, e.g. `(<a ...>посилання на статтю</a>)`.
+- Implemented/deployed:
+  - `EPV2_Quality_Gate` now detects and repairs placeholder anchor parentheticals;
+  - backup before copy: `/root/tmp/europulse-live-backups/20260524-1212/class-epv2-quality-gate.php`;
+  - repo/live diff clean; live PHP lint passed; PHP-FPM reloaded.
+- Targeted backfill:
+  - backup table `ep_epv2_post_repair_backup_20260524_placeholder_anchor_quality`;
+  - repaired `2` posts;
+  - final counters: `0` broken URLs, `0` bad source names, `0` sentence glue, `0` placeholders.
+- Current queue:
+  - `new=20`, `ready_publish=1`, `published=193`, `rejected=37`, `active_processing=21`.
+- Next:
+  - do not manually force jobs;
+  - observe autonomous drain/publish after `2026-05-24 12:15 UTC`;
+  - recalculate UK repair rate on post-12:15 rows;
+  - if still above roughly `5%`, continue upstream prevention before Phase 3;
+  - hard blocking/review routing remains disabled.
+
+## Latest Handoff 2026-05-24 00:24 UTC — UK broken URL/source prevention deployed, targeted backfill clean
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User asked to keep working by plan without more confirmations, avoid breaking working runtime, and write memory for the next LLM before context limits.
+- Runtime audit showed the 2026-05-23 safety net was still overactive:
+  - after `2026-05-23 16:15:00`, all `22` new UK posts had `post_publish_rendered` repair warnings;
+  - new visible defect class found: transliterated URLs like `гттп://204.168...` plus source/product names such as `Дойтшландфунк`, `Süddeutsche Цайтунг`, `ПроСібен`, `МагентаСпорт`.
+- Implemented in repo:
+  - `worker-v21/src/epv2_worker/translator.py`
+    - preserves HTML tags and real `http(s)://` URLs before hybrid Latin/Cyrillic repair;
+    - strips already-broken transliterated URLs from UK text;
+    - extends UK source/product normalization for `Deutschlandfunk`, `Süddeutsche Zeitung`, `24tv`, `MagentaSport`, `ProSieben`;
+  - `includes/quality/class-epv2-quality-gate.php`
+    - added `broken_transliterated_url` detect/repair;
+    - extended the UK source/product preservation map;
+  - `worker-v21/tests/test_translator_quality_regressions.py`;
+  - `worker-v21/tests/fixtures/quality/uk_rendered_repair_observed.json`.
+- Validation:
+  - `python3 -m py_compile` passed for changed worker files;
+  - `PYTHONPATH=worker-v21/src worker-v21/.venv/bin/python -m unittest worker-v21/tests/test_translator_quality_regressions.py` passed (`2` tests);
+  - PHP lint passed for changed PHP files;
+  - live smoke of `EPV2_Quality_Gate::repair_rendered_text()` repaired a real broken sample and set the expected repair flags.
+- Deployed live:
+  - backed up live quality gate under `/root/tmp/europulse-live-backups/20260524-002051/`;
+  - copied repo `class-epv2-quality-gate.php` to live plugin and confirmed repo/live diff clean;
+  - reloaded `php8.3-fpm`;
+  - restarted `epv2-worker` while queue was idle so translator fixes loaded.
+- Targeted backfill:
+  - backup table `ep_epv2_post_repair_backup_20260524_broken_url_quality` with `18` rows;
+  - repaired `18` published posts via `/tmp/epv2_targeted_rendered_repair_20260524.php`;
+  - repair counts: `broken_transliterated_url=13`, `uk_brand_transliteration=7`;
+  - final counters: `0` broken transliterated URLs, `0` bad source-name forms, `0` sentence glue, `0` placeholders.
+- Service state after deploy/backfill:
+  - worker `/health` OK, RSS about `100.5M`, no recycle scheduled;
+  - `epv2-orchestrator` active;
+  - public site IP returned `200 OK`;
+  - queue idle: `published=182`, `rejected=10`, `active_processing=0`.
+- Next work:
+  - observe the next fresh autonomous cycle after `2026-05-24 00:24 UTC`;
+  - verify UK repair warnings drop below roughly `5%`;
+  - do not enable hard blocking/review routing yet;
+  - duplicate-story publishing remains separate work.
+
+## Latest Handoff 2026-05-23 16:15 UTC — lightweight rendered repair deployed live, fresh UK defects backfilled
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User explicitly approved production deployment/backfill.
+- Deployed live:
+  - `includes/publish/class-epv2-post-audit.php`
+    - added `repair_rendered_text_after_publish()` for lightweight title/excerpt/content repair plus `post_publish_rendered` recording;
+  - `includes/publish/class-epv2-publisher.php`
+    - auto-mode now runs the lightweight rendered text audit when heavy post-publish audit is skipped;
+  - `includes/quality/class-epv2-quality-gate.php`
+    - extended observed UK brand/outlet preservation map for `Киівпост`, `Украінска Правда`, `Тагесспігел`, `Дойтше Велле`, `Фінанке.уа`, `Поліке Аукс Фронтіèрес`.
+- Backups:
+  - live file backups under `/root/tmp/europulse-live-backups/20260523-160723/`;
+  - DB backup table `ep_epv2_post_repair_backup_20260523_uk_quality`.
+- Validation:
+  - repo and live `php -l` passed;
+  - PHP-FPM reloaded;
+  - public site IP returned `200 OK`;
+  - worker `/health` OK, RSS about `233M`, no recycle scheduled.
+- Targeted backfill result for UK posts after `2026-05-22 23:21:00`:
+  - `44` UK posts checked;
+  - final counters: `0` sentence-glue SQL hits, `0` placeholder markers, `0` observed bad outlet/brand forms.
+- New autonomous proof:
+  - queue item `5923` published after deploy at `2026-05-23 16:09:33` as posts `16280/16281/16282`;
+  - automatic `post_publish_rendered` rows appeared at `16:09:33`;
+  - UK post `16281` was repaired and passed.
+- Current queue is active after a fresh collect, not idle: `21` `new` rows at last check.
+- Next work:
+  - observe next autonomous publishes without manual collect/process/publish;
+  - fix upstream worker translator/prompt prevention for UK spacing/placeholders/outlet names;
+  - then handle duplicate-story publishing, observed with Denmark/Frederiksen from Tagesspiegel and SPIEGEL.
+
+## Latest Handoff 2026-05-22 23:21 UTC — UK rendered audit/repair deployed, shadow still non-blocking
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; update there should override older sections below.
+- Exact next-session runbook was written at `/root/projects/europulse/docs/NEXT_SESSION_RUNBOOK_2026_05_22.md`.
+- Any new LLM should read that runbook before touching code or running non-read-only actions.
+- User asked to proceed after the 24h shadow observation found real published-quality issues.
+- Kept the important rule: no Phase 3 hard blocking was enabled yet.
+- Implemented and deployed live:
+  - `includes/quality/class-epv2-quality-gate.php`
+    - added rendered-text evaluation/recording for `post_publish_rendered`;
+    - added UK checks for sentence glue, placeholder link text, and bad brand transliteration;
+    - added safe UK rendered text repair for spacing, `(посилання)` placeholders, and known brand preservation;
+    - softened `thin_source_dossier` in shadow when publish gate already allowed the item and the source context is not egregiously thin;
+    - softened single `unsupported_numbers` in lower-risk contexts.
+  - `includes/publish/class-epv2-post-audit.php`
+    - after publish, repairs title/excerpt/content with the safe rendered text repair;
+    - records `post_publish_rendered` rows in `ep_epv2_quality_audit`.
+  - `includes/ai/class-epv2-ai-response-validator.php`
+    - strips URLs and IPv4-like hosts before invented-number detection, fixing false positives from internal links such as `204.168.148.47`.
+- Live backfill completed for the last 24h UK posts:
+  - backup table: `ep_epv2_post_repair_backup_20260522_uk_quality`;
+  - checked `70` Ukrainian posts;
+  - first pass changed `67`: `uk_sentence_glue=67`, `uk_brand_transliteration=27`, `placeholder_link_text=7`;
+  - second pass changed `9`: `uk_sentence_glue=3`, `uk_brand_transliteration=6`;
+  - final checks: `0` remaining sentence-glue regex hits, `0` remaining `(посилання)` placeholders, `0` hits for observed bad brand forms (`ОйроПулсе`, `Ваимо`, `Гайсе`, `ТехКрунх`, `24тв`, `Багн.де`, `Лінукс`, `Голем`).
+- Validation:
+  - repo and live `php -l` passed for the three changed PHP files;
+  - live smoke test detected `15763` before repair as `uk_sentence_glue + placeholder_link_text + uk_bad_brand_transliteration`;
+  - sample repair produced `EuroPulse`, `Waymo`, `TechCrunch` and inserted missing sentence space;
+  - queue `5702` URL/IP invented-number false positive now returns no invented numbers;
+  - `post_publish_rendered` audit rows recorded: latest hour showed `79` pass rows, avg score `95.8`;
+  - worker `/health` OK (`rss_mb=229.2`, no recycle scheduled);
+  - PHP-FPM active, `slow=0`;
+  - public site IP returned `200 OK`.
+- Continue from here:
+  - first run the read-only service/queue/quality checks listed in `docs/NEXT_SESSION_RUNBOOK_2026_05_22.md`;
+  - keep observing `publish_gate_shadow` and now `post_publish_rendered`;
+  - do not enable hard blocking until `thin_source_dossier` and `unsupported_numbers` are re-reviewed after the calibration;
+  - if more bad brand transliterations appear, extend the preservation map cautiously with observed concrete forms only;
+  - next implementation candidate is worker prompt/translator prevention so post-audit repairs become rare, not the primary safety net.
+
+## Latest Handoff 2026-05-21 20:06 UTC — autonomous hardening Phase 1/2 shadow deployed
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; it now includes this checkpoint.
+- User asked to continue with the new `2026-05-21` hardening plan, carefully and phase-by-phase.
+- What we are doing:
+  - building a quality/fact/source/cache hardening layer around the existing autonomous pipeline;
+  - first collecting shadow evidence, then enabling review/blocking only where the data proves low false-positive risk.
+- Expected result:
+  - autonomous publishing remains live;
+  - quality problems become visible in `ep_epv2_quality_audit` and admin page `Качество`;
+  - after shadow observation, hard blockers can route risky items away from autonomous publishing without disrupting good items.
+- Implemented and deployed only the safe audit/shadow foundation:
+  - `includes/metrics/class-epv2-quality-audit.php`
+  - `includes/quality/class-epv2-quality-gate.php`
+  - `includes/bootstrap.php` autoload entries
+  - `includes/core/class-epv2-installer.php` schema for `epv2_quality_audit`
+  - `includes/publish/class-epv2-publish-gate.php` shadow call
+  - `includes/admin/class-epv2-admin.php` submenu/page `Качество`
+- Live schema upgrade created `ep_epv2_quality_audit`.
+- Validation:
+  - repo and live PHP lint passed for changed files;
+  - live class autoload check returned `EPV2_Quality_Audit=true`, `EPV2_Quality_Gate=true`;
+  - audit write/delete smoke test passed;
+  - direct read-only gate check on latest published row `5338` / post `14977` returned `verdict=pass`, `score=92`;
+  - seed-only payloads were excluded from shadow recording after a noisy first audit row showed they would otherwise pollute the table.
+- Behavior remains unchanged:
+  - `quality_shadow` is recorded/returned but does not affect `allowed`;
+  - no hard blocker review mode is enabled;
+  - no worker `/quality_audit`, source trust, clustering, post-publish rendered audit, or cache manager yet.
+- No manual `collect`, `process`, or `publish` was triggered.
+- Next safe step:
+  - observe real `publish_gate_shadow` rows in the new `Качество` admin page / `ep_epv2_quality_audit`;
+  - wait for at least `30` real shadow rows or `24h` runtime, whichever is later;
+  - analyze top blockers and false positives, especially `unsupported_numbers`, `category_drift`, `thin_source_dossier`, and media/language blockers;
+  - only after enough data, implement Phase 3 review-mode routing for confirmed hard blockers;
+  - do not start worker `/quality_audit` before the shadow false-positive profile is known.
+- Useful checks:
+  - `sudo -u www-data wp db query "SELECT verdict, COUNT(*) c, ROUND(AVG(score),1) avg_score FROM ep_epv2_quality_audit GROUP BY verdict; SELECT blockers, COUNT(*) c FROM ep_epv2_quality_audit GROUP BY blockers ORDER BY c DESC LIMIT 10;" --path=/var/www/europulse/public`
+  - `sudo -u www-data wp db query "SELECT id,queue_id,post_id,source_id,phase,verdict,score,LEFT(blockers,260) blockers,LEFT(warnings,260) warnings,created_at FROM ep_epv2_quality_audit ORDER BY id DESC LIMIT 30;" --path=/var/www/europulse/public`
+
+## Latest Handoff 2026-05-20 09:45 UTC — watched collect resumed, rubric/Story Card preservation fixed
+
+- First file for a new LLM session remains `/root/projects/europulse/LLM_START_HERE.md`; it now has the current 09:45 UTC checkpoint and overrides older sections below.
+- User request in this pass: keep watching autonomy without manual pushing; also watch rubrication because the latest published item landed in `sport` though it was politics/world.
+- Current live operating state:
+  - `epv2_automation_paused=0`
+  - `epv2_collect_paused=0`
+  - next planned collect: `2026-05-20 10:00:00 UTC`
+  - queue at `09:43 UTC`: `published=84`, no processable rows yet
+  - `epv2-orchestrator` active and heartbeat fresh
+  - `epv2-worker` active since `09:31:29 UTC`, `/health` OK on `127.0.0.1:8765`, RSS about `100M`
+- Category incident analysis:
+  - row `4842` / post `13694` was published under `sport`;
+  - input selection was correct: `category_proposed=welt`, `admin_notes.selection.category=welt`;
+  - downstream payload drifted: `ai_payload.categories[0]=sport`, `_meta.selection.category=sport`;
+  - root cause was global: input `Story_Card_Builder` saved a semantic seed payload, but it lacked `_meta.editorial_prompt_version`; later `drop_stale_payload_version_mismatch` wiped the whole seed, so the worker lost the upfront semantic snapshot before rewrite.
+- Code fixes made and deployed live:
+  - `worker-v21/src/epv2_worker/pipeline.py`
+    - `req.category_proposed` now remains the primary category;
+    - local `content_type` category is only a fallback;
+    - high-confidence Story Card can still override.
+  - `worker-v21/src/epv2_worker/semantic.py`
+    - keyword matching uses word boundaries;
+    - weak sport words (`match`, `league`, `goal`, `Sieg`, etc.) cannot classify a story as sport without stronger sport evidence.
+  - `includes/publish/class-epv2-publish-gate.php`
+    - only explicit `_meta.manual_mode` bypasses `selection=low|reject`;
+    - automatic `top_story` / `breaking` no longer bypass selection blockers.
+  - `includes/queue/class-epv2-queue.php`
+    - selection-block bypass is manual-mode only, not priority/top-story.
+  - `includes/ai/class-epv2-ai-processor.php`
+    - stale editorial payload reset now preserves semantic seed fields: `story_card`, `source_dossier`, `context_memory`;
+    - seed-only payloads are not treated as reusable editorial context;
+    - preserved semantic seed is merged into the fresh baseline before worker processing.
+- Live deployment/validation:
+  - PHP files were copied to `/var/www/europulse/public/wp-content/plugins/europulse-autopilot-v21`.
+  - PHP-FPM was reloaded.
+  - Worker was restarted to pick up Python changes.
+  - `python3 -m py_compile` passed for changed worker files.
+  - `php -l` passed for changed PHP files, including the live AI processor.
+  - Worker semantic test for the Guardian politics title now returns `news`.
+  - Live gate check on `4842`: `selection_publishable=false`, `manual_override=false`, blockers `["selection_reject"]`.
+  - Reflection smoke test on live AI processor confirmed semantic seed extraction, seed-only detection, and merge work.
+- Command-limit note:
+  - At about `2026-05-20 09:49 UTC`, additional live `wp eval` and worker `curl /health` checks were rejected by the Codex environment usage limit: retry after `10:43 AM`.
+  - Do not infer service downtime from the absence of checks after this point.
+  - Local `ps` still showed worker about `103M` RSS and PHP-FPM workers about `94-96M` RSS.
+- Continue from here:
+  - Do not manually run `collect/process/publish`.
+  - Wait for the planned `10:00 UTC` collect.
+  - If live command access is still blocked, report the limit and wait for access instead of trying indirect workarounds.
+  - If nothing happens after the slot, investigate scheduler/orchestrator, not manual collection.
+  - For every new item, compare `admin_notes.selection.category`, `_meta.story_card.category`, `ai_payload.categories`, and final WP categories.
+  - Watch resource usage and heartbeat while the first fresh autonomous cycle runs.
+
+## Previous Handoff 2026-05-20 06:01 UTC — v2 selector stall fixed, queue drained, publish proven
+
+- First file for a new LLM session remains `/root/projects/europulse/LLM_START_HERE.md`; it now has the current 06:01 UTC checkpoint and should override older sections below.
+- User request in this pass: analyze remaining bottlenecks globally, not as one-off row fixes; identify what is rejected/stuck and why; observe that autonomous process/publish completes without manual publishing.
+- Root cause found:
+  - v2 selector path used by `next_item_for_processing()` only claimed `new` rows after active-owner recovery.
+  - Other observability paths (`bridge_has_processable_items`, legacy selector/fallback, dashboard) could see `retry_process` / stage-resume rows.
+  - Result: DB had processable `retry_process` rows, but process runs returned `no_processable_items`.
+- Code fixes made and deployed live:
+  - `includes/queue/class-epv2-queue.php`
+    - added unified v2 workflow claim path for `new`, staged resume, auto resume, and reserve candidates;
+    - `has_processable_items()`, `workflow_v2_preview_selection()`, and actual claim now use the same preview logic;
+    - `bridge_next_processable_row()` respects `ignore_retry_after`;
+    - stage/auto resume filters now also call `item_is_processable_read_only()`;
+    - chronic recycler terminal markers block selector pickup;
+    - chronic recycler terminal rows cannot be revived into non-terminal states by later `mark_state()` races;
+    - chronic recycler rejection clears the processable transient and active pointer.
+  - `includes/api/class-epv2-rest.php`, `includes/jobs/class-epv2-jobs.php`, `includes/core/class-epv2-cli-commands.php`
+    - maintenance now runs `repair_persisted_retry_process_stage_contract()` and `repair_persisted_publish_finish_translation_contract()`.
+- Live deployment/validation:
+  - Changed PHP files were copied to `/var/www/europulse/public/wp-content/plugins/europulse-autopilot-v21`.
+  - Repo and live `php -l` passed for queue, REST, jobs, and CLI command files.
+  - `php8.3-fpm` was reloaded after deployment.
+- Autonomous proof after fix:
+  - maintenance at `2026-05-20 05:52:56 UTC` repaired `4843`, `4844`, `4845` from stale `rebuild_bundle` stage to required `translate_uk`.
+  - process run `39912` processed `4842` and queued `publish_finish`.
+  - process run `39913` processed `4829`; worker terminalized it to review because plagiarism gate failed DE uniqueness (`61.1% < 85%`).
+  - maintenance at `2026-05-20 05:57:55 UTC` auto-promoted/cleaned the review row according to auto-mode policy.
+  - publish run `39914` published `4842` at `2026-05-20 05:58:00 UTC`, post `13694`.
+- Final live queue at `2026-05-20 06:00 UTC`:
+  - `published=84`, `rejected=4`.
+  - `4829`: rejected by auto review policy after worker plagiarism blocker.
+  - `4842`: published, post `13694`.
+  - `4843`: rejected, `manual_confirmation_required=worker_blockers`.
+  - `4844`, `4845`: rejected as stale TTL (`hard_editorial — TTL exceeded`).
+  - `workflow_v2_preview_selection(false)` returns `mode=none`.
+  - `has_processable_items()` returns `false`.
+- Resource state at final check:
+  - worker `/health`: `status=ok`, `rss_mb=182.4`, `request_count=30`, `recycle_scheduled=false`.
+  - orchestrator active, about `21.8M` RSS.
+  - PHP-FPM active, `slow=0`, about `106.9M` memory.
+  - Frontend/admin local HTTP checks returned expected redirects; no current `500/502`.
+- Continue with collection still paused. Do not enable regular collect unless the user asks for a watched fresh-content test.
+
+## Latest Handoff 2026-05-20 00:06 UTC — Worker memory fixed, false rejects repaired, autonomous publish proven
+
+- First file for a new LLM session remains `/root/projects/europulse/LLM_START_HERE.md`. It has the current state and should override older sections below.
+- User request in this pass: investigate what is stuck/rejected and why, keep observing, and make publish-grade items traverse the autonomous path without manual publishing.
+- Critical incident found after the earlier controlled restart:
+  - `epv2-worker` had grown to about `669M RSS` and `127M swap`; `/health` timed out.
+  - Orchestrator kept trying worker-owned stages, causing false chronic recycler / ready_review rejections.
+  - Automation was paused briefly, worker was killed/restarted, and then code fixes were deployed before requeueing false rejects.
+- Code fixes made and deployed:
+  - `worker-v21/src/epv2_worker/server.py`: `/health` exposes `rss_mb`, `request_count`, `recycle_scheduled`; worker now self-recycles by RSS/request thresholds and has a background RSS monitor.
+  - `worker-v21/src/epv2_worker/rewriter.py`: large spaCy DE NER disabled by default; fabricated-name fallback no longer hard-blocks capitalized phrase pairs without spaCy; DE anti-plagiarism retry added.
+  - `worker-v21/src/epv2_worker/translator.py`: large spaCy UK NER disabled by default; Ukrainian filler/style warnings are soft; English German-output and translation failures are retried.
+  - `worker-v21/epv2_bridge_orchestrator.py`: worker `/health` guard before collect, breaking scan, process, and handoff, with cooldown on unhealthy worker.
+  - `includes/core/class-epv2-worker-client.php`: shorter worker availability cache, forced health ping before `/process`, lower HTTP timeout caps.
+  - `includes/ai/class-epv2-story-card-builder.php`: worker availability cache invalidates on `/analyze_story` failures.
+  - `includes/queue/class-epv2-queue.php`: chronic recycler excludes infrastructure failures; stage-attempt quarantine messages include publish-gate blockers.
+  - `includes/publish/class-epv2-publish-gate.php`: explicit `thin_source_dossier` blocker.
+  - `includes/ai/class-epv2-ai-processor.php`: `translation failed: All providers failed` is treated as a provider/technical retry; rebuild short-circuit `selection=low/reject` is rescued for strong ingest/story-card rows.
+- Live deploy/validation:
+  - Changed PHP files were copied to `/var/www/europulse/public/wp-content/plugins/europulse-autopilot-v21`; live `php -l` passed.
+  - Worker restarted after Python changes. Last successful worker health before approval limit: OK, RSS about `172.6M`, request count `6`, no recycle scheduled.
+  - Publisher proved live: `4838` published autonomously at `2026-05-19 23:59:23 UTC` as post `13666`; `4831` published at `2026-05-20 00:05:00 UTC` as post `13674`.
+- Queue false-reject recovery:
+  - Requeued `4825` and `4826` after anti-plagiarism retry fix.
+  - Requeued `4833` after selection-drift short-circuit fix.
+  - Requeued `4837` after translation/provider failure retry fix.
+  - Left `4830` rejected intentionally: source dossier is genuinely too thin (one-sentence primary content plus empty supporting URLs). It should not be auto-published without better source content.
+  - `4839` was autonomously rejected as `selection=low`, score `40` vs threshold `41`; this is an editorial gate, not a resource/stuck issue.
+- Latest observed live queue at `2026-05-20 00:05 UTC`:
+  - `published=82`, `ready_publish=1`, `new=13`, `retry_process=5`, `rejected=2`.
+  - `4832` was `ready_publish`, due at `2026-05-20 00:09:50 UTC`.
+  - `4825/4826/4833/4837` are back in `new/rebuild_bundle`.
+  - `4829/4842/4843/4844/4845` remain `retry_process/rebuild_bundle` and need observation.
+- Important limitation:
+  - After the `00:05` checks, escalated live commands started failing with the environment's approval/usage limit. Do not work around rejected live commands. Continue when approvals are available again, or ask the user to renew/approve live access.
+- Next concrete commands when live access is available:
+  - `systemctl status epv2-worker epv2-orchestrator --no-pager -l`
+  - `curl -s --max-time 10 http://127.0.0.1:8765/health`
+  - `sudo -u www-data wp db query "SELECT state, COUNT(*) c FROM ep_epv2_queue GROUP BY state ORDER BY state; SELECT id,state,pipeline_stage,post_id,updated_at,LEFT(error_message,260) error_message FROM ep_epv2_queue WHERE id BETWEEN 4825 AND 4847 ORDER BY id;" --path=/var/www/europulse/public`
+  - `sudo -u www-data wp db query "SELECT id,job_name,status,item_count,error_count,started_at,finished_at,LEFT(payload,1500) payload FROM ep_epv2_runs WHERE id>=39600 ORDER BY id DESC LIMIT 40;" --path=/var/www/europulse/public`
+
+## Latest Handoff 2026-05-19 21:46 UTC — Controlled restart, stale queue clear, memory/resource guards
+
+- First file for a new LLM session remains `/root/projects/europulse/LLM_START_HERE.md`. It has the current state and should override older handoff sections below.
+- User's current operational request: site became slow/unresponsive when autonomous work was enabled; dashboard showed `Publisher inactive` and no orchestrator heartbeat for ~94779 seconds. User asked to check `epv2-orchestrator`, clear old queue so stale news cannot publish, and start automation slowly under control.
+- Root causes found in this pass:
+  - Old `epv2-worker` previously reached `1.0G` memory peak and `567M` swap peak while repeatedly hitting OpenAI quota/rate failures.
+  - `breaking_scan` was running via REST/PHP-FPM and slowlog showed it stuck in Google News `curl_exec()`, which can exhaust PHP-FPM children and make the site stall.
+  - Broken source `id=11` (`muenchen.de Rathaus Umschau`, `http://www.muenchen.info/pia/RSS/RSS.xml`) returns `text/html`, not an RSS feed, causing repeated breaking source failures.
+  - The dashboard `ready_publish` stall warning was stale/no longer matched DB state; DB had old active rows from `2026-05-18 19:00-19:04 UTC`.
+- Code changes made in repo and deployed where needed:
+  - `worker-v21/epv2_bridge_orchestrator.py`: breaking scan now runs by WP-CLI instead of REST/FPM; it has a timeout, kills its process group on timeout, recovers collect locks, respects `collect_paused`, and uses memory preflight guards for process/collect/breaking/publish paths.
+  - `wp-plugins/europulse-autopilot-v21/includes/ingest/class-epv2-collector.php`: `run_breaking_scan()` returns `['skipped'=>'collect_paused']` when collection is paused. This was copied to the live plugin and smoke-tested with `{"skipped":"collect_paused"}`.
+  - `worker-v21/worker-setup.sh` and `worker-v21/orchestrator-setup.sh`: systemd resource/restart guard defaults added.
+  - New repo drop-ins under `ops/systemd/`: worker, orchestrator, and bot restart/resource guards.
+- Live resource guards applied:
+  - `epv2-worker`: `MemoryHigh=640M`, `MemoryMax=768M`, `MemorySwapMax=128M`, `CPUQuota=80%`, `TasksMax=64`, `RestartSec=60`, `StartLimitBurst=2/15min`, lower priority.
+  - `epv2-orchestrator`: `MemoryHigh=384M`, `MemoryMax=512M`, `MemorySwapMax=128M`, `CPUQuota=60%`, `TasksMax=64`, `RestartSec=60`, `StartLimitBurst=2/15min`.
+  - `epv2-bot`: `MemoryHigh=64M`, `MemoryMax=128M`, `MemorySwapMax=32M`, `CPUQuota=20%`, `TasksMax=32`.
+- Host cleanup completed:
+  - Stuck `msmtp/apparmor` `dpkg` prompt resolved non-interactively.
+  - `dpkg --audit` clean; `apt-get check` OK.
+  - Swap cleaned from about `1.1G` used to about `7M`.
+  - Old detached `tmux` session `europulse` with two stale `claude` processes using about `1.4G` RSS was stopped.
+- Queue/source cleanup before restart:
+  - Before cleanup: `new=15`, `ready_review=1`, no live `ready_publish`.
+  - Backup table created: `ep_epv2_queue_backup_pre_controlled_restart_20260519` with `16` stale active rows.
+  - The 16 old active rows were marked `rejected` with `stale_queue_cleared_before_controlled_restart` notes so stale news cannot publish.
+  - Source `id=11` was disabled with an admin note because its legacy Munich RSS URL returns HTML.
+- Controlled restart state:
+  - `systemctl start epv2-worker` at `2026-05-19 21:38:20 UTC`; worker is active, about `110M` RSS, `/health` returns OK from host curl.
+  - `systemctl start epv2-orchestrator` at `2026-05-19 21:38:48 UTC`; orchestrator is active, about `13M` RSS.
+  - `epv2_automation_paused=0`.
+  - `epv2_collect_paused=1` intentionally remains set.
+  - `epv2_publish_thread_heartbeat` became fresh again at/after `2026-05-19 21:38:49 UTC`; this is the heartbeat used by the dashboard warning.
+  - Orchestrator maintenance ran at `2026-05-19 21:39:41 UTC` with `alerts_fired=[]`, then logged `process idle` because there are no processable rows.
+- Latest verified live state:
+  - `epv2_active_alerts={"checked_at":"2026-05-19T21:46:19Z","ram_pct":56,"disk_pct":52,"automation_paused":false,"collect_paused":true,"alerts":[]}`
+  - Queue after the later `21:44:42 UTC` maintenance tick: `published=133` only; no active `new`, `ready_review`, `ready_publish`, `publishing`, `rejected`, or processable rows. The 16 stale active rows were backed up first, marked rejected, and then terminal rows were trimmed by maintenance.
+  - Bridge state after restart: `automation_paused=false`, `collect_paused=true`, `worker_available=true`, `has_processable_items=false`, `next_ready_publish=null`, `current_window_mode=wind_down_quiet`, `collect_window_open=false`, `publish_window_open=true`, `has_breaking_watch=false`.
+  - Host memory: about `2.1G/3.7G` used, `1.7G` available, swap about `7M/2.0G` used.
+  - Front page returns through cache (`X-FastCGI-Cache: HIT`); no lingering healthcheck/WP-CLI process matched the diagnostic pgrep.
+- Next safe steps:
+  - Do not enable collection while `collect_window_open=false` unless the user explicitly wants a watched one-off collect.
+  - Leave the system in this controlled state for another observation window: worker/orchestrator active, publisher heartbeat alive, no queue work, collection paused.
+  - If collection is resumed later, first recheck active sources and keep source `id=11` disabled or replace it with a valid RSS feed.
+  - Do not restore the cleared stale queue unless explicitly asked; the backup table exists for forensic recovery only.
+  - Before committing, review the dirty tree because docs/code/systemd drop-ins were intentionally changed in this pass.
+
+## Latest Handoff 2026-05-18 20:15 UTC — Provider/memory incident repair + LLM entrypoint
 
 - First file for a new LLM session is now `/root/projects/europulse/LLM_START_HERE.md`. It defines read order, current runtime state, and next actions. Read it before older handoff sections.
 - Active repo branch: `review/plugin-audit`. Runtime paths remain:
@@ -10,7 +700,11 @@
   - repo plugin source: `/root/projects/europulse/wp-plugins/europulse-autopilot-v21`
   - worker: `/root/projects/europulse/worker-v21`
 - Incident context: worker hit the `1.0G` systemd memory peak and used swap because OpenAI quota was exhausted while the worker still called OpenAI across story_card, embeddings, rewrite, translation, and SEO paths.
-- Repair package staged for commit:
+- Repair package committed locally:
+  - `R9: enforce worker provider cooldowns`
+  - `R10: add ops visibility and frontend foundation`
+  - `R11: document LLM handoff checkpoint`
+- Repair contents:
   - WordPress story-card builder sends `ai_provider`, `ai_model`, `ai_fallback_provider`, `ai_fallback_model` into `/analyze_story`.
   - Worker honors explicit provider order; DeepSeek-primary no longer silently appends OpenAI unless configured.
   - OpenAI embeddings are skipped unless OpenAI is in the provider order.

@@ -37,19 +37,23 @@ NEWS_BRIEF = """TYP: news_brief — Kurzmeldung.
 Aufbau:
 - Title: 50–80 Zeichen.
 - Lead: 1–2 Sätze. Kern der Meldung. Quelle namentlich.
-- Body: 700–1100 Zeichen (Pflicht-Mindestmass: 700). Drei bis vier kurze Absätze.
+- Body: 350–900 Zeichen. Zwei bis vier kurze Absätze. Wenn die Primärquelle
+  nur einen RSS-Teaser liefert, bleibt die Meldung am unteren Ende dieser Spanne.
 
 Struktur des Body:
-- Absatz 1: Erweiterung des Leads — was/wo/wann mit zusätzlichem Detail aus dem Dossier (eine konkrete Zahl, eine Akteurs-Funktion oder eine Ortsangabe, die im Lead noch nicht steht).
+- Absatz 1: Erweiterung des Leads — nur Details, die in der Primärquelle stehen.
 - Absatz 2: ein weiteres Faktum aus der Primärquelle — Reaktion, Zahl, Vergleich oder kurzer Hintergrund.
-- Absatz 3: Sekundärquelle namentlich — was diese hinzufügt (anderer Winkel, ergänzende Zahl, eigenständige Stimme).
+- Absatz 3: Sekundärquelle namentlich NUR, wenn ihr voller Inhalt oder ein
+  aussagekräftiger Excerpt im Prompt steht. Eine bloße Überschrift/URL zählt
+  nicht als Quelle für neue Fakten.
 - Absatz 4 (optional): Echo-Block „Europulse berichtete zuvor …" — nur wenn passendes Material vorhanden ist.
 
-Quellen: 1 reicht editorisch, aber wenn ≥ 2 vorhanden, IMMER beide nennen — die zweite ist die strukturelle Berechtigung für Absatz 3.
+Quellen: 1 reicht editorisch. Zusätzliche Quellen zählen nur, wenn Inhalt oder
+Excerpt geladen wurde; title-only Links sind reine Such-/Breitberichts-Signale.
 
 Längen-Disziplin (wichtig):
-- Unter 700 Zeichen ist der Body NICHT akzeptabel — er fällt aus Discover/Top-Stories und wird sichtbar dünn.
-- Nicht künstlich aufblähen: KEINE Floskeln, KEINE Wiederholung des Leads, KEINE Spekulation. Wenn das Dossier die 700 Zeichen nicht hergibt, FÜGE ein konkretes Detail aus den Sekundärquellen hinzu (Reaktion, Zahl, Zitat-Splitter < 15 Wörter).
+- Nicht künstlich aufblähen: KEINE Floskeln, KEINE Wiederholung des Leads,
+  KEINE Spekulation. Wenn das Dossier wenig hergibt, bleibt die Meldung kurz.
 
 Was zu vermeiden:
 - Tiefer Kontext, Analyse, mehrere ausgebaute Reaktionen — das ist news_article.
@@ -72,7 +76,9 @@ Struktur des Body:
 - Absatz 4 (optional): Folgen oder nächste Schritte (nur wenn im Original/Dossier).
 - Letzter Absatz (echo): „Europulse berichtete zuvor über …" — max. 1 Satz, mit Querverweis. Nur falls passendes EuroPulse-Material vorhanden ist.
 
-Quellen: mindestens 2. Jede zusätzliche Quelle wird beim Einbringen ihres Faktums namentlich genannt.
+Quellen: mindestens 2 nur dann, wenn beide mit Inhalt/Excerpt im Prompt stehen.
+Title-only Links oder „VERWANDTE TITEL" zählen NICHT als Faktenquelle und
+erlauben keine zusätzlichen Details, Stimmen, Zahlen oder Attributionen.
 
 Was zu vermeiden:
 - Listen-Stil (Aufzählungen mit •/-) im Body.
@@ -94,7 +100,9 @@ Struktur des Body:
 - Absatz 7 (optional): Folgen / Ausblick (nur faktenbasiert, keine Spekulation).
 - Letzter Absatz (echo): „Europulse berichtete zuvor …" mit Querverweis.
 
-Quellen: mindestens 2, idealerweise 3+. Jede Zusatzquelle namentlich genannt beim Einbringen ihres Faktums.
+Quellen: mindestens 2, idealerweise 3+, aber nur geladene Inhalte/Excerpts.
+Title-only Links oder „VERWANDTE TITEL" zählen NICHT als Faktenquelle. Wenn
+nur ein RSS-Teaser vorliegt, NICHT extended_news schreiben; dann kurze Meldung.
 
 Was zu vermeiden:
 - Editoriale Wertung („zu Recht", „bedauerlicherweise") — das ist analysis-Territorium.

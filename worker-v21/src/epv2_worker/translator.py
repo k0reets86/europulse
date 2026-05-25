@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -39,6 +40,10 @@ def _get_uk_nlp():
     if _UK_NLP is not None:
         return _UK_NLP
     if _UK_NLP_LOAD_FAILED:
+        return None
+    if os.getenv("EPV2_ENABLE_SPACY_UK_NER", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        _UK_NLP_LOAD_FAILED = True
+        logger.info("spaCy UK NER disabled by default to keep worker RSS bounded")
         return None
     try:
         import spacy  # type: ignore
@@ -155,6 +160,7 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
 - Abkürzungen: beim ersten Auftreten die volle Form in der Zielsprache nennen und die Abkürzung in Klammern behalten, z. B. „European Union (EU)" / „Європейський Союз (ЄС)".
 - Exklusive Zuschreibungen und Zitate wörtlich und vollständig übertragen.
 - Namen, Daten, Zahlen und Eigennamen unverändert übernehmen. Personen nicht sofort nur auf nackte Nachnamen reduzieren: bei erster Erwähnung Rolle/Funktion + Name oder Nachname, sofern die Quelle die Rolle nennt.
+- Lateinisch geschriebene Eigennamen, Publisher-, Marken-, Produkt- und Organisationsnamen NICHT phonetisch übersetzen oder kyrillisieren. Wenn der DE-Master oder die Story-Card „Kyiv Post", „Deutsche Welle", „OpenAI", „Waymo", „ProSieben" usw. schreibt, bleibt diese Schreibweise auch in Ukrainisch erhalten.
 - Erfinde keine Vornamen, Funktionen oder Rollen aus Allgemeinwissen. Wenn der deutsche Master nur einen Nachnamen nennt, schreibt die Übersetzung ebenfalls nur diesen Nachnamen; keine Zusätze wie „Bavarian Minister-President", „Prime Minister" oder ähnliche Rollen.
 
 - ENTITÄTS-KONSISTENZ ZWISCHEN TITEL/LEAD/BODY (Pflicht-Pflicht, 2026-05-12):
@@ -237,8 +243,8 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
   • German umlauts стандартно preserved у English (Söder, Müller, Bärbel — leave as-is)
   • Russian names: Putin, Lavrov, Medvedev — standard romanization
 - UKRAINIAN translation guards:
-  • Latin chars (Bärbel, Friedrich, Pistorius) — transliterate via DSTU 9112 (Бербель, Фрідріх, Пісторіус) — НЕ залишай half-Latin
-  • Brand names стандартно preserve (AfD, CDU, EU, NATO, SAP, BMW)
+  • Latin-script proper names from the source/story-card are preserved as Latin, especially publishers, brands, products, platforms, companies and acronyms. НЕ пиши „Kyiv Post" як „Киівпост" або „Київ Пост"; НЕ пиши „Deutsche Welle" як „Дойтше Велле".
+  • Brand/source names стандартно preserve (AfD, CDU, EU, NATO, SAP, BMW, Kyiv Post, Deutsche Welle, OpenAI, Waymo, ProSieben)
   • Visual confusables — Latin "o" в Cyrillic context це BUG, завжди Cyrillic "о"
 
 ВАЖЛИВО — РОСІЯ-УКРАЇНА — обов'язкова редакційна лінія (БЕЗ винятків):
@@ -357,14 +363,26 @@ async def translate_from_german(
         if not provider_available(provider):
             logger.warning("Translation via %s skipped: cooldown %s", provider, provider_unavailable_reason(provider))
             continue
-        result = await _call(user, system, api_key, provider, model, target_lang, source_text)
-        if result.success:
-            result.provider = provider
-            result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
-            register_provider_success(provider)
-            _annotate_translation_uniqueness(result, source_text=source_text, target_lang=target_lang)
-            return result
-        register_provider_failure(provider, result.error)
+        last_result = TranslationResult(error="")
+        for attempt in range(2):
+            attempt_user = user
+            if attempt > 0:
+                attempt_user += (
+                    "\n\nRETRY DIRECTIVE: The previous translation failed an automatic language/style gate. "
+                    f"Return the complete article in {target_lang} only. Do not copy German sentences. "
+                    "Keep the JSON fields title, lead, card_lead and body."
+                )
+            result = await _call(attempt_user, system, api_key, provider, model, target_lang, source_text)
+            last_result = result
+            if result.success:
+                result.provider = provider
+                result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
+                register_provider_success(provider)
+                _annotate_translation_uniqueness(result, source_text=source_text, target_lang=target_lang)
+                return result
+            if not _translation_error_retryable(result.error):
+                break
+        register_provider_failure(provider, last_result.error)
 
     return TranslationResult(error="All providers failed")
 
@@ -618,12 +636,18 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             body = _fix_latin_cyrillic_hybrid_words(_normalize_ukrainian_grammar(_fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(body))))))
             title, lead, body = _repair_ukrainian_structure(title, lead, body)
             warnings = _ukrainian_style_warnings(title, lead, body)
-            if warnings:
-                raise ValueError("ukrainian editorial style check failed: " + "; ".join(warnings))
+            filler_count = len(warnings)
+            filler_samples = warnings[:8]
             # 2026-05-13: filler phrase counter — НЕ блокирует, soft signal.
-            filler_count, filler_samples = _count_ukrainian_filler_phrases(
+            phrase_count, phrase_samples = _count_ukrainian_filler_phrases(
                 f"{title}\n{lead}\n{body}"
             )
+            filler_count += phrase_count
+            existing_warning_samples = set(filler_samples)
+            for sample in phrase_samples:
+                if sample not in existing_warning_samples and len(filler_samples) < 8:
+                    filler_samples.append(sample)
+                    existing_warning_samples.add(sample)
             # R10 Phase 2 2026-05-14: lemma-based augmentation. Catches
             # morphological variants regex пропускает. Combined в общий
             # style_filler_count, samples deduplicated.
@@ -651,6 +675,8 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             body = _fix_cyrillic_latin_hybrid_words_en(body)
             if _english_contains_cyrillic(title, lead, body):
                 raise ValueError("english translation contains Cyrillic text")
+            if target_lang.lower().startswith("engl") and _english_looks_german(title, lead, body):
+                raise ValueError("english translation appears to be German output")
             filler_count, filler_samples = 0, []
         return TranslationResult(
             title=title,
@@ -736,7 +762,7 @@ def _transliterate_de_word_to_uk(word: str) -> str:
     return ''.join(_DE_TO_UK_SINGLES.get(c, c) for c in word)
 
 
-# Brands/abbreviations которые НЕ трансли терировать (keep Latin) — uppercase only.
+# Brands, publishers and abbreviations kept in Latin in Ukrainian copy.
 _KEEP_LATIN_TOKENS: frozenset[str] = frozenset({
     'AfD', 'CDU', 'CSU', 'SPD', 'FDP', 'BSW', 'CDU/CSU',
     'NATO', 'EU', 'UN', 'OSZE', 'WHO', 'WTO', 'IWF', 'IMF', 'OECD',
@@ -744,7 +770,16 @@ _KEEP_LATIN_TOKENS: frozenset[str] = frozenset({
     'BBC', 'CNN', 'ARD', 'ZDF', 'BR24', 'NDR', 'WDR', 'SWR', 'MDR', 'RBB',
     'Süddeutsche', 'Spiegel', 'Welt', 'FAZ', 'Bild', 'Zeit', 'Stern',
     'Reuters', 'AFP', 'dpa', 'AP', 'EPA',
-    'Bundestag', 'Bundesrat',
+	    'Bundestag', 'Bundesrat',
+	    'Kyiv', 'Post', 'Independent', 'Guardian', 'Politico', 'Europe',
+	    'Wall', 'Street', 'Journal', 'The', 'New', 'York', 'Times', 'Washington',
+	    'Bloomberg',
+	    'Kyivpost', 'KyivPost', 'EuroPulse', 'Tagesschau', 'Tagesspiegel', 'ZDFheute', 'Phoenix', 'Handelsblatt',
+    'Evonik', 'Truth', 'Social', 'Transparency', 'International',
+    'Naftogaz', 'Ukrzaliznytsia', 'Bayerischer', 'Rundfunk',
+    'Deutschlandfunk', 'Süddeutsche', 'Zeitung', 'MagentaSport', 'ProSieben',
+    '24tv', 'Deutsche', 'Welle', 'Heise', 'TechCrunch', 'Finance', 'Bahn',
+    'Golem', 'Linux', 'Flixtrain', 'HateAid', 'Waymo',
     'Apple', 'Google', 'Microsoft', 'Meta', 'OpenAI', 'Tesla', 'X',
     'Samsung', 'Sony', 'Siemens', 'BMW', 'VW', 'Audi', 'Mercedes',
     'SAP', 'Deutsche Bank', 'Commerzbank',
@@ -764,6 +799,17 @@ def _fix_latin_cyrillic_hybrid_words(text: str) -> str:
     """
     if not text:
         return text
+
+    # Never run the transliterator over markup or URLs. Earlier repair passes
+    # can leave HTML-like fragments in body text, and a pure Latin URL in a
+    # Ukrainian paragraph must not become "гттп://...".
+    protected_parts = re.split(r'(<[^>]+>|https?://[^\s<>()]+)', text, flags=re.I | re.U)
+    if len(protected_parts) > 1:
+        return ''.join(
+            part if (part.startswith('<') and part.endswith('>')) or re.match(r'https?://', part, flags=re.I)
+            else _fix_latin_cyrillic_hybrid_words(part)
+            for part in protected_parts
+        )
 
     def _classify(word: str) -> tuple[bool, bool, int, int]:
         """Returns (has_cyr, has_lat, cyr_count, lat_count)."""
@@ -878,10 +924,146 @@ def _normalize_ukrainian_names(text: str) -> str:
         "Мекленбург-Передньої Померанії": "Мекленбург-Передньої Померанії",
     }
     for src, dst in replacements.items():
-        cleaned = re.sub(rf"\b{re.escape(src)}\b", dst, cleaned, flags=re.U)
+        cleaned = re.sub(rf"(?<!\w){re.escape(src)}(?!\w)", dst, cleaned, flags=re.U)
     cleaned = re.sub(r"\bSPD\b", "СДПН", cleaned)
     cleaned = re.sub(r"\bМірш\s*\((?:Miersch)\)", "Мірш", cleaned, flags=re.I | re.U)
     cleaned = re.sub(r"\bЗедер\s*\((?:Söder|Soeder)\)", "Зедер", cleaned, flags=re.I | re.U)
+    return _normalize_ukrainian_brand_names(cleaned)
+
+
+def _normalize_ukrainian_brand_names(text: str) -> str:
+    """Fix media/brand names that the model phonetically transliterates.
+
+    Ukrainian copy should not contain broken half-transliterations such as
+    "Киів Пост" or "ОйроПулсе". Keep globally recognized publication and
+    company names in their canonical form, or use established Ukrainian names.
+    """
+    if not text:
+        return text
+    cleaned = text
+    replacements = {
+        "Киів Пост": "Kyiv Post",
+        "Київ Пост": "Kyiv Post",
+        "Кіїв Пост": "Kyiv Post",
+        "Киівпост": "Kyiv Post",
+        "Київпост": "Kyiv Post",
+        "Кіївпост": "Kyiv Post",
+        "Kyivpost": "Kyiv Post",
+        "KyivPost": "Kyiv Post",
+        "Киів Індепендент": "Kyiv Independent",
+        "Київ Індепендент": "Kyiv Independent",
+        "Украінска Правда": "Українська правда",
+        "Украінска правда": "Українська правда",
+        "Українска Правда": "Українська правда",
+        "Українска правда": "Українська правда",
+        "Українська Правда": "Українська правда",
+        "Украінська Правда": "Українська правда",
+        "Укрінска Правда": "Українська правда",
+        "Укрінська Правда": "Українська правда",
+        "Гуардіан": "The Guardian",
+        "Нью-Йорк Таймс": "The New York Times",
+        "Нью Йорк Таймс": "The New York Times",
+        "Вашингтон Пост": "The Washington Post",
+        "Рейтерс": "Reuters",
+        "Блумберг": "Bloomberg",
+        "Бі-бі-сі": "BBC",
+        "Бі Бі Сі": "BBC",
+        "Політіко Ойропе": "Politico Europe",
+        "Політіко Європе": "Politico Europe",
+        "Політіко": "Politico",
+        "ОйроПулсе": "EuroPulse",
+        "Ойропулсе": "EuroPulse",
+        "Ойро Пулсе": "EuroPulse",
+        "Ойро-Пулсе": "EuroPulse",
+        "ойро-пулсе": "EuroPulse",
+        "ойропулсе": "EuroPulse",
+        "Спігел": "Spiegel",
+        "Тагесшау": "Tagesschau",
+        "Тагесспігел": "Tagesspiegel",
+        "Тагесспігель": "Tagesspiegel",
+        "Тагесшпігел": "Tagesspiegel",
+        "Тагесшпігель": "Tagesspiegel",
+        "Цдфгойте": "ZDFheute",
+        "ЗДФгойте": "ZDFheute",
+        "Фоенікс": "Phoenix",
+        "Трут Сокіал": "Truth Social",
+        "Валл Стреет": "Wall Street",
+        "Валл Стріт": "Wall Street",
+        "Валл-стріт": "Wall Street",
+        "Валл-Стріт": "Wall Street",
+        "Волл Стріт": "Wall Street",
+        "Волл-стріт": "Wall Street",
+        "Волл-Стріт": "Wall Street",
+        "Уолл Стріт": "Wall Street",
+        "Уолл-стріт": "Wall Street",
+        "Уолл-Стріт": "Wall Street",
+        "Ганделсблатт": "Handelsblatt",
+        "Евонік": "Evonik",
+        "Баиерішер Рундфунк": "Bayerischer Rundfunk",
+        "Транспаренки Інтернатіонал": "Transparency International",
+        "Трансперенсі Інтернешнл": "Transparency International",
+        "Нафтогац": "Нафтогаз",
+        "Укрцаліцнитсіа": "Укрзалізниця",
+        "Укрзалізниціа": "Укрзалізниця",
+        "Дойтше Багн": "Deutsche Bahn",
+        "Дойтше Велле": "Deutsche Welle",
+        "Дойтшландфунк": "Deutschlandfunk",
+        "Дойчландфунк": "Deutschlandfunk",
+        "Süddeutsche Цайтунг": "Süddeutsche Zeitung",
+        "Зюддойче Цайтунг": "Süddeutsche Zeitung",
+        "Зюддойче Zeitung": "Süddeutsche Zeitung",
+        "24тв": "24tv",
+        "24ТВ": "24tv",
+        "МагентаСпорт": "MagentaSport",
+        "Магента Спорт": "MagentaSport",
+        "ПроСібен": "ProSieben",
+        "Про Сібен": "ProSieben",
+    }
+    for src, dst in replacements.items():
+        cleaned = re.sub(rf"(?<!\w){re.escape(src)}(?!\w)", dst, cleaned, flags=re.U)
+    cleaned = re.sub(r"\bУкра[їі]нс(?:ь)?ка\s+правда\b", "Українська правда", cleaned, flags=re.I | re.U)
+    cleaned = re.sub(r"\bKyiv\s*post\b", "Kyiv Post", cleaned, flags=re.I | re.U)
+    cleaned = re.sub(r"\bКи[іїі]в\s*пост\b", "Kyiv Post", cleaned, flags=re.I | re.U)
+    cleaned = re.sub(r"\bОйро[-\s]?пулсе\b", "EuroPulse", cleaned, flags=re.I | re.U)
+    cleaned = _strip_broken_ukrainian_urls(cleaned)
+    cleaned = re.sub(r"\s*https?://www\.(?:ойро[-\s]?пулсе|ойропулсе)[^\s<)]+", "", cleaned, flags=re.I | re.U)
+    cleaned = re.sub(r"\s*:\s*(</p>)", r"\1", cleaned, flags=re.U)
+    # If the model already dropped the "Politico" half and left only
+    # "Europe" transliterated as a source name, restore the publication.
+    cleaned = re.sub(
+        r"\b(за даними|як повідомляє|повідомляє|з посиланням на)\s+Ойропе\b",
+        r"\1 Politico Europe",
+        cleaned,
+        flags=re.I | re.U,
+    )
+    return cleaned
+
+
+def _strip_broken_ukrainian_urls(text: str) -> str:
+    """Remove URLs that were already phonetically transliterated by the model.
+
+    These are not valid links and should not reach rendered posts. Keep the
+    surrounding sentence readable by removing only the parenthetical/link token.
+    """
+    if not text:
+        return text
+    cleaned = re.sub(r"\s*\((?:гттпс?|гттп|хттпс?|хттп)://[^)]*\)", "", text, flags=re.I | re.U)
+    cleaned = re.sub(r"\s*(?:гттпс?|гттп|хттпс?|хттп)://[^\s<)]+", "", cleaned, flags=re.I | re.U)
+    cleaned = re.sub(
+        r"<p\b[^>]*>\s*</p>",
+        "",
+        cleaned,
+        flags=re.I | re.S | re.U,
+    )
+    return cleaned
+
+
+def _normalize_html_block_spacing(text: str) -> str:
+    if not text or "<" not in text:
+        return text
+    cleaned = re.sub(r"(</p>)\s*(<h[2-6]\b)", r"\1\n\n\2", text, flags=re.I | re.U)
+    cleaned = re.sub(r"(</h[2-6]>)\s*(<p\b)", r"\1\n\n\2", cleaned, flags=re.I | re.U)
+    cleaned = re.sub(r"(</p>)\s*(<p\b)", r"\1\n\n\2", cleaned, flags=re.I | re.U)
     return cleaned
 
 
@@ -904,6 +1086,9 @@ _UK_INVALID_VERB_FIXES = {
     "вимагаій": "вимагає", "пропонуій": "пропонує",
     "очікуій": "очікує", "розглядаій": "розглядає",  # dead entry "розгляддаій" удалён v21
     "посилюій": "посилює", "підтримуій": "підтримує",
+    "атакуій": "атакує", "звинувачуій": "звинувачує",
+    "показуій": "показує", "реформуій": "реформує",
+    "представилий": "представила", "помилкоє": "помилкове",
 }
 
 
@@ -1056,6 +1241,33 @@ def _english_contains_cyrillic(*parts: str) -> bool:
     return re.search(r"[А-Яа-яІіЇїЄєҐґ]", "\n".join(parts), re.U) is not None
 
 
+def _english_looks_german(*parts: str) -> bool:
+    text = "\n".join(parts)
+    if not text.strip():
+        return False
+    german_markers = re.findall(
+        r"\b(?:der|die|das|den|dem|des|und|oder|aber|nicht|mit|auf|für|über|unter|"
+        r"Grönland|Dänemark|Verteidigungsabkommen|Investitionsabkommen|Bericht|"
+        r"berichtet|zufolge|gegenüber|Insel|Forderungen|Amerikaner)\b",
+        text,
+        flags=re.I | re.U,
+    )
+    words = re.findall(r"\b[A-Za-zÄÖÜäöüß]{2,}\b", text, flags=re.U)
+    if not words:
+        return False
+    return len(german_markers) >= 8 and (len(german_markers) / max(1, len(words))) >= 0.04
+
+
+def _translation_error_retryable(error: str) -> bool:
+    lowered = (error or "").lower()
+    return (
+        "appears to be german" in lowered
+        or "editorial style check failed" in lowered
+        or "empty" in lowered
+        or "invalid json" in lowered
+    )
+
+
 def _fix_ukrainian_gender_agreement(text: str) -> str:
     """Catch common gender-agreement slips where the AI translator copied
     the German noun's gender onto a Ukrainian noun whose actual gender
@@ -1072,11 +1284,19 @@ def _fix_ukrainian_gender_agreement(text: str) -> str:
     # Maps: noun → correct gender ("m" / "f" / "n").
     # Only nouns where the AI commonly drifts away from real UK gender
     # because the German equivalent has a different gender.
+    text = re.sub(
+        r"\bсвоє\s+дипломатичне\s+персонал\b",
+        "свій дипломатичний персонал",
+        text,
+        flags=re.IGNORECASE | re.UNICODE,
+    )
+
     masc_nouns = [
         "парад", "звіт", "саміт", "баланс", "вечір", "конгрес",
         "процес", "форум", "проєкт", "проект", "комітет", "уряд",
         "вибір", "закон", "референдум", "удар", "наступ", "виступ",
         "доступ", "момент", "захід", "знак", "опис", "обмін",
+        "персонал",
     ]
     fem_nouns = [
         "сесія", "криза", "фракція", "гілка", "коаліція", "столиця",
@@ -1206,6 +1426,11 @@ def _normalize_ukrainian_style(text: str) -> str:
     }
     for src, dst in replacements.items():
         cleaned = re.sub(re.escape(src), dst, cleaned, flags=re.I)
+    cleaned = _normalize_ukrainian_brand_names(cleaned)
+    # Model sometimes glues sentence boundaries inside one paragraph:
+    # "років.Слідчі", "критики.Рішення". This is always a typography bug.
+    cleaned = re.sub(r"([.!?])(?=[А-ЯІЇЄҐA-Z])", r"\1 ", cleaned, flags=re.U)
+    cleaned = _normalize_html_block_spacing(cleaned)
     cleaned = re.sub(
         r"\bу\s+законодавч\w+\s+фармацевтичн\w+\s+сектор\w+\s+та\s+систем[іи]\s+обов[’']язкового\s+медичного\s+страхування\b",
         "у системі обов’язкового медичного страхування",

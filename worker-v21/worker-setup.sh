@@ -86,6 +86,8 @@ cat > "${SERVICE_FILE}" << SVCEOF
 [Unit]
 Description=EuroPulse AutoPilot v21 Python Worker
 After=network.target
+StartLimitIntervalSec=900
+StartLimitBurst=2
 
 [Service]
 Type=simple
@@ -94,11 +96,23 @@ WorkingDirectory=${WORKER_DIR}/src
 EnvironmentFile=${ENV_FILE}
 ExecStart=${VENV_DIR}/bin/python -m epv2_worker
 Restart=always
-RestartSec=5
+RestartSec=60
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=${SERVICE_NAME}
 TimeoutStopSec=30
+MemoryAccounting=yes
+MemoryHigh=640M
+MemoryMax=768M
+MemorySwapMax=128M
+CPUAccounting=yes
+CPUQuota=80%
+TasksMax=64
+OOMPolicy=stop
+OOMScoreAdjust=500
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
 
 [Install]
 WantedBy=multi-user.target

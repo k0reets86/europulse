@@ -26,7 +26,7 @@ final class EPV2_Story_Card_Builder {
 	// cached cards с outdated editorial_match / per-rubric stop-lists.
 	// Cards без current version (или с stale version) treated as missing
 	// at process_scheduled upfront check → rebuild fresh on next tick.
-	public const STORY_CARD_PROMPT_VERSION = '2026-05-11-v1';
+	public const STORY_CARD_PROMPT_VERSION = '2026-05-21-v2';
 
 	/**
 	 * Build a story card for a queue item.
@@ -80,12 +80,18 @@ final class EPV2_Story_Card_Builder {
 		] );
 
 		if ( is_wp_error( $response ) ) {
+			if ( class_exists( 'EPV2_Worker_Client' ) ) {
+				EPV2_Worker_Client::invalidate_availability_cache();
+			}
 			self::log_warn( 'wp_remote_post failed', [ 'error' => $response->get_error_message() ] );
 			return self::empty_card( 'transport: ' . $response->get_error_message() );
 		}
 		$code = (int) wp_remote_retrieve_response_code( $response );
 		$raw_body = (string) wp_remote_retrieve_body( $response );
 		if ( $code < 200 || $code >= 300 ) {
+			if ( class_exists( 'EPV2_Worker_Client' ) ) {
+				EPV2_Worker_Client::invalidate_availability_cache();
+			}
 			self::log_warn( 'non-2xx from worker', [ 'code' => $code, 'body' => substr( $raw_body, 0, 200 ) ] );
 			return self::empty_card( 'http_' . $code );
 		}

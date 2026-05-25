@@ -697,14 +697,44 @@ add_filter('rank_math/frontend/canonical', function ($canonical) {
 	return $canonical;
 }, 30);
 
+function europulse_current_rank_math_post_id(): int {
+	$post_id = (int) get_queried_object_id();
+	if ($post_id <= 0 && isset($GLOBALS['post']) && $GLOBALS['post'] instanceof WP_Post) {
+		$post_id = (int) $GLOBALS['post']->ID;
+	}
+	if ($post_id <= 0 || get_post_type($post_id) !== 'post') {
+		return 0;
+	}
+	return $post_id;
+}
+
 add_filter('rank_math/frontend/description', function ($description) {
 	if (is_admin()) {
 		return $description;
+	}
+	$post_id = europulse_current_rank_math_post_id();
+	if ($post_id > 0) {
+		$mirror_desc = trim((string) get_post_meta($post_id, '_epv2_meta_desc', true));
+		if ($mirror_desc !== '') {
+			return $mirror_desc;
+		}
 	}
 	if (is_front_page() || is_home()) {
 		return 'EuroPulse berichtet ueber Deutschland, Europa, die Welt, die Ukraine, Wirtschaft, Kultur, Sport und Community-Themen in drei Sprachen.';
 	}
 	return $description;
+}, 30);
+
+add_filter('rank_math/frontend/title', function ($title) {
+	if (is_admin()) {
+		return $title;
+	}
+	$post_id = europulse_current_rank_math_post_id();
+	if ($post_id <= 0) {
+		return $title;
+	}
+	$mirror_title = trim((string) get_post_meta($post_id, '_epv2_seo_title', true));
+	return $mirror_title !== '' ? $mirror_title : $title;
 }, 30);
 
 add_filter('rank_math/frontend/robots', function ($robots) {

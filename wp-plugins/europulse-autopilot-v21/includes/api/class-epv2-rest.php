@@ -379,6 +379,10 @@ final class EPV2_REST {
 		$cleanup['abandoned_started_runs'] = EPV2_Runs::cleanup_abandoned_started(120);
 		$cleanup['promoted_live_published_rows'] = EPV2_Queue::promote_live_published_rows(20);
 		$cleanup['reactivated_media_rows'] = EPV2_Queue::reactivate_media_recoverable_rows(5);
+		if (class_exists('EPV2_AI_Processor')) {
+			$cleanup['repaired_retry_process_stage_contract'] = EPV2_AI_Processor::repair_persisted_retry_process_stage_contract(200);
+			$cleanup['repaired_publish_finish_translation_contract'] = EPV2_AI_Processor::repair_persisted_publish_finish_translation_contract(200);
+		}
 		// P1.7 (audit-found order conflict): prune_new_stale + trim_new_queue
 		// run EARLY, перед reactivate/auto_route handlers. Если item over cap
 		// или TTL exceeded, removing it FIRST prevents downstream handlers

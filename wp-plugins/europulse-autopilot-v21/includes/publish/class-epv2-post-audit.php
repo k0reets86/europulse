@@ -13,6 +13,85 @@ final class EPV2_Post_Audit {
 		return $results;
 	}
 
+	public static function repair_rendered_text_after_publish(array $post_ids, ?object $item = null): array {
+		$results = [];
+		foreach ($post_ids as $lang => $post_id) {
+			$results[$lang] = self::audit_and_repair_rendered_text((int) $post_id, $item);
+		}
+		return $results;
+	}
+
+	private static function audit_and_repair_rendered_text(int $post_id, ?object $item = null): array {
+		if ($post_id <= 0 || get_post_type($post_id) !== 'post') {
+			return ['ok' => false, 'reason' => 'invalid_post'];
+		}
+
+		$post = get_post($post_id);
+		if (! $post instanceof WP_Post) {
+			return ['ok' => false, 'reason' => 'missing_post'];
+		}
+
+		$lang = self::post_language($post_id);
+		$updated = [
+			'title' => false,
+			'excerpt' => false,
+			'content' => false,
+		];
+		$text_repairs = [];
+
+		if (class_exists('EPV2_Quality_Gate')) {
+			$title = (string) $post->post_title;
+			$excerpt = (string) $post->post_excerpt;
+			$content = (string) $post->post_content;
+
+			$title_repair = EPV2_Quality_Gate::repair_rendered_text($title, $lang);
+			$excerpt_repair = EPV2_Quality_Gate::repair_rendered_text($excerpt, $lang);
+			if (! empty($title_repair['changed'])) {
+				$title = (string) ($title_repair['text'] ?? $title);
+				$updated['title'] = true;
+				$text_repairs = self::merge_repair_flags($text_repairs, (array) ($title_repair['repairs'] ?? []));
+			}
+			if (! empty($excerpt_repair['changed'])) {
+				$excerpt = (string) ($excerpt_repair['text'] ?? $excerpt);
+				$updated['excerpt'] = true;
+				$text_repairs = self::merge_repair_flags($text_repairs, (array) ($excerpt_repair['repairs'] ?? []));
+			}
+			if ($updated['title'] || $updated['excerpt']) {
+				wp_update_post([
+					'ID' => $post_id,
+					'post_title' => $title,
+					'post_excerpt' => $excerpt,
+				]);
+			}
+
+			$content_repair = EPV2_Quality_Gate::repair_rendered_text($content, $lang);
+			if (! empty($content_repair['changed'])) {
+				wp_update_post([
+					'ID' => $post_id,
+					'post_content' => (string) ($content_repair['text'] ?? $content),
+				]);
+				$updated['content'] = true;
+				$text_repairs = self::merge_repair_flags($text_repairs, (array) ($content_repair['repairs'] ?? []));
+			}
+
+			$quality = EPV2_Quality_Gate::record_rendered_post($post_id, $lang, $item, [
+				'context' => 'post_publish_rendered',
+				'repairs' => $text_repairs,
+				'updated' => $updated,
+				'audit_scope' => 'rendered_text_only',
+			]);
+		} else {
+			$quality = [];
+		}
+
+		return [
+			'ok' => true,
+			'post_id' => $post_id,
+			'updated' => $updated,
+			'quality' => $quality,
+		];
+	}
+
 	public static function audit_and_repair(int $post_id, array $payload = [], ?object $item = null): array {
 		if ($post_id <= 0 || get_post_type($post_id) !== 'post') {
 			return ['ok' => false, 'reason' => 'invalid_post'];
@@ -32,6 +111,8 @@ final class EPV2_Post_Audit {
 		$lang = self::post_language($post_id);
 
 		$updated = [
+			'title' => false,
+			'excerpt' => false,
 			'content' => false,
 			'media' => false,
 			'caption' => false,
@@ -40,6 +121,29 @@ final class EPV2_Post_Audit {
 			'slug' => false,
 		];
 
+		$text_repairs = [];
+		if (class_exists('EPV2_Quality_Gate')) {
+			$title_repair = EPV2_Quality_Gate::repair_rendered_text($title, $lang);
+			$excerpt_repair = EPV2_Quality_Gate::repair_rendered_text($excerpt, $lang);
+			if (! empty($title_repair['changed'])) {
+				$title = (string) ($title_repair['text'] ?? $title);
+				$updated['title'] = true;
+				$text_repairs = self::merge_repair_flags($text_repairs, (array) ($title_repair['repairs'] ?? []));
+			}
+			if (! empty($excerpt_repair['changed'])) {
+				$excerpt = (string) ($excerpt_repair['text'] ?? $excerpt);
+				$updated['excerpt'] = true;
+				$text_repairs = self::merge_repair_flags($text_repairs, (array) ($excerpt_repair['repairs'] ?? []));
+			}
+			if ($updated['title'] || $updated['excerpt']) {
+				wp_update_post([
+					'ID' => $post_id,
+					'post_title' => $title,
+					'post_excerpt' => $excerpt,
+				]);
+			}
+		}
+
 		$clean_content = self::remove_duplicate_excerpt_paragraphs($content, $excerpt);
 		$clean_content = self::remove_duplicate_featured_media_block($clean_content, $post_id);
 		$clean_content = self::sync_inline_media_blocks($clean_content, $payload, $lang, $updated);
@@ -47,6 +151,13 @@ final class EPV2_Post_Audit {
 		$clean_content = self::strip_standalone_source_fragments($clean_content);
 		$clean_content = self::refresh_related_and_source_blocks($clean_content, $post_id, $categories, $lang, $source_url);
 		$clean_content = self::strip_trailing_content_artifacts($clean_content);
+		if (class_exists('EPV2_Quality_Gate')) {
+			$content_repair = EPV2_Quality_Gate::repair_rendered_text($clean_content, $lang);
+			if (! empty($content_repair['changed'])) {
+				$clean_content = (string) ($content_repair['text'] ?? $clean_content);
+				$text_repairs = self::merge_repair_flags($text_repairs, (array) ($content_repair['repairs'] ?? []));
+			}
+		}
 		if ($clean_content !== $content && ! self::has_source_block($content) && self::has_source_block($clean_content)) {
 			$updated['source_block'] = true;
 		}
@@ -91,11 +202,32 @@ final class EPV2_Post_Audit {
 			}
 		}
 
+		$quality = [];
+		if (class_exists('EPV2_Quality_Gate')) {
+			$quality = EPV2_Quality_Gate::record_rendered_post($post_id, $lang, $item, [
+				'context' => 'post_publish_rendered',
+				'repairs' => $text_repairs,
+				'updated' => $updated,
+			]);
+		}
+
 		return [
 			'ok' => true,
 			'post_id' => $post_id,
 			'updated' => $updated,
+			'quality' => $quality,
 		];
+	}
+
+	private static function merge_repair_flags(array $base, array $next): array {
+		foreach ($next as $key => $value) {
+			$key = sanitize_key((string) $key);
+			if ($key === '') {
+				continue;
+			}
+			$base[$key] = ! empty($base[$key]) || ! empty($value);
+		}
+		return $base;
 	}
 
 	private static function remove_duplicate_excerpt_paragraphs(string $content, string $excerpt): string {

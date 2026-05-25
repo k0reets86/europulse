@@ -466,8 +466,52 @@ final class EPV2_Queue {
 		return self::get_item_summary($item_id);
 	}
 
+	private static function claim_next_workflow_item(bool $ignore_retry_after = false): ?object {
+		$active = self::active_owner_get();
+		if ($active) {
+			if (! $ignore_retry_after && self::active_owner_waiting_on_retry($active)) {
+				self::log_selector_step('skip_claim_workflow_active_owner_waiting_retry', ['item_id' => (int) $active->id]);
+			} else {
+				self::log_selector_step('skip_claim_workflow_active_owner_exists');
+				return null;
+			}
+		}
+
+		$candidate = self::preview_next_claimable_workflow_item($ignore_retry_after);
+		if (! ($candidate instanceof stdClass)) {
+			self::log_selector_step('no_claimable_workflow_items');
+			return null;
+		}
+
+		$item_id = (int) ($candidate->id ?? 0);
+		if ($item_id <= 0) {
+			self::log_selector_step('claim_workflow_item_failed_invalid_candidate');
+			return null;
+		}
+
+		if (! self::active_owner_claim($item_id)) {
+			self::log_selector_step('claim_workflow_item_failed', ['item_id' => $item_id]);
+			return null;
+		}
+
+		$workflow_step = self::workflow_infer_step_from_row($candidate);
+		self::workflow_system_update($item_id, [
+			'workflow_step' => $workflow_step,
+			'workflow_step_status' => 'claimed',
+			'workflow_last_error' => '',
+			'workflow_terminal_reason' => '',
+		]);
+		self::log_selector_step('claim_workflow_item', [
+			'item_id' => $item_id,
+			'state' => (string) ($candidate->state ?? ''),
+			'pipeline_stage' => self::row_processing_stage($candidate),
+			'workflow_step' => $workflow_step,
+		]);
+		return self::get_item_summary($item_id);
+	}
+
 	private static function preview_next_claimable_new_item(bool $ignore_retry_after = false): ?object {
-		$candidate = self::bridge_next_processable_row('new');
+		$candidate = self::bridge_next_processable_row('new', $ignore_retry_after);
 		if (! ($candidate instanceof stdClass)) {
 			return null;
 		}
@@ -491,6 +535,56 @@ final class EPV2_Queue {
 		return $item;
 	}
 
+	private static function preview_next_claimable_workflow_item(bool $ignore_retry_after = false): ?object {
+		$new_item = self::preview_next_claimable_new_item($ignore_retry_after);
+		$stage_resume_item = self::next_stage_resume_item($ignore_retry_after);
+
+		if (self::should_prefer_fresh_new_bucket($new_item, $stage_resume_item)) {
+			self::log_selector_step('preview_workflow_prefers_new_over_stage', [
+				'item_id' => (int) ($new_item->id ?? 0),
+			]);
+			return $new_item;
+		}
+		if ($stage_resume_item instanceof stdClass) {
+			self::log_selector_step('preview_workflow_stage_resume', [
+				'item_id' => (int) $stage_resume_item->id,
+			]);
+			return $stage_resume_item;
+		}
+
+		$auto_resume_item = self::next_auto_resume_item($ignore_retry_after);
+		if (self::should_prefer_fresh_new_bucket($new_item, $auto_resume_item)) {
+			self::log_selector_step('preview_workflow_prefers_new_over_auto', [
+				'item_id' => (int) ($new_item->id ?? 0),
+			]);
+			return $new_item;
+		}
+		if ($auto_resume_item instanceof stdClass) {
+			self::log_selector_step('preview_workflow_auto_resume', [
+				'item_id' => (int) $auto_resume_item->id,
+			]);
+			return $auto_resume_item;
+		}
+
+		if ($new_item instanceof stdClass) {
+			self::log_selector_step('preview_workflow_new', [
+				'item_id' => (int) $new_item->id,
+			]);
+			return $new_item;
+		}
+
+		$reserve_item = self::bridge_next_processable_row('reserve', $ignore_retry_after);
+		if ($reserve_item instanceof stdClass) {
+			self::log_selector_step('preview_workflow_reserve', [
+				'item_id' => (int) $reserve_item->id,
+			]);
+			return self::get_item_summary((int) $reserve_item->id) ?: $reserve_item;
+		}
+
+		self::log_selector_step('preview_workflow_none');
+		return null;
+	}
+
 	private static function selector_allows_new_candidate(object $item): bool {
 		if (
 			self::row_has_non_publish_grade_selection($item)
@@ -507,7 +601,7 @@ final class EPV2_Queue {
 		if ($active instanceof stdClass) {
 			return $active;
 		}
-		$claimed = self::claim_next_new_item($ignore_retry_after);
+		$claimed = self::claim_next_workflow_item($ignore_retry_after);
 		if ($claimed instanceof stdClass) {
 			return $claimed;
 		}
@@ -534,10 +628,10 @@ final class EPV2_Queue {
 			];
 		}
 
-		$candidate = self::preview_next_claimable_new_item($ignore_retry_after);
+		$candidate = self::preview_next_claimable_workflow_item($ignore_retry_after);
 		if ($candidate) {
 			return [
-				'mode' => 'claim_oldest_new',
+				'mode' => 'claim_next_workflow',
 				'item_id' => (int) $candidate->id,
 				'state' => (string) ($candidate->state ?? ''),
 				'workflow_step' => self::workflow_infer_step_from_row($candidate),
@@ -584,6 +678,9 @@ final class EPV2_Queue {
 		$candidates = array_values(array_filter($candidates, static function ($item) use ($ignore_retry_after): bool {
 			$stage = self::row_processing_stage($item);
 			if ($stage === '') {
+				return false;
+			}
+			if (! self::item_is_processable_read_only($item, $ignore_retry_after)) {
 				return false;
 			}
 			$state = (string) ($item->state ?? '');
@@ -656,6 +753,9 @@ final class EPV2_Queue {
 		$candidates = array_values(array_filter($candidates, static function ($item) use ($ignore_retry_after): bool {
 			$stage = self::row_processing_stage($item);
 			if ($stage !== '') {
+				return false;
+			}
+			if (! self::item_is_processable_read_only($item, $ignore_retry_after)) {
 				return false;
 			}
 			$state = (string) ($item->state ?? '');
@@ -746,7 +846,7 @@ final class EPV2_Queue {
 			if ($active && self::item_is_processable_read_only($active, false)) {
 				return true;
 			}
-			$candidate = self::preview_next_claimable_new_item(false);
+			$candidate = self::preview_next_claimable_workflow_item(false);
 			return $candidate instanceof stdClass;
 		}
 		$focused_item = self::focused_automation_item(false);
@@ -786,6 +886,9 @@ final class EPV2_Queue {
 			return false;
 		}
 		if (self::row_has_live_published_posts($item)) {
+			return false;
+		}
+		if (self::row_has_chronic_recycler_terminal_marker($item) || self::row_exceeds_chronic_process_cap($item)) {
 			return false;
 		}
 		if (EPV2_AI_Processor::item_has_expired_live_angle($item)) {
@@ -855,7 +958,7 @@ final class EPV2_Queue {
 		$payload = self::row_payload($item);
 		if ($payload !== []) {
 			$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
-			if (self::payload_has_publish_limit_override($payload, $item)) {
+			if (self::payload_has_manual_selection_override($payload)) {
 				return false;
 			}
 		}
@@ -872,11 +975,15 @@ final class EPV2_Queue {
 		$payload = self::row_payload($item);
 		if ($payload !== []) {
 			$payload = EPV2_AI_Processor::normalize_existing_payload($payload, false);
-			if (self::payload_has_publish_limit_override($payload, $item)) {
+			if (self::payload_has_manual_selection_override($payload)) {
 				return false;
 			}
 		}
 		return in_array(self::row_selection_decision($item), ['low', 'reject'], true);
+	}
+
+	private static function payload_has_manual_selection_override(array $payload): bool {
+		return ! empty($payload['_meta']['manual_mode']);
 	}
 
 	private static function planner_selected_soft_candidate(object $item): bool {
@@ -1224,9 +1331,17 @@ final class EPV2_Queue {
 		$queue_table = $wpdb->prefix . 'epv2_queue';
 		// Find candidates: items with high run count in last 24h that haven't
 		// reached terminal state yet (still cycling through).
+		$infra_error_sql = "(
+			JSON_UNQUOTE(JSON_EXTRACT(r.payload, '$.last_error')) LIKE '%external worker unavailable%'
+			OR JSON_UNQUOTE(JSON_EXTRACT(r.payload, '$.last_error')) LIKE '%Worker unreachable%'
+			OR JSON_UNQUOTE(JSON_EXTRACT(r.payload, '$.last_error')) LIKE '%Worker unavailable before process%'
+			OR JSON_UNQUOTE(JSON_EXTRACT(r.payload, '$.last_error')) LIKE '%cURL error 28%'
+			OR JSON_UNQUOTE(JSON_EXTRACT(r.payload, '$.last_error')) LIKE '%Operation timed out%'
+		)";
 		$rows = $wpdb->get_results($wpdb->prepare(
 			"SELECT q.id, q.state, q.original_title, q.admin_notes,
-				COUNT(r.id) AS run_count
+				COUNT(r.id) AS run_count,
+				SUM(CASE WHEN {$infra_error_sql} THEN 0 ELSE 1 END) AS noninfra_run_count
 			FROM {$queue_table} q
 			INNER JOIN {$runs_table} r
 				ON CAST(JSON_UNQUOTE(JSON_EXTRACT(r.payload, '$.last_item_id')) AS UNSIGNED) = q.id
@@ -1234,7 +1349,7 @@ final class EPV2_Queue {
 				AND r.started_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
 			WHERE q.state IN ('new', 'retry_process', 'processing_de', 'manual_review', 'ready_review', 'ready_publish')
 			GROUP BY q.id
-			HAVING run_count >= %d
+			HAVING noninfra_run_count >= %d
 			ORDER BY run_count DESC
 			LIMIT %d",
 			$min_runs_24h,
@@ -1258,17 +1373,21 @@ final class EPV2_Queue {
 				'state' => 'rejected',
 				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 				'error_message' => sprintf(
-					'Chronic recycler permanent reject: %d process runs за 24 часа (cap=%d). Pipeline тратит AI без шанса на публикацию, не пересматривается перезапуском.',
+					'Chronic recycler permanent reject: %d non-infrastructure process runs за 24 часа (%d total, cap=%d). Pipeline тратит AI без шанса на публикацию, не пересматривается перезапуском.',
+					(int) $row->noninfra_run_count,
 					(int) $row->run_count,
 					$min_runs_24h
 				),
 				'updated_at' => current_time('mysql', true),
-			], ['id' => (int) $row->id]);
-			$rejected++;
+				], ['id' => (int) $row->id]);
+				delete_transient('epv2_bridge_has_processable_v1');
+				self::clear_active_automation_item((int) $row->id);
+				$rejected++;
 			if (class_exists('EPV2_Logger')) {
 				EPV2_Logger::warning('queue', "force_reject_chronic_recycler: id={$row->id} runs={$row->run_count}", [
 					'item_id' => (int) $row->id,
 					'run_count' => (int) $row->run_count,
+					'noninfra_run_count' => (int) $row->noninfra_run_count,
 					'title' => mb_substr((string) $row->original_title, 0, 80),
 				]);
 			}
@@ -1960,11 +2079,15 @@ final class EPV2_Queue {
 					]
 				);
 			}
+			$gate_blockers = array_values(array_filter(array_map('strval', (array) ($gate['blockers'] ?? []))));
+			$gate_blocker_text = implode(', ', $gate_blockers);
 			$message = $selection_blocked
 				? 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($gate['selection_decision'] ?? 'unknown') . '".'
 				: ($state === 'manual_review'
 					? 'Материал отправлен на ручную проверку: стадия "' . ($stage !== '' ? $stage : 'unknown') . '" превысила лимит попыток (' . (string) $attempts . '/' . (string) $limit_for_stage . '). Importance score=' . (string) $importance . '/' . (string) $importance_threshold . '.'
-					: 'Материал отбракован после исчерпания попыток: стадия "' . ($stage !== '' ? $stage : 'unknown') . '", importance score=' . (string) $importance . ' ниже порога ' . (string) $importance_threshold . '.');
+					: ($gate_blocker_text !== ''
+						? 'Материал отбракован после исчерпания попыток: стадия "' . ($stage !== '' ? $stage : 'unknown') . '" не прошла publish gate (' . $gate_blocker_text . ').'
+						: 'Материал отбракован после исчерпания попыток: стадия "' . ($stage !== '' ? $stage : 'unknown') . '", importance score=' . (string) $importance . '/' . (string) $importance_threshold . '.'));
 			self::mark_state((int) $item->id, $state, [
 				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 				'error_message' => $message,
@@ -2826,6 +2949,14 @@ final class EPV2_Queue {
 		if ($current instanceof stdClass && self::row_has_live_published_posts($current)) {
 			return 'published';
 		}
+		if (
+			$current instanceof stdClass
+			&& self::row_has_chronic_recycler_terminal_marker($current)
+			&& ! self::workflow_is_terminal_state($state)
+		) {
+			$current_state = self::normalize_legacy_publish_state((string) ($current->state ?? 'rejected'));
+			return self::workflow_is_terminal_state($current_state) ? $current_state : 'rejected';
+		}
 		if ($current instanceof stdClass && $state === 'ready_review') {
 			$notes = json_decode((string) ($current->admin_notes ?? ''), true);
 			$notes = is_array($notes) ? $notes : [];
@@ -3595,6 +3726,60 @@ final class EPV2_Queue {
 			return false;
 		}
 		return self::score_from_row((array) $row) < 46;
+	}
+
+	private static function row_has_chronic_recycler_terminal_marker(object $row): bool {
+		$notes = self::row_notes($row);
+		$system = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		$terminal_reason = sanitize_key((string) ($system['workflow_terminal_reason'] ?? ''));
+		$quarantine_reason = sanitize_key((string) ($system['quarantine_reason'] ?? ''));
+		if ($terminal_reason === 'chronic_recycler_lifetime_cap' || str_contains($quarantine_reason, 'process_runs_')) {
+			return true;
+		}
+		return stripos((string) ($row->error_message ?? ''), 'Chronic recycler permanent reject') !== false;
+	}
+
+	private static function row_exceeds_chronic_process_cap(object $row, int $min_runs_24h = 25): bool {
+		$item_id = (int) ($row->id ?? 0);
+		if ($item_id <= 0) {
+			return false;
+		}
+		$state = (string) ($row->state ?? '');
+		if (
+			$state === 'new'
+			&& self::row_processing_stage($row) === ''
+			&& self::workflow_step($row) === ''
+			&& self::workflow_owner_token($row) === ''
+		) {
+			return false;
+		}
+
+		static $cache = [];
+		$cache_key = $item_id . ':' . $min_runs_24h;
+		if (array_key_exists($cache_key, $cache)) {
+			return (bool) $cache[$cache_key];
+		}
+
+		global $wpdb;
+		$runs_table = $wpdb->prefix . 'epv2_runs';
+		$last_error = "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.last_error')), '')";
+		$count = (int) $wpdb->get_var($wpdb->prepare(
+			"SELECT COUNT(*)
+			FROM {$runs_table}
+			WHERE job_name = 'process'
+				AND started_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+				AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.last_item_id')) AS UNSIGNED) = %d
+				AND NOT (
+					{$last_error} LIKE '%%external worker unavailable%%'
+					OR {$last_error} LIKE '%%Worker unreachable%%'
+					OR {$last_error} LIKE '%%Worker unavailable before process%%'
+					OR {$last_error} LIKE '%%cURL error 28%%'
+					OR {$last_error} LIKE '%%Operation timed out%%'
+				)",
+			$item_id
+		));
+		$cache[$cache_key] = $count >= $min_runs_24h;
+		return (bool) $cache[$cache_key];
 	}
 
 	private static function review_rebuild_exhausted(object $row): bool {
@@ -4961,7 +5146,7 @@ final class EPV2_Queue {
 		return null;
 	}
 
-	private static function bridge_next_processable_row(string $state): ?object {
+	private static function bridge_next_processable_row(string $state, bool $ignore_retry_after = false): ?object {
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 		// 2026-05-12 W3.1: ordering fix. Раньше ORDER BY created_at ASC
@@ -5000,10 +5185,10 @@ final class EPV2_Queue {
 			if (self::item_requires_manual_confirmation_state($row)) {
 				continue;
 			}
-			if (self::workflow_waiting_not_before($row)) {
+			if (! $ignore_retry_after && self::workflow_waiting_not_before($row)) {
 				continue;
 			}
-			if (! self::item_is_processable_read_only($row, false)) {
+			if (! self::item_is_processable_read_only($row, $ignore_retry_after)) {
 				continue;
 			}
 			if ((string) ($row->state ?? '') === 'new') {

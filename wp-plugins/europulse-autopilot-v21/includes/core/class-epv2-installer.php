@@ -209,6 +209,28 @@ final class EPV2_Installer {
 			KEY created_at (created_at)
 		) {$charset};";
 
+		$tables[] = "CREATE TABLE {$prefix}epv2_quality_audit (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			queue_id BIGINT UNSIGNED NULL,
+			post_id BIGINT UNSIGNED NULL,
+			source_id BIGINT UNSIGNED NULL,
+			phase VARCHAR(40) NOT NULL,
+			verdict VARCHAR(20) NOT NULL,
+			score TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			blockers LONGTEXT NULL,
+			warnings LONGTEXT NULL,
+			signals LONGTEXT NULL,
+			worker_json LONGTEXT NULL,
+			context_json LONGTEXT NULL,
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY (id),
+			KEY queue_id (queue_id),
+			KEY post_id (post_id),
+			KEY source_id (source_id),
+			KEY phase_created (phase, created_at),
+			KEY verdict_created (verdict, created_at)
+		) {$charset};";
+
 			$tables[] = "CREATE TABLE {$prefix}epv2_runs (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 			job_name VARCHAR(128) NOT NULL,

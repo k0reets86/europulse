@@ -166,13 +166,18 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             if isinstance(sc, dict) and sc:
                 _story_card_init = sc
 
-    # Group F: override category from semantic content_type when unambiguous;
-    # story card category wins over both when its confidence is high enough.
+    # Group F: keep the source/selector rubric as the primary category.
+    # The local semantic content_type is a shallow heuristic and may see
+    # ambiguous words such as "match" or "league" in politics copy. Use it
+    # only as a fallback when no category was proposed. Story Card category
+    # still wins over both when its confidence is high enough.
     semantic_cat = _CONTENT_TYPE_CATEGORY.get(ctx.semantic.content_type, "")
-    if semantic_cat:
+    if req.category_proposed:
+        ctx.categories = [req.category_proposed] if req.category_proposed else []
+    elif semantic_cat:
         ctx.categories = [semantic_cat]
     else:
-        ctx.categories = [req.category_proposed] if req.category_proposed else []
+        ctx.categories = []
     if _story_card_init:
         card_cat = (_story_card_init.get("category") or {})
         primary = str(card_cat.get("primary") or "").strip()
@@ -218,7 +223,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     card_facts_count = 0
     if isinstance(_story_card_init, dict):
         card_facts_count = len(_story_card_init.get("key_facts") or [])
-    if source_word_count < 18 and card_facts_count < 3:
+    if source_word_count < 35:
         ctx.blockers.append("Primary source too thin for autopublish")
     force_enrichment = source_word_count < 500
     supporting_urls: list[str] = []
@@ -242,10 +247,13 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     ctx.effective_length_profile = effective_length_profile
     if force_enrichment:
         supporting_count = len(supporting_rich) if supporting_rich else 0
-        # Только supercatastrophically thin source без enrichment → brief.
-        # Иначе оставляем standard — AI имеет supporting sources + dossier
-        # для разворачивания нормальной статьи.
-        if source_word_count < 60 and supporting_count < 2:
+        supporting_content_count = _supporting_entries_with_loaded_content(supporting_rich)
+        # Bing/Google supporting entries currently carry title+URL only. They
+        # are useful for corroboration/search, but not as factual material.
+        # Thin RSS snippets must therefore stay brief unless we actually loaded
+        # supporting excerpt/body text. Counting title-only URLs as "sources"
+        # was the root cause of inflated articles with invented detail.
+        if source_word_count < 90 and supporting_content_count < 2:
             effective_length_profile = "brief"
         elif source_word_count < 500 and effective_length_profile not in {"brief", "standard"}:
             effective_length_profile = "standard"
@@ -362,6 +370,11 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
 
     # Phase 2.3: rubric_slug — prefer category_final, fall back to category_proposed.
     rewrite_rubric = (req.category_final or req.category_proposed or "").strip().lower()
+    if source_word_count < 90 and _supporting_entries_with_loaded_content(supporting_rich) < 2:
+        rewrite_kind = "news_brief"
+        ctx.warnings.append(
+            "thin_primary_source_forced_brief: source has fewer than 90 words and only title-only supporting URLs"
+        )
 
     rewrite = await rewrite_to_german(
         original_title=req.original_title,
@@ -869,6 +882,26 @@ async def _search_supporting_sources_rich(
     except Exception:
         pass
     return result
+
+
+def _supporting_entries_with_loaded_content(entries: list[dict[str, str]]) -> int:
+    """Count supporting sources that provide actual fact text.
+
+    A title+URL is not enough to expand a story. The rewriter may use it as a
+    corroboration/search signal, but every factual sentence still has to come
+    from loaded primary/supporting text.
+    """
+    total = 0
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        text = " ".join([
+            str(entry.get("excerpt") or ""),
+            str(entry.get("content") or ""),
+        ]).strip()
+        if len(text.split()) >= 25:
+            total += 1
+    return total
 
 
 def _clean_original_text(raw: str) -> str:

@@ -381,6 +381,7 @@ final class EPV2_Publisher {
 				self::update_post_meta_if_changed($post_id, '_epv2_media_origin_url', (string) ($media_meta['origin_url'] ?? ''));
 				self::update_post_meta_if_changed($post_id, '_epv2_media_credit', (string) ($media_meta['credit'] ?? ''));
 				self::update_post_meta_if_changed($post_id, '_epv2_media_caption', (string) ($media_meta['caption'] ?? ''));
+				self::sync_featured_attachment_caption($post_id, (string) $lang, (string) ($media_meta['caption'] ?? ''));
 				if (method_exists(EPV2_Media::class, 'media_diagnostics')) {
 					self::update_post_meta_if_changed($post_id, '_epv2_media_diagnostics', wp_json_encode(EPV2_Media::media_diagnostics(
 						$media_url,
@@ -417,7 +418,10 @@ final class EPV2_Publisher {
 		self::synchronize_bundle_thumbnail($post_ids);
 		$log_step('thumbnails_synced', ['post_count' => count($post_ids)]);
 
-		if (! self::skip_heavy_post_publish_audit()) {
+		if (self::skip_heavy_post_publish_audit()) {
+			EPV2_Post_Audit::repair_rendered_text_after_publish($post_ids, $item);
+			$log_step('post_text_audit_complete', ['post_count' => count($post_ids)]);
+		} else {
 			EPV2_Post_Audit::repair_after_publish($post_ids, $payload, $item);
 			$log_step('post_audit_complete', ['post_count' => count($post_ids)]);
 		}
@@ -632,6 +636,7 @@ final class EPV2_Publisher {
 			self::update_post_meta_if_changed($post_id, '_epv2_media_origin_url', (string) ($media_meta['origin_url'] ?? ''));
 			self::update_post_meta_if_changed($post_id, '_epv2_media_credit', (string) ($media_meta['credit'] ?? ''));
 			self::update_post_meta_if_changed($post_id, '_epv2_media_caption', (string) ($media_meta['caption'] ?? ''));
+			self::sync_featured_attachment_caption($post_id, (string) $lang, (string) ($media_meta['caption'] ?? ''));
 			if (method_exists(EPV2_Media::class, 'media_diagnostics')) {
 				self::update_post_meta_if_changed($post_id, '_epv2_media_diagnostics', wp_json_encode(EPV2_Media::media_diagnostics(
 					$media_url,
@@ -815,6 +820,7 @@ final class EPV2_Publisher {
 	 */
 	public static function strip_unbacked_backlinks(string $content): string {
 		if ($content === '') return $content;
+		$content = self::strip_foreign_europulse_links($content);
 		// Markers: phrase variations across DE/UK/EN. If none present → fast return.
 		// 2026-05-13 hotfix: добавлены "EuroPulse раніше" (catches "EuroPulse раніше повідомляв"),
 		// "EuroPulse has " (EN aux verb form), "EuroPulse hatte" (DE perfect). Старые markers
@@ -874,6 +880,28 @@ final class EPV2_Publisher {
 		$joined = preg_replace('/<p[^>]*>\s*<\/p>/iu', '', $joined);
 		$joined = preg_replace('/(\n\s*){3,}/u', "\n\n", (string) $joined);
 		return (string) $joined;
+	}
+
+	private static function strip_foreign_europulse_links(string $content): string {
+		$home_host = strtolower((string) wp_parse_url(home_url('/'), PHP_URL_HOST));
+		$home_host = preg_replace('/^www\./i', '', $home_host) ?: '';
+		$hosts = ['europulse.today', 'europulse.eu'];
+		foreach ($hosts as $host) {
+			if ($home_host !== '' && $home_host === $host) {
+				continue;
+			}
+			$content = preg_replace(
+				'/<a\b[^>]*href=["\']https?:\/\/(?:www\.)?' . preg_quote($host, '/') . '\b[^"\']*["\'][^>]*>(.*?)<\/a>/isu',
+				'$1',
+				$content
+			) ?? $content;
+			$content = preg_replace(
+				'/https?:\/\/(?:www\.)?' . preg_quote($host, '/') . '\b[^\s<]*/iu',
+				'',
+				$content
+			) ?? $content;
+		}
+		return trim((string) preg_replace("/\n{3,}/", "\n\n", $content));
 	}
 
 	private static function build_post_content(string $content, string $excerpt, string $media_url, array $inline_media_urls, string $source_url, string $lang, array $categories, int $post_id = 0, array $link_sources = []): string {
@@ -1135,6 +1163,28 @@ final class EPV2_Publisher {
 			return;
 		}
 		update_post_meta($post_id, $meta_key, $value);
+	}
+
+	private static function sync_featured_attachment_caption(int $post_id, string $lang, string $caption): void {
+		$primary_lang = (string) EPV2_Settings::get('primary_language', 'de');
+		if ($lang !== $primary_lang || $caption === '') {
+			return;
+		}
+		$thumb_id = (int) get_post_thumbnail_id($post_id);
+		if ($thumb_id <= 0) {
+			return;
+		}
+		$caption = sanitize_text_field(wp_strip_all_tags($caption));
+		$update = ['ID' => $thumb_id];
+		if ((string) get_post_field('post_excerpt', $thumb_id) !== $caption) {
+			$update['post_excerpt'] = $caption;
+		}
+		if (trim((string) get_post_field('post_content', $thumb_id)) === '') {
+			$update['post_content'] = $caption;
+		}
+		if (count($update) > 1) {
+			wp_update_post($update);
+		}
 	}
 
 	private static function apply_selection_meta(int $post_id, array $payload): void {

@@ -1037,7 +1037,12 @@ function europulse_home_post_is_eligible(int $post_id, ?WP_Post $post = null): b
 		$selection_cache[$post_id] = true;
 		$queue_id = (int) get_post_meta($post_id, '_epv2_queue_id', true);
 
-		if ($queue_id > 0) {
+		$post_decision = sanitize_key((string) get_post_meta($post_id, 'europulse_selection_decision', true));
+		$post_score = (int) get_post_meta($post_id, 'europulse_selection_score', true);
+		$queue_decision = '';
+		$queue_score = 0;
+
+		if ($post_decision === '' && $queue_id > 0) {
 			global $wpdb;
 			$admin_notes = $wpdb->get_var(
 				$wpdb->prepare(
@@ -1046,17 +1051,21 @@ function europulse_home_post_is_eligible(int $post_id, ?WP_Post $post = null): b
 				)
 			);
 			$data = json_decode((string) $admin_notes, true);
-			$decision = strtolower((string) ($data['selection']['decision'] ?? ''));
-			$score = (int) ($data['selection']['score'] ?? 0);
-			$is_breaking = (int) get_post_meta($post_id, 'europulse_breaking', true) === 1;
-			$is_top_story = (int) get_post_meta($post_id, 'europulse_top_story', true) === 1;
+			$queue_decision = sanitize_key((string) ($data['selection']['decision'] ?? ''));
+			$queue_score = (int) ($data['selection']['score'] ?? 0);
+		}
+		$selection = europulse_home_resolve_selection($post_decision, $post_score, $queue_decision, $queue_score);
+		$decision = (string) $selection['decision'];
+		$score = (int) $selection['score'];
 
-			if (! $is_breaking && ! $is_top_story) {
-				if ($decision === 'reject' || $decision === 'low') {
-					$selection_cache[$post_id] = false;
-				} elseif ($decision === 'review' && $score < 40) {
-					$selection_cache[$post_id] = false;
-				}
+		$is_breaking = (int) get_post_meta($post_id, 'europulse_breaking', true) === 1;
+		$is_top_story = (int) get_post_meta($post_id, 'europulse_top_story', true) === 1;
+
+		if (! $is_breaking && ! $is_top_story) {
+			if ($decision === 'reject' || $decision === 'low') {
+				$selection_cache[$post_id] = false;
+			} elseif ($decision === 'review' && $score < 40) {
+				$selection_cache[$post_id] = false;
 			}
 		}
 	}
@@ -1066,6 +1075,25 @@ function europulse_home_post_is_eligible(int $post_id, ?WP_Post $post = null): b
 	}
 
 	return true;
+}
+
+function europulse_home_resolve_selection(string $post_decision, int $post_score, string $queue_decision = '', int $queue_score = 0): array {
+	$post_decision = sanitize_key($post_decision);
+	$queue_decision = sanitize_key($queue_decision);
+
+	if ($post_decision !== '') {
+		return [
+			'decision' => $post_decision,
+			'score' => max(0, $post_score),
+			'source' => 'post',
+		];
+	}
+
+	return [
+		'decision' => $queue_decision,
+		'score' => max(0, $queue_score),
+		'source' => $queue_decision !== '' ? 'queue' : '',
+	];
 }
 
 add_action('pre_get_posts', function (WP_Query $query): void {
@@ -1175,7 +1203,7 @@ function europulse_autopilot_home_pool(): array {
 		"SELECT post_id, meta_key, meta_value
 		FROM {$wpdb->postmeta}
 		WHERE post_id IN ({$post_ids_sql})
-		  AND meta_key IN ('_epv2_queue_id','_epv2_primary_category','_epv3_primary_category','_epv3_context_score','_epv3_seo_score','_epv3_google_score','_epv3_release_score','europulse_breaking','europulse_breaking_until','europulse_top_story','europulse_story_format','europulse_story_topic','europulse_popular_score')",
+		  AND meta_key IN ('_epv2_queue_id','_epv2_primary_category','_epv3_primary_category','_epv3_context_score','_epv3_seo_score','_epv3_google_score','_epv3_release_score','europulse_breaking','europulse_breaking_until','europulse_top_story','europulse_story_format','europulse_story_topic','europulse_popular_score','europulse_selection_decision','europulse_selection_score')",
 		ARRAY_A
 	);
 
@@ -1271,6 +1299,13 @@ function europulse_autopilot_home_pool(): array {
 		if ($story_score <= 0) {
 			$story_score = europulse_epv3_story_score_from_meta($meta);
 		}
+		$selection = europulse_home_resolve_selection(
+			(string) ($meta['europulse_selection_decision'] ?? ''),
+			(int) ($meta['europulse_selection_score'] ?? 0),
+			(string) ($queue_map[$queue_id]['selection_decision'] ?? ''),
+			(int) ($queue_map[$queue_id]['selection_score'] ?? 0)
+		);
+
 		$pool[$localized_post_id] = [
 			'post_id' => $localized_post_id,
 			'representative_post_id' => $representative_id,
@@ -1285,8 +1320,8 @@ function europulse_autopilot_home_pool(): array {
 			'topic_label' => $topic_label,
 			'popular_score' => (int) ($meta['europulse_popular_score'] ?? 0),
 			'story_score' => $story_score,
-			'selection_decision' => (string) ($queue_map[$queue_id]['selection_decision'] ?? ''),
-			'selection_score' => (int) ($queue_map[$queue_id]['selection_score'] ?? 0),
+			'selection_decision' => (string) $selection['decision'],
+			'selection_score' => (int) $selection['score'],
 			'content_length' => (int) $content_length,
 			'has_video' => europulse_has_video($representative_id),
 		];

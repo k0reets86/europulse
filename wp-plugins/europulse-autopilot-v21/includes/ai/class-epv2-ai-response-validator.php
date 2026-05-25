@@ -454,6 +454,8 @@ final class EPV2_AI_Response_Validator {
 		$haystack_norm = preg_replace('/[\s.,]/', '', $haystack);
 
 		$de_content = trim(wp_strip_all_tags((string) ($payload['languages']['de']['content'] ?? '')));
+		$de_content = preg_replace('#https?://\S+#iu', '', $de_content) ?? $de_content;
+		$de_content = preg_replace('/\b\d{1,3}(?:\.\d{1,3}){3}\b/u', '', $de_content) ?? $de_content;
 		if ($de_content === '') return [];
 
 		// Match patterns: 4+ digit numbers with German separators, или X,Y Prozent

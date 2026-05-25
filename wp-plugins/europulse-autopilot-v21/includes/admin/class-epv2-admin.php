@@ -87,6 +87,7 @@ final class EPV2_Admin {
 		add_submenu_page('epv2-dashboard', 'Обзор', 'Обзор', $page_cap, 'epv2-dashboard', [self::class, 'dashboard']);
 		add_submenu_page('epv2-dashboard', 'Источники', 'Источники', $page_cap, 'epv2-sources', [self::class, 'sources']);
 		add_submenu_page('epv2-dashboard', 'Очередь', 'Очередь', $page_cap, 'epv2-queue', [self::class, 'queue']);
+		add_submenu_page('epv2-dashboard', 'Качество', 'Качество', $page_cap, 'epv2-quality', [self::class, 'quality_page']);
 		add_submenu_page('epv2-dashboard', 'Настройки', 'Настройки', $page_cap, 'epv2-settings', [self::class, 'settings']);
 		add_submenu_page('epv2-dashboard', 'Ручной режим', 'Ручной режим', $page_cap, 'epv2-manual', [self::class, 'manual']);
 		add_submenu_page('epv2-dashboard', 'Проверка материала', 'Проверка материала', $page_cap, 'epv2-review', [self::class, 'review']);
@@ -254,6 +255,97 @@ final class EPV2_Admin {
 		echo '<tr><th>AI запросы сегодня</th><td>' . esc_html((string) $budget['rewritten_today']) . ' / ' . esc_html((string) $budget['request_limit']) . '</td></tr>';
 		echo '<tr><th>AI токены сегодня</th><td>' . esc_html((string) $budget['tokens_today']) . ' / ' . esc_html((string) $budget['token_limit']) . '</td></tr>';
 		echo '</tbody></table></div>';
+	}
+
+	public static function quality_page(): void {
+		$summary = class_exists('EPV2_Quality_Audit') ? EPV2_Quality_Audit::summary(24) : ['available' => false];
+		$week = class_exists('EPV2_Quality_Audit') ? EPV2_Quality_Audit::summary(168) : ['available' => false];
+		$histogram = class_exists('EPV2_Quality_Audit') ? EPV2_Quality_Audit::failure_histogram(24) : ['available' => false, 'buckets' => []];
+		$sources = class_exists('EPV2_Quality_Audit') ? EPV2_Quality_Audit::source_breakdown(168) : ['available' => false, 'rows' => []];
+		$latest = class_exists('EPV2_Quality_Audit') ? EPV2_Quality_Audit::latest(50) : [];
+
+		echo '<div class="wrap"><h1>EuroPulse: качество</h1>';
+		echo '<p style="max-width:980px;color:#50575e">Страница показывает shadow quality gate. На этом этапе данные только наблюдательные: они не меняют решение publish gate и не блокируют публикации.</p>';
+
+		if (empty($summary['available'])) {
+			echo '<div class="notice notice-warning"><p>Таблица quality audit ещё недоступна. После деплоя upgrader должен создать <code>ep_epv2_quality_audit</code>.</p></div>';
+			echo '</div>';
+			return;
+		}
+
+		self::render_quality_summary_table('Publish gate shadow — 24h', (array) ($summary['rows'] ?? []));
+		self::render_quality_summary_table('Publish gate shadow — 7d', (array) ($week['rows'] ?? []));
+
+		echo '<h2>Top blockers / warnings за 24h</h2>';
+		$buckets = (array) ($histogram['buckets'] ?? []);
+		if ($buckets === []) {
+			echo '<p>Нет review/reject/retry quality events за 24h.</p>';
+		} else {
+			echo '<table class="widefat striped" style="max-width:760px"><thead><tr><th>Причина</th><th>Событий</th></tr></thead><tbody>';
+			foreach (array_slice($buckets, 0, 20, true) as $reason => $count) {
+				echo '<tr><td><code>' . esc_html((string) $reason) . '</code></td><td>' . esc_html((string) (int) $count) . '</td></tr>';
+			}
+			echo '</tbody></table>';
+		}
+
+		echo '<h2>Источники за 7d</h2>';
+		$source_rows = (array) ($sources['rows'] ?? []);
+		if ($source_rows === []) {
+			echo '<p>Нет source breakdown.</p>';
+		} else {
+			echo '<table class="widefat striped" style="max-width:980px"><thead><tr><th>Source ID</th><th>Источник</th><th>Verdict</th><th>Событий</th><th>Avg score</th></tr></thead><tbody>';
+			foreach ($source_rows as $row) {
+				echo '<tr>';
+				echo '<td>' . esc_html((string) (int) ($row['source_id'] ?? 0)) . '</td>';
+				echo '<td>' . esc_html((string) ($row['source_name'] ?? '')) . '</td>';
+				echo '<td><code>' . esc_html((string) ($row['verdict'] ?? '')) . '</code></td>';
+				echo '<td>' . esc_html((string) (int) ($row['n'] ?? 0)) . '</td>';
+				echo '<td>' . esc_html((string) ($row['avg_score'] ?? '')) . '</td>';
+				echo '</tr>';
+			}
+			echo '</tbody></table>';
+		}
+
+		echo '<h2>Последние quality events</h2>';
+		if ($latest === []) {
+			echo '<p>Пока нет quality audit записей.</p>';
+		} else {
+			echo '<table class="widefat striped"><thead><tr><th>Время UTC</th><th>Queue</th><th>Post</th><th>Source</th><th>Phase</th><th>Verdict</th><th>Score</th><th>Blockers</th><th>Warnings</th></tr></thead><tbody>';
+			foreach ($latest as $row) {
+				echo '<tr>';
+				echo '<td>' . esc_html((string) ($row['created_at'] ?? '')) . '</td>';
+				echo '<td>' . esc_html((string) (int) ($row['queue_id'] ?? 0)) . '</td>';
+				echo '<td>' . esc_html((string) (int) ($row['post_id'] ?? 0)) . '</td>';
+				echo '<td>' . esc_html((string) (int) ($row['source_id'] ?? 0)) . '</td>';
+				echo '<td><code>' . esc_html((string) ($row['phase'] ?? '')) . '</code></td>';
+				echo '<td><code>' . esc_html((string) ($row['verdict'] ?? '')) . '</code></td>';
+				echo '<td>' . esc_html((string) (int) ($row['score'] ?? 0)) . '</td>';
+				echo '<td>' . esc_html(implode(', ', array_slice((array) ($row['blockers'] ?? []), 0, 6))) . '</td>';
+				echo '<td>' . esc_html(implode(', ', array_slice((array) ($row['warnings'] ?? []), 0, 6))) . '</td>';
+				echo '</tr>';
+			}
+			echo '</tbody></table>';
+		}
+
+		echo '</div>';
+	}
+
+	private static function render_quality_summary_table(string $title, array $rows): void {
+		echo '<h2>' . esc_html($title) . '</h2>';
+		if ($rows === []) {
+			echo '<p>Нет записей за период.</p>';
+			return;
+		}
+		echo '<table class="widefat striped" style="max-width:760px"><thead><tr><th>Phase</th><th>Verdict</th><th>Событий</th><th>Avg score</th></tr></thead><tbody>';
+		foreach ($rows as $row) {
+			echo '<tr>';
+			echo '<td><code>' . esc_html((string) ($row['phase'] ?? '')) . '</code></td>';
+			echo '<td><code>' . esc_html((string) ($row['verdict'] ?? '')) . '</code></td>';
+			echo '<td>' . esc_html((string) (int) ($row['n'] ?? 0)) . '</td>';
+			echo '<td>' . esc_html((string) ($row['avg_score'] ?? '')) . '</td>';
+			echo '</tr>';
+		}
+		echo '</tbody></table>';
 	}
 
 	public static function sources(): void {
@@ -1097,10 +1189,10 @@ final class EPV2_Admin {
 		echo '<th>Готовность</th><th>Медиа</th><th>Что не ок</th><th>Заголовок</th>';
 		echo '<th>' . self::queue_sort_link('category', 'Категории', $orderby, $order, $state_filter, $category_filter) . '</th>';
 		echo '<th>URL</th><th>' . self::queue_sort_link('created_at', 'Создано', $orderby, $order, $state_filter, $category_filter) . '</th>';
-		echo '<th>' . self::queue_sort_link($time_sort, $table_type === 'publish' ? 'Готово с' : ($table_type === 'published' ? 'Опубликовано' : 'Обновлено'), $orderby, $order, $state_filter, $category_filter) . '</th><th>Действия</th>';
+		echo '<th>' . self::queue_sort_link($time_sort, $table_type === 'publish' ? 'Готово с' : ($table_type === 'published' ? 'Опубликовано' : 'Обновлено'), $orderby, $order, $state_filter, $category_filter) . '</th><th>Сайт</th><th>Действия</th>';
 		echo '</tr></thead><tbody>';
 		if ($items === []) {
-			echo '<tr><td colspan="15" style="color:#646970">Нет материалов.</td></tr>';
+			echo '<tr><td colspan="16" style="color:#646970">Нет материалов.</td></tr>';
 		}
 		foreach ($items as $item) {
 			$categories = self::normalize_selected_categories((string) ($item->category_final ?: $item->category_proposed));
@@ -1141,6 +1233,7 @@ final class EPV2_Admin {
 			echo '<td>' . ((string) ($item->original_url ?? '') !== '' ? '<a href="' . esc_url((string) $item->original_url) . '" target="_blank" rel="noopener">Открыть</a>' : '<span style="color:#8c8f94">—</span>') . '</td>';
 			echo '<td>' . esc_html(self::queue_site_datetime((string) ($item->created_at ?? ''))) . '</td>';
 			echo '<td>' . esc_html($table_type === 'publish' ? self::queue_ready_publish_at($item) : self::queue_site_datetime((string) ($item->updated_at ?? ''))) . '</td>';
+			echo '<td>' . self::queue_site_visibility_badge($item, $table_type) . '</td>';
 			echo '<td>';
 			echo '<a class="button button-small" href="' . esc_url(admin_url('admin.php?page=epv2-review&item=' . (int) $item->id)) . '">Проверить</a> ';
 			if ((string) ($item->state ?? '') === 'ready_review') {
@@ -2370,6 +2463,7 @@ final class EPV2_Admin {
 	public static function resume_automation(): void {
 		check_admin_referer('epv2_resume_automation');
 		self::require_manage_capability();
+		EPV2_Jobs::resume_collect();
 		EPV2_Jobs::resume_automation();
 		wp_safe_redirect(admin_url('admin.php?page=epv2-dashboard&automation=running'));
 		exit;
@@ -3715,6 +3809,76 @@ final class EPV2_Admin {
 			return '<span style="color:#8c8f94">—</span>';
 		}
 		return '<a href="' . esc_url($url) . '" target="_blank" rel="noopener">Открыть пост</a>';
+	}
+
+	private static function queue_site_visibility_badge(object $item, string $table_type): string {
+		if ((string) ($item->state ?? '') !== 'published') {
+			return '<span style="color:#8c8f94">—</span>';
+		}
+
+		$post_id = self::queue_primary_post_id($item);
+		if ($post_id <= 0) {
+			return self::queue_light_pill('Нет поста', '#fee2e2', '#991b1b', 'post_id отсутствует');
+		}
+
+		$status = (string) get_post_status($post_id);
+		if ($status !== 'publish') {
+			return self::queue_light_pill('Скрыт', '#fee2e2', '#991b1b', 'post_status=' . $status);
+		}
+
+		$decision = sanitize_key((string) get_post_meta($post_id, 'europulse_selection_decision', true));
+		$score = (int) get_post_meta($post_id, 'europulse_selection_score', true);
+		$is_breaking = (int) get_post_meta($post_id, 'europulse_breaking', true) === 1;
+		$is_top_story = (int) get_post_meta($post_id, 'europulse_top_story', true) === 1;
+		$queue_notes = self::queue_item_notes($item);
+		$queue_decision = sanitize_key((string) ($queue_notes['selection']['decision'] ?? ''));
+		$title_parts = array_filter([
+			'post_id=' . $post_id,
+			'post decision=' . ($decision !== '' ? $decision : 'none'),
+			'score=' . $score,
+			$queue_decision !== '' && $queue_decision !== $decision ? 'queue decision=' . $queue_decision : '',
+		]);
+
+		if (! $is_breaking && ! $is_top_story) {
+			if (in_array($decision, ['low', 'reject'], true)) {
+				return self::queue_light_pill('Скрыт', '#fee2e2', '#991b1b', implode(' | ', $title_parts) . ' | selection blocks site modules');
+			}
+			if ($decision === 'review' && $score > 0 && $score < 40) {
+				return self::queue_light_pill('Скрыт', '#fee2e2', '#991b1b', implode(' | ', $title_parts) . ' | review score < 40');
+			}
+		}
+
+		$latest_ids = self::queue_home_zone_ids('latest', 80);
+		if (in_array($post_id, $latest_ids, true)) {
+			return self::queue_light_pill('Latest', '#dcfce7', '#166534', implode(' | ', $title_parts));
+		}
+
+		$slider_ids = self::queue_home_zone_ids('slider', 10);
+		if (in_array($post_id, $slider_ids, true)) {
+			return self::queue_light_pill('Slider', '#dcfce7', '#166534', implode(' | ', $title_parts));
+		}
+
+		if (function_exists('europulse_home_post_is_eligible') && ! europulse_home_post_is_eligible($post_id)) {
+			return self::queue_light_pill('Скрыт', '#fee2e2', '#991b1b', implode(' | ', $title_parts) . ' | home eligibility=false');
+		}
+
+		return self::queue_light_pill('Архив', '#fef3c7', '#92400e', implode(' | ', $title_parts) . ' | published but not in sampled homepage zones');
+	}
+
+	private static function queue_home_zone_ids(string $zone, int $limit): array {
+		static $cache = [];
+		$key = sanitize_key($zone) . ':' . max(1, $limit);
+		if (isset($cache[$key])) {
+			return $cache[$key];
+		}
+		if (! function_exists('europulse_home_zone_ids')) {
+			return $cache[$key] = [];
+		}
+		return $cache[$key] = array_map('intval', europulse_home_zone_ids($zone, $limit, []));
+	}
+
+	private static function queue_light_pill(string $label, string $bg, string $color, string $title = ''): string {
+		return '<span title="' . esc_attr($title) . '" style="display:inline-block;padding:2px 8px;border-radius:999px;background:' . esc_attr($bg) . ';color:' . esc_attr($color) . ';font-size:11px;font-weight:700;white-space:nowrap">' . esc_html($label) . '</span>';
 	}
 
 	private static function queue_site_datetime(string $value): string {

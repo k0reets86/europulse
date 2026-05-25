@@ -593,6 +593,10 @@ final class EPV2_Jobs {
 			EPV2_Queue::normalize_non_active_recoverable_items();
 			if ($allow_heavy_cleanup) {
 				EPV2_Resilience_Manager::cleanup();
+				if (class_exists('EPV2_AI_Processor')) {
+					EPV2_AI_Processor::repair_persisted_retry_process_stage_contract(200);
+					EPV2_AI_Processor::repair_persisted_publish_finish_translation_contract(200);
+				}
 				EPV2_Queue::promote_publish_ready_payloads(['retry_process', 'ready_review']);
 				EPV2_Queue::normalize_ready_publish_schedule();
 			}

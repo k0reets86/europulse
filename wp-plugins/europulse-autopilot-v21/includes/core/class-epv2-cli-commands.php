@@ -361,6 +361,10 @@ final class EPV2_CLI_Commands {
 		$cleanup['abandoned_started_runs'] = EPV2_Runs::cleanup_abandoned_started( 120 );
 		$cleanup['promoted_live_published_rows'] = EPV2_Queue::promote_live_published_rows( 20 );
 		$cleanup['reactivated_media_rows'] = EPV2_Queue::reactivate_media_recoverable_rows( 5 );
+		if ( class_exists( 'EPV2_AI_Processor' ) ) {
+			$cleanup['repaired_retry_process_stage_contract'] = EPV2_AI_Processor::repair_persisted_retry_process_stage_contract( 200 );
+			$cleanup['repaired_publish_finish_translation_contract'] = EPV2_AI_Processor::repair_persisted_publish_finish_translation_contract( 200 );
+		}
 		$ttl_hours = max( 1, (int) EPV2_Settings::get( 'queue_new_ttl_hours', 5 ) );
 		$cleanup['pruned_new_stale'] = EPV2_Queue::prune_new_stale( $ttl_hours );
 		$cleanup['workflow_quarantine'] = EPV2_Queue::quarantine_pathological_workflow_loops( 100 );

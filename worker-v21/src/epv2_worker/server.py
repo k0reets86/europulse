@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import os
 import logging
+import threading
+import time
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -20,6 +22,74 @@ from .provider_health import provider_health_snapshot
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="EPV2 Worker", version="2.1")
+
+RECYCLE_RSS_MB = max(128, int(os.getenv("EPV2_WORKER_RECYCLE_RSS_MB", "512") or "512"))
+UNHEALTHY_RSS_MB = max(128, int(os.getenv("EPV2_WORKER_UNHEALTHY_RSS_MB", "600") or "600"))
+RECYCLE_AFTER_REQUESTS = max(0, int(os.getenv("EPV2_WORKER_RECYCLE_AFTER_REQUESTS", "0") or "0"))
+RSS_MONITOR_INTERVAL_SECONDS = max(1, int(os.getenv("EPV2_WORKER_RSS_MONITOR_INTERVAL_SECONDS", "3") or "3"))
+_request_count = 0
+_recycle_scheduled = False
+_monitor_started = False
+_recycle_lock = threading.Lock()
+
+
+def _rss_mb() -> float:
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) / 1024.0
+    except (OSError, ValueError):
+        return 0.0
+    return 0.0
+
+
+def _schedule_recycle(reason: str, rss_mb: float) -> None:
+    global _recycle_scheduled
+    with _recycle_lock:
+        if _recycle_scheduled:
+            return
+        _recycle_scheduled = True
+    logger.warning("Worker recycle scheduled: reason=%s rss_mb=%.1f", reason, rss_mb)
+
+    def _exit() -> None:
+        os._exit(75)
+
+    threading.Timer(0.5, _exit).start()
+
+
+def _rss_monitor_loop() -> None:
+    while True:
+        time.sleep(RSS_MONITOR_INTERVAL_SECONDS)
+        rss_mb = _rss_mb()
+        if rss_mb >= RECYCLE_RSS_MB:
+            _schedule_recycle("rss_monitor_limit", rss_mb)
+            return
+
+
+@app.on_event("startup")
+async def start_resource_monitor() -> None:
+    global _monitor_started
+    if _monitor_started:
+        return
+    _monitor_started = True
+    threading.Thread(target=_rss_monitor_loop, name="epv2_worker_rss_monitor", daemon=True).start()
+
+
+@app.middleware("http")
+async def resource_recycle_middleware(request: Request, call_next):
+    global _request_count
+    response = await call_next(request)
+    if request.url.path in {"/process", "/analyze_story"}:
+        _request_count += 1
+    rss_mb = _rss_mb()
+    if rss_mb >= RECYCLE_RSS_MB:
+        _schedule_recycle("rss_limit", rss_mb)
+    elif RECYCLE_AFTER_REQUESTS and _request_count >= RECYCLE_AFTER_REQUESTS:
+        _schedule_recycle("request_limit", rss_mb)
+    return response
 
 
 class ProcessRequest(BaseModel):
@@ -52,7 +122,19 @@ class ProcessRequest(BaseModel):
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "version": "2.1", "providers": provider_health_snapshot()}
+    rss_mb = _rss_mb()
+    payload = {
+        "status": "ok",
+        "version": "2.1",
+        "providers": provider_health_snapshot(),
+        "rss_mb": round(rss_mb, 1),
+        "request_count": _request_count,
+        "recycle_scheduled": _recycle_scheduled,
+    }
+    if rss_mb >= UNHEALTHY_RSS_MB or _recycle_scheduled:
+        payload["status"] = "recycling"
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 
 class AnalyzeStoryRequest(BaseModel):

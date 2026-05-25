@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -41,6 +42,10 @@ def _get_de_nlp():
     if _DE_NLP is not None:
         return _DE_NLP
     if _DE_NLP_LOAD_FAILED:
+        return None
+    if os.getenv("EPV2_ENABLE_SPACY_DE_NER", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        _DE_NLP_LOAD_FAILED = True
+        logger.info("spaCy DE NER disabled by default to keep worker RSS bounded")
         return None
     try:
         import spacy  # type: ignore
@@ -522,10 +527,21 @@ async def rewrite_to_german(
 
     thin_source_guard = ""
     if source_word_count < 120:
+        length_profile = "brief"
+        length_hint = (
+            "90–170 Wörter im body (source-bound Kurzmeldung, 2–3 kurze Absätze, "
+            "kein Kontext-Ausbau, keine Deutung)"
+        )
+        max_tok = min(max_tok, 1024)
+        if kind:
+            kind = "news_brief"
         thin_source_guard = (
-            "ULTRADÜNNE QUELLE: Schreibe nur eine kompakte Meldung mit 2–4 kurzen Absätzen. "
-            "Keine Analyse, keine Folgen, keine Motive, keine nächsten Schritte, keine Parteizugehörigkeiten "
-            "oder Vornamen ergänzen, wenn sie nicht im Original stehen. "
+            "DÜNNE QUELLE / SOURCE-BOUND BRIEF (PFLICHT): Schreibe nur eine kompakte "
+            "Kurzmeldung mit 2–3 kurzen Absätzen und etwa 90–170 Wörtern. "
+            "Supporting-Links ohne geladenen Excerpt oder Body sind keine Faktenquelle. "
+            "Keine Analyse, keinen Hintergrund, keine Folgen, keine Motive, keine nächsten Schritte, "
+            "keine Zahlen, Orte, Vornamen, Parteizugehörigkeiten oder Zitate ergänzen, "
+            "wenn sie nicht im Original oder in geladenem Dossier-Text stehen. "
             "Wenn das Original nur Miersch/Söder nennt, schreibe nur Miersch/Söder."
         )
 
@@ -598,8 +614,44 @@ Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "card_l
         if result.success:
             result.provider = provider
             result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
-            register_provider_success(provider)
             _annotate_uniqueness(result, source_text=source_text, story_card=story_card, language="de")
+            if not result.uniqueness_passed:
+                retry_prompt = (
+                    user_prompt
+                    + "\n\nANTI-PLAGIARISM RETRY: The previous German rewrite was too close to the source. "
+                    "Rewrite again with new sentence structure, different paragraph order where possible, "
+                    "no copied trigrams, and no source-like phrasing. Keep every factual detail anchored "
+                    "to the source or dossier, but express it in original newsroom German."
+                )
+                if provider == "deepseek":
+                    retry = await _call_deepseek(
+                        retry_prompt,
+                        api_key,
+                        source_text,
+                        max_tok,
+                        model or "deepseek-chat",
+                        story_card=story_card,
+                        dossier_block=dossier_block,
+                    )
+                else:
+                    retry = await _call_openai(
+                        retry_prompt,
+                        api_key,
+                        source_text,
+                        max_tok,
+                        model or "gpt-4o-mini",
+                        story_card=story_card,
+                        dossier_block=dossier_block,
+                    )
+                if retry.success:
+                    retry.provider = provider
+                    retry.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
+                    _annotate_uniqueness(retry, source_text=source_text, story_card=story_card, language="de")
+                    if retry.uniqueness_passed or retry.uniqueness_pct >= result.uniqueness_pct:
+                        result = retry
+                else:
+                    logger.warning("Rewrite anti-plagiarism retry via %s failed: %s", provider, retry.error)
+            register_provider_success(provider)
             return result
         register_provider_failure(provider, result.error)
         provider_errors.append(f"{provider}/{model or 'default'}: {result.error}")
@@ -893,6 +945,10 @@ def _parse_json_result(raw: str, source_text: str, story_card: dict | None = Non
         for name in fabricated:
             result.warnings.append({"kind": "fabricated_name", "value": name, "severity": fabricated_severity})
 
+        unsupported_known = _unsupported_known_public_figures(full_text, source_text, story_card)
+        for name in unsupported_known:
+            result.warnings.append({"kind": "unsupported_known_figure", "value": name, "severity": "hard"})
+
         return result
     except Exception as exc:
         return RewriteResult(error=f"JSON parse failed: {exc}")
@@ -1183,6 +1239,58 @@ _KNOWN_FULL_NAMES = {
     "sundar pichai", "satya nadella", "sam altman",
 }
 
+_KNOWN_FIGURE_ALIASES: dict[str, tuple[str, ...]] = {
+    "friedrich merz": ("friedrich merz", "merz", "мерц"),
+    "angela merkel": ("angela merkel", "merkel", "меркель"),
+    "olaf scholz": ("olaf scholz", "scholz", "шольц"),
+    "ursula von der leyen": ("ursula von der leyen", "leyen", "ляєн", "ляєн"),
+    "donald trump": ("donald trump", "trump", "трамп"),
+    "wladimir putin": ("wladimir putin", "vladimir putin", "putin", "путін"),
+    "wolodymyr selenskyj": ("wolodymyr selenskyj", "zelensky", "zelenskyy", "selenskyj", "зеленський"),
+    "andrij yermak": ("andrij yermak", "andriy yermak", "jermak", "yermak", "єрмак"),
+    "herman haluschtschenko": ("herman haluschtschenko", "herman halushchenko", "haluschtschenko", "halushchenko", "галущенко"),
+    "timur minditsch": ("timur minditsch", "timur mindich", "minditsch", "mindich", "міндіч", "міндич"),
+    "markus söder": ("markus söder", "markus soeder", "söder", "soeder", "зедер"),
+    "boris pistorius": ("boris pistorius", "pistorius", "пісторіус"),
+    "keir starmer": ("keir starmer", "starmer", "стармер"),
+    "antónio costa": ("antónio costa", "antonio costa", "costa"),
+    "roberta metsola": ("roberta metsola", "metsola"),
+}
+
+
+def _unsupported_known_public_figures(generated_text: str, source_text: str, story_card: dict | None) -> list[str]:
+    """Hard-stop known public figures when even their surname is absent.
+
+    The older validator allowed known figures to avoid false positives when a
+    source said only "Merz" and the model wrote "Friedrich Merz". That is fine.
+    It is not fine when the source never mentioned Merz at all.
+    """
+    if not generated_text or not source_text:
+        return []
+    gen = generated_text.lower()
+    src = source_text.lower()
+    story = ""
+    if isinstance(story_card, dict):
+        story = json_dumps_safe(story_card).lower()
+    unsupported: list[str] = []
+    for canonical, aliases in _KNOWN_FIGURE_ALIASES.items():
+        if not any(alias in gen for alias in aliases):
+            continue
+        if any(alias in src for alias in aliases):
+            continue
+        if story and any(alias in story for alias in aliases):
+            continue
+        unsupported.append(canonical)
+    return sorted(set(unsupported))
+
+
+def json_dumps_safe(value: object) -> str:
+    try:
+        import json
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return ""
+
 
 def _strip_unsupported_first_names(result: RewriteResult, source_text: str) -> RewriteResult:
     """Remove model-added first names when the source only gives a surname."""
@@ -1381,6 +1489,12 @@ def _detect_fabricated_proper_nouns(generated_text: str, source_text: str, story
         except Exception as exc:  # noqa: BLE001
             logger.warning("spaCy NER pass failed, falling back to heuristic: %s", exc)
             spacy_persons = None
+    if spacy_persons is None:
+        # Without a PERSON NER gate this detector is too aggressive: it flags
+        # normal translated phrases and places such as "New South Wales" or
+        # "Deutsche Welle" as fabricated names. Keep the lighter name-pair
+        # checks elsewhere, but do not hard-block publishability here.
+        return []
 
     fabricated: list[str] = []
     seen: set[str] = set()

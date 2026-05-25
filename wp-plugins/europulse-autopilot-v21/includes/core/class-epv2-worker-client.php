@@ -14,7 +14,7 @@ final class EPV2_Worker_Client {
 	private const HEALTH_URL    = 'http://127.0.0.1:8765/health';
 	private const PROCESS_URL   = 'http://127.0.0.1:8765/process';
 	/** How long to cache a healthy availability check (seconds). */
-	private const AVAIL_TTL     = 30;
+	private const AVAIL_TTL     = 5;
 
 	// -------------------------------------------------------------------------
 	// Public API
@@ -302,8 +302,19 @@ final class EPV2_Worker_Client {
 
 	private static function send( array $payload ): array {
 		$stage = sanitize_key( (string) ( $payload['stage'] ?? '' ) );
-		$max_timeout = in_array( $stage, [ 'translate_uk', 'translate_en' ], true ) ? 300 : 240;
+		$max_timeout = in_array( $stage, [ 'translate_uk', 'translate_en' ], true ) ? 180 : 120;
 		$timeout = max( 30, min( $max_timeout, (int) EPV2_Settings::get( 'worker_timeout_seconds', 120 ) ) );
+		$health = self::ping_response( true );
+		if ( empty( $health['ok'] ) ) {
+			self::invalidate_availability_cache();
+			$reason = (string) ( $health['error'] ?? '' );
+			$code = (int) ( $health['http_code'] ?? 0 );
+			throw new RuntimeException( sprintf(
+				'Worker unavailable before process: health_http=%d%s',
+				$code,
+				$reason !== '' ? ' error=' . $reason : ''
+			) );
+		}
 
 		$response = wp_remote_post( self::PROCESS_URL, [
 			'timeout'     => $timeout,

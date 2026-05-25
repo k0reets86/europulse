@@ -37,6 +37,11 @@ EPV2_BRIDGE_TOKEN=${BRIDGE_TOKEN}
 EPV2_SITE_URL=${SITE_URL}
 EPV2_LOOP_SECONDS=15
 EPV2_MAINTENANCE_SECONDS=180
+EPV2_MIN_PROCESS_MEM_AVAILABLE_MB=768
+EPV2_MIN_COLLECT_MEM_AVAILABLE_MB=768
+EPV2_MIN_BREAKING_MEM_AVAILABLE_MB=768
+EPV2_MIN_PUBLISH_MEM_AVAILABLE_MB=384
+EPV2_MIN_JOB_SWAP_FREE_MB=256
 EOF
 chmod 600 "${ENV_FILE}"
 chown root:root "${ENV_FILE}"
@@ -45,6 +50,8 @@ cat > "${SERVICE_FILE}" << EOF
 [Unit]
 Description=EuroPulse AutoPilot v21 External Orchestrator
 After=network.target nginx.service php8.3-fpm.service mariadb.service
+StartLimitIntervalSec=900
+StartLimitBurst=2
 
 [Service]
 Type=simple
@@ -53,11 +60,24 @@ WorkingDirectory=${WORKER_DIR}
 EnvironmentFile=${ENV_FILE}
 ExecStart=/usr/bin/env python3 ${WORKER_DIR}/epv2_bridge_orchestrator.py
 Restart=always
-RestartSec=5
+RestartSec=60
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=${SERVICE_NAME}
 TimeoutStopSec=30
+RuntimeMaxSec=86400
+MemoryAccounting=yes
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=128M
+CPUAccounting=yes
+CPUQuota=60%
+TasksMax=64
+OOMPolicy=stop
+OOMScoreAdjust=400
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
 
 [Install]
 WantedBy=multi-user.target

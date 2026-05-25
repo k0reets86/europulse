@@ -14,7 +14,8 @@ final class EPV2_Publisher {
 		if (! $force && ! self::auto_publish_enabled()) {
 			return;
 		}
-		if (! EPV2_Time_Planner::should_publish($force)) {
+		$breaking_only = class_exists('EPV2_Time_Planner') && EPV2_Time_Planner::publish_requires_breaking_only();
+		if (! EPV2_Time_Planner::should_publish($force && ! $breaking_only)) {
 			return;
 		}
 		if (EPV2_Lock_Manager::is_active('publish')) {
@@ -35,9 +36,9 @@ final class EPV2_Publisher {
 		];
 			try {
 				$run_payload['promoted_ready_like_rows'] = 0;
-				$item = EPV2_Queue::next_due_item_for_publish_fast(false);
+				$item = EPV2_Queue::next_due_item_for_publish_fast(false, $breaking_only);
 			if (! $item) {
-				$run_payload['result'] = 'no_due_items';
+				$run_payload['result'] = $breaking_only ? 'no_due_breaking_items' : 'no_due_items';
 			} else {
 				$run_payload['last_item_id'] = (int) $item->id;
 				$run_payload['attempts'] = 1;
@@ -340,7 +341,7 @@ final class EPV2_Publisher {
 			self::update_post_meta_if_changed($post_id, '_epv2_event_key', $event_key);
 			self::update_post_meta_if_changed($post_id, '_epv2_primary_category', (string) ($categories[0] ?? 'deutschland'));
 			self::apply_editorial_meta($post_id, $payload);
-			self::apply_selection_meta($post_id, $payload);
+			self::apply_selection_meta($post_id, $payload, $item);
 			self::apply_seo_meta($post_id, $seo_title !== '' ? $seo_title : (string) ($lang_payload['title'] ?? $item->original_title), $meta_description !== '' ? $meta_description : (string) ($lang_payload['excerpt'] ?? ''), $categories, $focus_keywords);
 			self::apply_tags($post_id, $payload, $lang, $focus_keywords, $categories);
 			$log_step('language_meta_applied', ['lang' => (string) $lang, 'post_id' => $post_id]);
@@ -615,7 +616,7 @@ final class EPV2_Publisher {
 			self::update_post_meta_if_changed($post_id, '_epv2_event_key', $event_key);
 			self::update_post_meta_if_changed($post_id, '_epv2_primary_category', (string) ($categories[0] ?? 'deutschland'));
 			self::apply_editorial_meta($post_id, $payload);
-			self::apply_selection_meta($post_id, $payload);
+			self::apply_selection_meta($post_id, $payload, $item);
 			self::apply_seo_meta(
 				$post_id,
 				$seo_title !== '' ? $seo_title : ($title !== '' ? $title : (string) get_the_title($post_id)),
@@ -1187,8 +1188,8 @@ final class EPV2_Publisher {
 		}
 	}
 
-	private static function apply_selection_meta(int $post_id, array $payload): void {
-		$selection = is_array($payload['_meta']['selection'] ?? null) ? $payload['_meta']['selection'] : [];
+	private static function apply_selection_meta(int $post_id, array $payload, ?object $item = null): void {
+		$selection = self::canonical_selection_meta($payload, $item);
 		$decision = sanitize_key((string) ($selection['decision'] ?? ''));
 		$score = (int) ($selection['score'] ?? 0);
 
@@ -1203,6 +1204,23 @@ final class EPV2_Publisher {
 		} else {
 			self::delete_post_meta_if_exists($post_id, 'europulse_selection_score');
 		}
+	}
+
+	private static function canonical_selection_meta(array $payload, ?object $item = null): array {
+		if ($item) {
+			$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+			$notes = is_array($notes) ? $notes : [];
+			$selection = is_array($notes['selection'] ?? null) ? $notes['selection'] : [];
+			$decision = sanitize_key((string) ($selection['decision'] ?? ''));
+			$score = (int) ($selection['score'] ?? 0);
+			if ($decision !== '' || $score > 0) {
+				return [
+					'decision' => $decision,
+					'score' => $score,
+				];
+			}
+		}
+		return is_array($payload['_meta']['selection'] ?? null) ? $payload['_meta']['selection'] : [];
 	}
 
 	private static function delete_post_meta_if_exists(int $post_id, string $meta_key): void {

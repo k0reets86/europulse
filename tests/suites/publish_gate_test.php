@@ -26,6 +26,7 @@ $reflect = static function (string $method): ReflectionMethod {
 
 $source_risk = $reflect('payload_has_source_expansion_risk');
 $source_profile = $reflect('source_support_profile');
+$selection_floor = $reflect('selection_score_publishable');
 
 $assert(
 	'publish gate class is loaded',
@@ -53,6 +54,24 @@ $assert(
 	'admin_notes selection overrides stale payload selection',
 	EPV2_Publish_Gate::selection_decision($stale_selection_item, $stale_selection_payload) === 'review',
 	'canonical queue selection should prevent stale payload selection_low/reject blockers'
+);
+
+$assert(
+	'selection floor blocks serious category below 45',
+	! (bool) $selection_floor->invoke(null, 40, 'politik', false, [], null),
+	'politik score 40 should not be publishable'
+);
+
+$assert(
+	'selection floor allows weak category below 45',
+	(bool) $selection_floor->invoke(null, 40, 'kultur', false, [], null),
+	'kultur score 40 should remain eligible'
+);
+
+$assert(
+	'selection floor allows serious category at 45',
+	(bool) $selection_floor->invoke(null, 45, 'ukraine', false, [], null),
+	'ukraine score 45 should be publishable'
 );
 
 $thin_title_only_profile = [

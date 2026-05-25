@@ -541,6 +541,8 @@ def should_process(state: dict) -> bool:
 
 
 def should_publish(state: dict, now: datetime) -> bool:
+    if state.get("publish_window_open") is False:
+        return False
     ready = state_count(state, "ready_publish")
     if ready <= 0:
         return False

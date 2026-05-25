@@ -495,40 +495,20 @@ final class EPV2_Budget_Manager {
 			'a' => 70,
 			'b' => 52,
 			'c' => 34,
-			'publish_c' => 40,
+			'publish_c' => 45,
 			'ai_delta' => 0,
 			'queue_delta' => 0,
 			'dimensions' => ['importance', 'informativeness', 'freshness', 'source_confidence'],
 		];
 		$cards = [
-			// 2026-05-17 evening: publish_c 40 → 42 gentle tightening.
-			// Avg published score 49.2 = большой запас. Items 40-41 уходят
-			// в C-low. Ukraine оставлен 40 (war news имеет ценность даже
-			// при low scores).
-			'politik' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 42, 'dimensions' => ['public_impact', 'source_confidence', 'timeliness', 'informativeness']],
-			// publish_c raised 40→45: Welt = world news, only the genuinely
-			// resonant stories belong here. Niche-American / military-incident
-			// items now slip from C-review into C-low and never make it past
-			// Story-Card without being top_story_candidate.
+			// 2026-05-25: hard floor 45 for serious news categories. Soft
+			// categories keep lower per-category publish_c below.
+			'politik' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 45, 'dimensions' => ['public_impact', 'source_confidence', 'timeliness', 'informativeness']],
 			'welt' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 45, 'dimensions' => ['public_impact', 'international_relevance', 'source_confidence', 'timeliness']],
-			'ukraine' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['war_relevance', 'human_impact', 'source_confidence', 'timeliness']],
-			'europa' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 40, 'dimensions' => ['public_impact', 'policy_relevance', 'source_confidence']],
-			// 2026-05-17 evening: publish_c 40 → 42. Avg published score 39.67
-			// (с хвостом до 36 в min) — поднимаем порог чтобы зарезать
-			// слабые. Сегодня 3/3 deutschland publishes были borderline.
-			'deutschland' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 42, 'dimensions' => ['public_impact', 'reader_relevance', 'informativeness']],
-			// publish_c history:
-			//   ff4309d 2026-05-09 morning: raised 40→44 (operator quality bar)
-			//   2026-05-09 evening:        reverted 44→40 (throughput drop)
-			//   2026-05-17:                restored 40→44 (Q-fix #3 fixed
-			//                              throughput root cause via
-			//                              inline_stage_attempt_cap 2→4;
-			//                              operator quality complaint: items
-			//                              40-44 "не дотягивают по качеству")
-			// Note: ai_delta/queue_delta removed (were -2/-2 in legacy revert
-			// comment but already absent from current row). Effective
-			// threshold == publish_c == 44.
-			'wirtschaft' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 44, 'dimensions' => ['economic_impact', 'reader_relevance', 'informativeness']],
+			'ukraine' => ['a' => 70, 'b' => 52, 'c' => 34, 'publish_c' => 45, 'dimensions' => ['war_relevance', 'human_impact', 'source_confidence', 'timeliness']],
+			'europa' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 45, 'dimensions' => ['public_impact', 'policy_relevance', 'source_confidence']],
+			'deutschland' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 45, 'dimensions' => ['public_impact', 'reader_relevance', 'informativeness']],
+			'wirtschaft' => ['a' => 68, 'b' => 50, 'c' => 34, 'publish_c' => 45, 'dimensions' => ['economic_impact', 'reader_relevance', 'informativeness']],
 			'leben-in-deutschland' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -6, 'queue_delta' => -6, 'dimensions' => ['practical_value', 'reader_relevance', 'source_confidence', 'service_life']],
 			'community' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -6, 'queue_delta' => -6, 'dimensions' => ['community_value', 'reader_relevance', 'practical_value', 'local_fit']],
 			'muenchen' => ['a' => 66, 'b' => 48, 'c' => 32, 'publish_c' => 38, 'ai_delta' => -4, 'queue_delta' => -4, 'dimensions' => ['local_relevance', 'reader_relevance', 'informativeness', 'freshness']],
@@ -1222,10 +1202,9 @@ final class EPV2_Budget_Manager {
 			return $score;
 		}
 
-		// Lift only as far as the publish_c review threshold for the
-		// category — never higher than 40 — so a 30-tier story becomes
-		// reviewable, not auto-published. publish_c is 40 by default for
-		// the heavyweight set; using max($score, 40) preserves that.
+		// Lift only to the old C-review edge. Serious categories now still
+		// need the 45 publish floor later; this just prevents immediate
+		// D-tier rejection for a potentially meaningful signal.
 		return max($score, 40);
 	}
 

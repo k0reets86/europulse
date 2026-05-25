@@ -254,11 +254,12 @@ final class EPV2_REST {
 		if (class_exists('EPV2_Time_Planner')) {
 			$window = EPV2_Time_Planner::current_window();
 			$mode = (string) ($window['mode'] ?? '');
-			$is_night = in_array($mode, ['night_monitor', 'wind_down_quiet'], true);
+			$is_night = in_array($mode, ['wind_down_final', 'night_monitor', 'wind_down_quiet', 'night_open'], true);
 			$summary['current_window_mode'] = $mode;
 			$summary['is_night_window'] = $is_night;
 			$summary['collect_window_open'] = EPV2_Time_Planner::should_collect(false);
 			$summary['publish_window_open'] = EPV2_Time_Planner::should_publish(false);
+			$summary['publish_breaking_only'] = EPV2_Time_Planner::publish_requires_breaking_only();
 			$summary['has_breaking_watch'] = EPV2_Time_Planner::has_breaking_watch();
 			// Breaking watch minutes — orchestrator calls /bridge/breaking_scan
 			// only at these minute marks during night, regardless of overall

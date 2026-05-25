@@ -2125,11 +2125,12 @@ final class EPV2_Queue {
 		return $items[0] ?? null;
 	}
 
-	public static function next_due_item_for_publish_fast(bool $force = false): ?object {
+	public static function next_due_item_for_publish_fast(bool $force = false, bool $breaking_only = false): ?object {
 		global $wpdb;
 		self::promote_live_published_rows(20);
 		$table = $wpdb->prefix . 'epv2_queue';
 		$now = time();
+		$limit = $breaking_only ? 50 : 10;
 		$due_clause = $force ? '1=1' : $wpdb->prepare(
 			"COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.publish_not_before')) AS UNSIGNED), 0) <= %d",
 			$now
@@ -2141,10 +2142,13 @@ final class EPV2_Queue {
 				AND post_id IS NULL
 				AND {$due_clause}
 			ORDER BY COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.publish_not_before')) AS UNSIGNED), 0) ASC, id ASC
-			LIMIT 10"
+			LIMIT {$limit}"
 		);
 		foreach ((array) $ids as $id) {
 			$item = self::get_item((int) $id);
+			if ($breaking_only && is_object($item) && ! self::row_is_breaking($item)) {
+				continue;
+			}
 			if (is_object($item) && (string) ($item->state ?? '') === 'ready_publish' && self::item_is_publishable_read_only($item, $force)) {
 				return $item;
 			}
@@ -3944,7 +3948,13 @@ final class EPV2_Queue {
 
 	private static function row_is_breaking(object $row): bool {
 		$payload = self::row_payload($row);
-		return ! empty($payload['_meta']['breaking']);
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		if (! empty($meta['breaking']) || ! empty($meta['breaking_watch'])) {
+			return true;
+		}
+		$notes = self::row_notes($row);
+		$selection = is_array($notes['selection'] ?? null) ? $notes['selection'] : [];
+		return ! empty($selection['breaking_candidate']) || ! empty($selection['breaking_watch']);
 	}
 
 	private static function row_is_top_story(object $row): bool {
@@ -4027,6 +4037,25 @@ final class EPV2_Queue {
 		}
 		foreach ($items as $item) {
 			if (self::row_has_live_published_posts($item)) {
+				continue;
+			}
+			if (self::publish_due($item)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	public static function has_due_breaking_publish_item(): bool {
+		$items = self::get_queue_items_summary(['states' => ['ready_publish', 'retry_publish'], 'limit' => 50]);
+		if ($items === []) {
+			return false;
+		}
+		foreach ($items as $item) {
+			if (self::row_has_live_published_posts($item)) {
+				continue;
+			}
+			if (! self::row_is_breaking($item)) {
 				continue;
 			}
 			if (self::publish_due($item)) {

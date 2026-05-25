@@ -23,6 +23,12 @@ final class EPV2_Publish_Gate {
 		if (! $selection_publishable) {
 			$blockers[] = 'selection_' . ($decision !== '' ? $decision : 'blocked');
 		}
+		$selection_score = self::selection_score($item, $payload);
+		$selection_category = self::selection_category($item, $payload);
+		$selection_score_publishable = self::selection_score_publishable($selection_score, $selection_category, $manual_override, $payload, $item);
+		if (! $selection_score_publishable) {
+			$blockers[] = 'selection_score_below_publish_floor';
+		}
 
 		$context_publishable = true;
 		if ($payload !== [] && EPV2_AI_Processor::payload_requires_terminal_context_reject($payload)) {
@@ -135,6 +141,7 @@ final class EPV2_Publish_Gate {
 			&& $kind_publishable
 			&& $schedule_publishable
 			&& ! $already_published;
+		$allowed = $allowed && $selection_score_publishable;
 
 		$quality_shadow = null;
 		if (
@@ -161,8 +168,11 @@ final class EPV2_Publish_Gate {
 			'blockers' => $blockers,
 			'context' => $context,
 			'selection_decision' => $decision,
+			'selection_score' => $selection_score,
+			'selection_category' => $selection_category,
 			'content_kind' => $payload === [] ? '' : EPV2_Content_Kinds::detect_kind($payload),
 			'selection_publishable' => $selection_publishable,
+			'selection_score_publishable' => $selection_score_publishable,
 			'context_publishable' => $context_publishable,
 			'live_angle_publishable' => $live_angle_publishable,
 			'stage_publishable' => $stage_publishable,
@@ -196,6 +206,119 @@ final class EPV2_Publish_Gate {
 		}
 
 		return sanitize_key((string) ($payload['_meta']['selection']['decision'] ?? ''));
+	}
+
+	private static function selection_score(?object $item, array $payload = []): int {
+		if ($item) {
+			$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+			$notes = is_array($notes) ? $notes : [];
+			$score = (int) ($notes['selection']['score'] ?? 0);
+			if ($score > 0) {
+				return $score;
+			}
+		}
+
+		$score = (int) ($payload['_meta']['selection']['score'] ?? 0);
+		if ($score > 0) {
+			return $score;
+		}
+
+		return $item ? max(0, (int) ($item->story_score ?? 0)) : 0;
+	}
+
+	private static function selection_category(?object $item, array $payload = []): string {
+		if ($item) {
+			foreach (['category_final', 'category_proposed'] as $field) {
+				$value = trim((string) ($item->{$field} ?? ''));
+				if ($value !== '') {
+					$parts = array_values(array_filter(array_map('trim', explode(',', $value))));
+					if ($parts !== []) {
+						return self::canonical_category((string) $parts[0]);
+					}
+				}
+			}
+		}
+		$categories = array_values(array_filter(array_map('strval', (array) ($payload['categories'] ?? []))));
+		if ($categories !== []) {
+			return self::canonical_category((string) $categories[0]);
+		}
+		$card = is_array($payload['_meta']['story_card'] ?? null) ? $payload['_meta']['story_card'] : [];
+		$card_category = (string) ($card['category']['primary'] ?? '');
+		return self::canonical_category($card_category);
+	}
+
+	private static function selection_score_publishable(int $score, string $category, bool $manual_override = false, array $payload = [], ?object $item = null): bool {
+		if ($manual_override || $score <= 0) {
+			return true;
+		}
+		if ($score >= 45) {
+			return true;
+		}
+		if (self::selection_has_breaking_signal($payload, $item)) {
+			return true;
+		}
+		return self::selection_floor_weak_category($category);
+	}
+
+	private static function selection_floor_weak_category(string $category): bool {
+		$category = self::canonical_category($category);
+		return in_array($category, [
+			'kultur',
+			'sport',
+			'leben-in-deutschland',
+			'leben_in_deutschland',
+			'community',
+			'muenchen',
+			'bayern',
+		], true);
+	}
+
+	private static function selection_has_breaking_signal(array $payload, ?object $item = null): bool {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		if (! empty($meta['breaking']) || ! empty($meta['breaking_watch'])) {
+			return true;
+		}
+		if ($item) {
+			$notes = json_decode((string) ($item->admin_notes ?? ''), true);
+			$notes = is_array($notes) ? $notes : [];
+			$selection = is_array($notes['selection'] ?? null) ? $notes['selection'] : [];
+			if (! empty($selection['breaking_candidate']) || ! empty($selection['breaking_watch'])) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static function canonical_category(string $category): string {
+		$value = sanitize_title($category);
+		if (class_exists('EPV2_Taxonomy_Map') && method_exists('EPV2_Taxonomy_Map', 'normalize_slug')) {
+			$value = EPV2_Taxonomy_Map::normalize_slug($value);
+		}
+		$map = [
+			'politics' => 'politik',
+			'polityka' => 'politik',
+			'world' => 'welt',
+			'svit' => 'welt',
+			'europe' => 'europa',
+			'yevropa' => 'europa',
+			'germany' => 'deutschland',
+			'nimechchyna' => 'deutschland',
+			'economy' => 'wirtschaft',
+			'ekonomika' => 'wirtschaft',
+			'culture' => 'kultur',
+			'kultura' => 'kultur',
+			'sport-2' => 'sport',
+			'sport-en' => 'sport',
+			'life-in-germany' => 'leben-in-deutschland',
+			'leben_in_deutschland' => 'leben-in-deutschland',
+			'zhyttia-v-nimechchyni' => 'leben-in-deutschland',
+			'community-de' => 'community',
+			'spilnota' => 'community',
+			'munich' => 'muenchen',
+			'munchen' => 'muenchen',
+			'miunkhen' => 'muenchen',
+		];
+		return $map[$value] ?? $value;
 	}
 
 	private static function manual_override_present(?object $item, array $payload): bool {

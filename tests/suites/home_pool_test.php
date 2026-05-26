@@ -92,31 +92,74 @@ if (! $queue_row) {
 		$skip('live 6395 homepage regression fixture', 'German post not present on this environment');
 	} else {
 		$post_id = (int) $post_row->ID;
+		if (function_exists('clean_post_cache')) {
+			clean_post_cache($post_id);
+		}
 		$queue_notes = json_decode((string) $queue_row->admin_notes, true);
 		$queue_decision = sanitize_key((string) ($queue_notes['selection']['decision'] ?? ''));
-		$post_decision = sanitize_key((string) get_post_meta($post_id, 'europulse_selection_decision', true));
-		$post_score = (int) get_post_meta($post_id, 'europulse_selection_score', true);
-
-		$assert(
-			'live 6395 fixture still has stale queue notes',
-			in_array($queue_decision, ['low', 'reject'], true) && ($post_decision === 'review' || $post_decision === 'strong' || $post_decision === 'priority') && $post_score >= 40,
-			"queue={$queue_decision}, post={$post_decision}, score={$post_score}, post_id={$post_id}"
+		$post_decision = sanitize_key((string) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = 'europulse_selection_decision' LIMIT 1",
+				$post_id
+			)
+		));
+		$post_score = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = 'europulse_selection_score' LIMIT 1",
+				$post_id
+			)
 		);
+		$is_breaking = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = 'europulse_breaking' LIMIT 1",
+				$post_id
+			)
+		) === 1;
+		$is_top_story = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = 'europulse_top_story' LIMIT 1",
+				$post_id
+			)
+		) === 1;
+		$fixture_has_stale_queue_notes = in_array($queue_decision, ['low', 'reject'], true)
+			&& in_array($post_decision, ['review', 'strong', 'priority'], true)
+			&& $post_score >= 40;
 
-		$assert(
-			'live 6395 post remains homepage eligible',
-			function_exists('europulse_home_post_is_eligible') && europulse_home_post_is_eligible($post_id),
-			"post_id={$post_id}, title=" . (string) $post_row->post_title
-		);
-
-		if (function_exists('europulse_autopilot_home_pool')) {
-			$pool = europulse_autopilot_home_pool();
-			$entry = $pool[$post_id] ?? [];
-			$assert(
-				'live 6395 pool entry uses post selection metadata',
-				($entry['selection_decision'] ?? '') === $post_decision && (int) ($entry['selection_score'] ?? 0) === $post_score,
-				wp_json_encode($entry, JSON_UNESCAPED_UNICODE)
+		if (! $fixture_has_stale_queue_notes) {
+			$skip(
+				'live 6395 stale queue regression fixture',
+				"fixture no longer stale after canonical selection backfill: queue={$queue_decision}, post={$post_decision}, score={$post_score}, post_id={$post_id}"
 			);
+
+			if (in_array($post_decision, ['low', 'reject'], true) && ! $is_breaking && ! $is_top_story) {
+				$assert(
+					'live 6395 canonical low fixture is homepage ineligible',
+					function_exists('europulse_home_post_is_eligible') && ! europulse_home_post_is_eligible($post_id),
+					"post_id={$post_id}, post={$post_decision}, score={$post_score}"
+				);
+			}
+		} else {
+			$assert(
+				'live 6395 fixture still has stale queue notes',
+				true,
+				"queue={$queue_decision}, post={$post_decision}, score={$post_score}, post_id={$post_id}"
+			);
+
+			$assert(
+				'live 6395 post remains homepage eligible',
+				function_exists('europulse_home_post_is_eligible') && europulse_home_post_is_eligible($post_id),
+				"post_id={$post_id}, title=" . (string) $post_row->post_title
+			);
+
+			if (function_exists('europulse_autopilot_home_pool')) {
+				$pool = europulse_autopilot_home_pool();
+				$entry = $pool[$post_id] ?? [];
+				$assert(
+					'live 6395 pool entry uses post selection metadata',
+					($entry['selection_decision'] ?? '') === $post_decision && (int) ($entry['selection_score'] ?? 0) === $post_score,
+					wp_json_encode($entry, JSON_UNESCAPED_UNICODE)
+				);
+			}
 		}
 	}
 }

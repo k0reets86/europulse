@@ -35,7 +35,7 @@
 - [x] Updated `home_pool_test.php` because fixture `6395` is no longer stale after canonical selection backfill; canonical `low/41` now correctly means homepage-ineligible.
 - [x] Earlier `economy/medium` throttle was superseded after explicit user direction to raise the limit; live is now `normal/medium`.
 - [x] `ai_budget` hard stop was cleared by increasing the cap, without resetting counters.
-- [!] Local branch is clean but `ahead 4`: commits `3f86e01`, `dcb1587`, `9be2d40`, and `bd9f4f9` are not pushed because GitHub push needs exact approval.
+- [!] Local branch is clean but has unpushed local commits; GitHub push needs exact approval.
 - [!] Old known-bad published groups still live: `6092`, `6230`, `6244`, `6296`, `6300`, `6325`, `6332`, `6352`, `6354`.
 - [ ] Do not manually force queue stages; let the raised budget prove itself on autonomous cycles.
 - [ ] If user explicitly approves, push `review/plugin-audit` to GitHub.

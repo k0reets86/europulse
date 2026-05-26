@@ -6,6 +6,8 @@ if (! defined('ABSPATH')) {
 
 final class EPV2_Settings {
 	private const OPTION_KEY = 'epv2_settings';
+	private const AI_DAILY_REQUEST_LIMIT_MAX = 1000;
+	private const AI_DAILY_TOKEN_LIMIT_MAX = 12000000;
 
 	public static function ai_provider_options(): array {
 		return [
@@ -213,8 +215,8 @@ final class EPV2_Settings {
 		$clean['max_collect_per_category'] = max(1, min(20, (int) ($data['max_collect_per_category'] ?? $current['max_collect_per_category'])));
 		$clean['ai_budget_mode'] = in_array(($data['ai_budget_mode'] ?? $current['ai_budget_mode']), ['normal', 'economy', 'critical'], true) ? $data['ai_budget_mode'] : $current['ai_budget_mode'];
 		$clean['ai_selection_strictness'] = in_array(($data['ai_selection_strictness'] ?? $current['ai_selection_strictness']), ['low', 'medium', 'high'], true) ? $data['ai_selection_strictness'] : $current['ai_selection_strictness'];
-		$clean['ai_daily_request_soft_limit'] = max(1, min(500, (int) ($data['ai_daily_request_soft_limit'] ?? $current['ai_daily_request_soft_limit'])));
-		$clean['ai_daily_token_soft_limit'] = max(1000, min(5000000, (int) ($data['ai_daily_token_soft_limit'] ?? $current['ai_daily_token_soft_limit'])));
+		$clean['ai_daily_request_soft_limit'] = max(1, min(self::AI_DAILY_REQUEST_LIMIT_MAX, (int) ($data['ai_daily_request_soft_limit'] ?? $current['ai_daily_request_soft_limit'])));
+		$clean['ai_daily_token_soft_limit'] = max(1000, min(self::AI_DAILY_TOKEN_LIMIT_MAX, (int) ($data['ai_daily_token_soft_limit'] ?? $current['ai_daily_token_soft_limit'])));
 		$clean['daily_publish_target'] = max(1, min(100, (int) ($data['daily_publish_target'] ?? $current['daily_publish_target'])));
 		$clean['enforce_daily_publish_target'] = ! empty($data['enforce_daily_publish_target']);
 		$clean['daily_category_publish_targets'] = self::sanitize_daily_category_targets(

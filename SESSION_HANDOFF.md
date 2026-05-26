@@ -1,5 +1,32 @@
 # SESSION HANDOFF
 
+## Latest Handoff 2026-05-26 10:40 UTC — AI daily cap raised, normal/medium restored
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User rejected over-throttling/pacing that would make daytime publishing inadequate and explicitly directed to increase the AI limit. No manual `collect`, `process`, or `publish` was run.
+- Repo/live code:
+  - `wp-plugins/europulse-autopilot-v21/includes/core/class-epv2-settings.php` now accepts max `1000` daily AI requests and `12,000,000` daily AI tokens;
+  - `wp-plugins/europulse-autopilot-v21/includes/admin/class-epv2-admin.php` shows the new max values in the settings UI;
+  - both files were copied to the live plugin and passed `php -l` in repo and live paths.
+- Validation after deploy: `tests/run.sh publish_gate`, `tests/run.sh quality_gate`, and `tests/run.sh home_pool` all passed when rerun with live WordPress access.
+- Live setting applied:
+  - `ai_budget_mode=normal`;
+  - `ai_selection_strictness=medium`;
+  - `ai_daily_request_soft_limit=800`;
+  - `ai_daily_token_soft_limit=12000000`.
+- Live budget proof after the change:
+  - `rewritten_today=267`;
+  - `tokens_today=6638384`;
+  - `request_limit=800`;
+  - `token_limit=12000000`;
+  - `hard_stop=false`.
+- Quality stance:
+  - the system should not spend AI on weak candidates, but should not starve normal 06:00-22:00 daytime publishing;
+  - weak-candidate filtering should come from publish-grade selection, serious-category score floor `45`, source sufficiency/source-expansion gates, and rendered quality audit;
+  - do not use `economy` mode as the main quality filter unless the user explicitly wants lower throughput.
+- Continue monitoring fresh autonomous output; do not reset AI counters, and do not manually force queue stages.
+- GitHub push is still not done. It still requires the exact external-transfer approval phrase: `разрешаю push в GitHub origin/review/plugin-audit`.
+
 ## Latest Handoff 2026-05-26 10:20 UTC — publish floor verified, budget throttled, push still needs explicit approval
 
 - First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.

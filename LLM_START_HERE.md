@@ -1,6 +1,6 @@
 # EuroPulse LLM Start Here
 
-Last updated: 2026-05-26 10:20 UTC.
+Last updated: 2026-05-26 10:40 UTC.
 
 This file is the first entry point for any new LLM session on EuroPulse.
 Read it before opening old handoffs, TODOs, or plugin maps.
@@ -50,6 +50,8 @@ Expected end result:
 
 Current phase/result:
 
+- 2026-05-26 10:40 UTC AI budget decision applied after explicit user direction to increase the limit. Repo/live `EPV2_Settings` now allows up to `1000` AI requests and `12,000,000` AI tokens per day; admin UI shows the new max values. Live `epv2_settings` changed to `ai_budget_mode=normal`, `ai_selection_strictness=medium`, `ai_daily_request_soft_limit=800`, `ai_daily_token_soft_limit=12000000`. Live budget check after the change: `rewritten_today=267`, `tokens_today=6638384`, `request_limit=800`, `token_limit=12000000`, `hard_stop=false`. Counters were not reset.
+- 2026-05-26 10:40 UTC quality stance for budget increase: do not spend AI on weak candidates, but do not starve normal daytime publishing. "Weak" remains guarded by publish-grade selection (`review/strong/priority`), serious-category publish floor `45`, source sufficiency / source expansion gates, and post-publish quality audit; the system should no longer rely on `economy` mode as the primary quality filter.
 - 2026-05-26 10:20 UTC follow-up: branch `review/plugin-audit` is clean and `ahead 2` with local commits `9be2d40 Update home pool fixture after selection backfill` and `bd9f4f9 Enforce publish score floor and night schedule`. Push to `origin/review/plugin-audit` was blocked by approval policy because the user must explicitly approve the external GitHub transfer. Exact needed approval: `разрешаю push в GitHub origin/review/plugin-audit`.
 - 2026-05-26 10:20 UTC live quality check after the 2026-05-25 21:30 UTC publish-floor/night-window fix: public site `200 OK`; worker, orchestrator, and PHP-FPM active; `epv2_active_alerts` empty. Fresh published rows after the fix have `0` posts below selection score `45`, `0` closed-night-window publishes, and `post_publish_rendered` shows `33 pass` / average `100`. Live quality audit since `2026-05-25 21:30:00` checked `11` published groups across `deutschland`, `sport`, `ukraine`, `welt`, and `wirtschaft`; findings hard/warn/info were empty.
 - 2026-05-26 10:20 UTC regression status: `publish_gate_test.php`, `quality_gate_test.php`, updated `home_pool_test.php`, and worker translator/rewriter unittests passed. `home_pool_test.php` was updated because live fixture `6395` is no longer stale after canonical selection backfill; it now skips the stale-fixture assertion and verifies canonical `low/41` is homepage-ineligible.
@@ -80,7 +82,7 @@ Current phase/result:
 What to do next:
 
 1. Run the service/queue/quality checks in `docs/NEXT_SESSION_RUNBOOK_2026_05_22.md`.
-2. Inspect the `ai_budget` alert/settings/state before assuming automation is stuck; latest orchestrator logs were idle with no processable items.
+2. Monitor the raised `ai_budget` state and fresh quality after the next autonomous cycles; the live cap is now `12M` tokens / `800` requests and `hard_stop=false` as of `2026-05-26 10:40 UTC`.
 3. Run `tests/run.sh publish_gate`, `tests/run.sh home_pool`, and `EPV2_AUDIT_LIMIT=80 EPV2_AUDIT_REJECT_LIMIT=30 EPV2_AUDIT_SINCE='YYYY-MM-DD HH:MM:SS' wp --allow-root eval-file scripts/epv2_live_quality_audit.php --path=/var/www/europulse/public` after the next autonomous publish cycle, when WP-CLI approvals/usage are available again.
 4. Calibrate false positives for `thin_source_dossier`, `source_expansion_risk`, and title-only source blocks on new items only; do not use old published payload replay as a fresh-pipeline failure signal.
 5. Watch whether stale payload selection false rejects disappear on fresh rows after `2026-05-25 09:00 UTC`.

@@ -3,13 +3,25 @@
 ## Mandatory Next Session Entry
 
 - [ ] Read `LLM_START_HERE.md`.
-- [ ] Read the latest `2026-05-26 10:20 UTC` checkpoint before older notes.
+- [ ] Read the latest `2026-05-26 10:40 UTC` checkpoint before older notes.
 - [ ] Run read-only health/queue/quality checks first.
 - [ ] Do not run manual `collect`, `process`, or `publish`.
 - [ ] Do not bypass approval limits. Push requires exact user approval: `разрешаю push в GitHub origin/review/plugin-audit`.
 
 ## Current Runtime Status 2026-05-26 10:20 UTC — score/night fix verified, AI budget throttled
 
+- [x] User explicitly chose raising the AI limit over over-throttling daytime publishing.
+- [x] Raised repo/live AI limit ceiling:
+  - settings sanitizer max: `1000` daily AI requests;
+  - settings sanitizer max: `12,000,000` daily AI tokens;
+  - admin UI now displays those max values.
+- [x] Applied live AI settings:
+  - `ai_budget_mode=normal`;
+  - `ai_selection_strictness=medium`;
+  - `ai_daily_request_soft_limit=800`;
+  - `ai_daily_token_soft_limit=12000000`.
+- [x] Verified live budget after change: `rewritten_today=267`, `tokens_today=6638384`, `request_limit=800`, `token_limit=12000000`, `hard_stop=false`.
+- [ ] Monitor fresh autonomous output under the raised limit; quality should be protected by publish-grade selection, score floor `45`, source gates, and rendered audit, not by starving daytime processing.
 - [x] Verified fresh live quality after the 2026-05-25 21:30 UTC fix:
   - post-fix published `<45`: `0`;
   - post-fix closed-night-window publishes: `0`;
@@ -21,11 +33,11 @@
   - `home_pool_test.php`;
   - worker translator/rewriter unittests.
 - [x] Updated `home_pool_test.php` because fixture `6395` is no longer stale after canonical selection backfill; canonical `low/41` now correctly means homepage-ineligible.
-- [x] Reduced future AI spend by changing live settings from `ai_budget_mode=normal`, `ai_selection_strictness=low` to `economy/medium`.
-- [!] `ai_budget` remains hard-stopped today: about `254` rewrites and `6.3M` tokens against `500` / `5M`. Do not reset or raise the limit without explicit cost approval.
+- [x] Earlier `economy/medium` throttle was superseded after explicit user direction to raise the limit; live is now `normal/medium`.
+- [x] `ai_budget` hard stop was cleared by increasing the cap, without resetting counters.
 - [!] Local branch is clean but `ahead 2`: commits `9be2d40` and `bd9f4f9` are not pushed because GitHub push needs exact approval.
 - [!] Old known-bad published groups still live: `6092`, `6230`, `6244`, `6296`, `6300`, `6325`, `6332`, `6352`, `6354`.
-- [ ] Wait for daily AI budget reset or explicit budget decision; do not manually force queue stages.
+- [ ] Do not manually force queue stages; let the raised budget prove itself on autonomous cycles.
 - [ ] If user explicitly approves, push `review/plugin-audit` to GitHub.
 - [ ] If user explicitly approves live content cleanup, draft/quarantine the old known-bad groups after backing up current post statuses/content.
 

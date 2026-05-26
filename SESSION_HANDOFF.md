@@ -1,5 +1,38 @@
 # SESSION HANDOFF
 
+## Latest Handoff 2026-05-26 10:20 UTC — publish floor verified, budget throttled, push still needs explicit approval
+
+- First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.
+- User asked what remains, then asked to finish. No manual `collect`, `process`, or `publish` was run.
+- Git:
+  - branch `review/plugin-audit`;
+  - clean working tree after this handoff update;
+  - local commits not pushed: `9be2d40 Update home pool fixture after selection backfill`, `bd9f4f9 Enforce publish score floor and night schedule`;
+  - push to `git@github.com:k0reets86/europulse.git` was blocked by approval policy. Required exact user approval: `разрешаю push в GitHub origin/review/plugin-audit`.
+- Live health:
+  - public IP returned `200 OK`;
+  - `epv2-worker`, `epv2-orchestrator`, and `php8.3-fpm` active;
+  - `epv2_active_alerts` empty;
+  - worker RSS about `200M`; orchestrator active and processing/maintenance running.
+- Fresh quality after the 2026-05-25 21:30 UTC score/night fix:
+  - published posts after the fix with `selection_score <45`: `0`;
+  - publishes in the closed night window after the fix: `0`;
+  - `post_publish_rendered` after the fix: `33 pass`, average score `100`;
+  - live audit since `2026-05-25 21:30:00` checked `11` published groups; `findings.hard=[]`, `findings.warn=[]`, `findings.info=[]`.
+- Regression checks:
+  - `publish_gate_test.php` passed;
+  - `quality_gate_test.php` passed;
+  - `home_pool_test.php` initially failed because fixture `6395` was no longer stale after canonical selection backfill; updated the test and it passed;
+  - worker translator/rewriter unittests passed (`6` tests).
+- Budget/backlog:
+  - live `ai_budget` hard stop is real: about `254` rewrites and `6.3M` tokens today against `500` / `5M`;
+  - the token limit is already at the configured maximum; do not raise/reset it without explicit cost approval;
+  - live settings changed from `normal/low` to `economy/medium` to reduce future AI spend without increasing limits;
+  - current queue was about `published=154`, `rejected=35`, `ready_review=1`, `new=27`, active processable `28`.
+- Old known-bad live content still present:
+  - published queue groups currently found: `6092`, `6230`, `6244`, `6296`, `6300`, `6325`, `6332`, `6352`, `6354`;
+  - do not draft/quarantine/unpublish them without explicit approval for live content removal.
+
 ## Latest Handoff 2026-05-25 19:40 UTC — fresh translation/source audit clean; UK grammar repair deployed
 
 - First file remains `/root/projects/europulse/LLM_START_HERE.md`; latest section there overrides older notes.

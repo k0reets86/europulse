@@ -1,6 +1,6 @@
 # EuroPulse LLM Start Here
 
-Last updated: 2026-05-26 10:40 UTC.
+Last updated: 2026-05-26 10:45 UTC.
 
 This file is the first entry point for any new LLM session on EuroPulse.
 Read it before opening old handoffs, TODOs, or plugin maps.
@@ -32,7 +32,7 @@ Do not start from archived v2/v3 notes unless a current file explicitly points t
   `europulse.today` will be attached later by the operator after automation is
   stable.
 
-The active work package is now the 2026-05-21 autonomous quality hardening rollout, after the post-incident stabilization pass. The goal is to make autonomous publishing safer by adding a measured quality contour around existing choke points, not by rewriting the pipeline. The branch is dirty with intentional safety edits; do not discard them.
+The active work package is now the 2026-05-21 autonomous quality hardening rollout, after the post-incident stabilization pass. The goal is to make autonomous publishing safer by adding a measured quality contour around existing choke points, not by rewriting the pipeline. As of `2026-05-26 10:41 UTC` the branch is clean and ahead of `origin/review/plugin-audit` by 4 local commits; if a later session sees a dirty tree, do not discard unrelated changes.
 
 ## Current Mission For Any New LLM
 
@@ -52,11 +52,11 @@ Current phase/result:
 
 - 2026-05-26 10:40 UTC AI budget decision applied after explicit user direction to increase the limit. Repo/live `EPV2_Settings` now allows up to `1000` AI requests and `12,000,000` AI tokens per day; admin UI shows the new max values. Live `epv2_settings` changed to `ai_budget_mode=normal`, `ai_selection_strictness=medium`, `ai_daily_request_soft_limit=800`, `ai_daily_token_soft_limit=12000000`. Live budget check after the change: `rewritten_today=267`, `tokens_today=6638384`, `request_limit=800`, `token_limit=12000000`, `hard_stop=false`. Counters were not reset.
 - 2026-05-26 10:40 UTC quality stance for budget increase: do not spend AI on weak candidates, but do not starve normal daytime publishing. "Weak" remains guarded by publish-grade selection (`review/strong/priority`), serious-category publish floor `45`, source sufficiency / source expansion gates, and post-publish quality audit; the system should no longer rely on `economy` mode as the primary quality filter.
-- 2026-05-26 10:20 UTC follow-up: branch `review/plugin-audit` is clean and `ahead 2` with local commits `9be2d40 Update home pool fixture after selection backfill` and `bd9f4f9 Enforce publish score floor and night schedule`. Push to `origin/review/plugin-audit` was blocked by approval policy because the user must explicitly approve the external GitHub transfer. Exact needed approval: `разрешаю push в GitHub origin/review/plugin-audit`.
+- 2026-05-26 10:41 UTC git status: branch `review/plugin-audit` is clean and `ahead 4` with local commits `3f86e01 Raise AI daily budget cap`, `dcb1587 Record post-fix quality and budget handoff`, `9be2d40 Update home pool fixture after selection backfill`, and `bd9f4f9 Enforce publish score floor and night schedule`. Push to `origin/review/plugin-audit` was blocked by approval policy because the user must explicitly approve the external GitHub transfer. Exact needed approval: `разрешаю push в GitHub origin/review/plugin-audit`.
 - 2026-05-26 10:20 UTC live quality check after the 2026-05-25 21:30 UTC publish-floor/night-window fix: public site `200 OK`; worker, orchestrator, and PHP-FPM active; `epv2_active_alerts` empty. Fresh published rows after the fix have `0` posts below selection score `45`, `0` closed-night-window publishes, and `post_publish_rendered` shows `33 pass` / average `100`. Live quality audit since `2026-05-25 21:30:00` checked `11` published groups across `deutschland`, `sport`, `ukraine`, `welt`, and `wirtschaft`; findings hard/warn/info were empty.
 - 2026-05-26 10:20 UTC regression status: `publish_gate_test.php`, `quality_gate_test.php`, updated `home_pool_test.php`, and worker translator/rewriter unittests passed. `home_pool_test.php` was updated because live fixture `6395` is no longer stale after canonical selection backfill; it now skips the stale-fixture assertion and verifies canonical `low/41` is homepage-ineligible.
-- 2026-05-26 10:20 UTC AI budget: hard stop is real, not a crash. Current live budget state was about `254` rewrites and `6.3M` tokens against the configured `500` / `5M` daily limits. The daily token limit is already at the configured maximum and must not be raised or reset without explicit cost approval. To reduce tomorrow's spend without increasing limits, live settings were changed from `ai_budget_mode=normal`, `ai_selection_strictness=low` to `ai_budget_mode=economy`, `ai_selection_strictness=medium`.
-- 2026-05-26 10:20 UTC queue/backlog: queue snapshot was roughly `published=154`, `rejected=35`, `ready_review=1`, `new=27`, active processable `28`. This is expected while today's AI budget is exhausted; do not manually force `collect`, `process`, or `publish`.
+- 2026-05-26 10:20 UTC AI budget historical note, superseded at `10:40 UTC`: hard stop was real, not a crash. Live budget was about `254` rewrites and `6.3M` tokens against the old `500` / `5M` daily limits. The temporary `economy/medium` throttle was replaced after the user explicitly chose a higher budget over starving daytime publishing.
+- 2026-05-26 10:20 UTC queue/backlog historical snapshot: queue was roughly `published=154`, `rejected=35`, `ready_review=1`, `new=27`, active processable `28` while the old AI cap was exhausted. After the `10:40 UTC` budget raise, monitor the current queue instead of assuming the old hard stop still applies. Do not manually force `collect`, `process`, or `publish`.
 - 2026-05-26 10:20 UTC old known-bad live content: the queue currently still contains published groups `6092`, `6230`, `6244`, `6296`, `6300`, `6325`, `6332`, `6352`, `6354`. Do not draft/quarantine/unpublish without explicit approval for live content removal.
 - Phase 1 and the non-blocking part of Phase 2 are deployed live.
 - The system records `publish_gate_shadow` rows for generated payloads.

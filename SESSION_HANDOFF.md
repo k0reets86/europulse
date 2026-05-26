@@ -51,11 +51,10 @@
   - `quality_gate_test.php` passed;
   - `home_pool_test.php` initially failed because fixture `6395` was no longer stale after canonical selection backfill; updated the test and it passed;
   - worker translator/rewriter unittests passed (`6` tests).
-- Budget/backlog:
-  - live `ai_budget` hard stop is real: about `254` rewrites and `6.3M` tokens today against `500` / `5M`;
-  - the token limit is already at the configured maximum; do not raise/reset it without explicit cost approval;
-  - live settings changed from `normal/low` to `economy/medium` to reduce future AI spend without increasing limits;
-  - current queue was about `published=154`, `rejected=35`, `ready_review=1`, `new=27`, active processable `28`.
+- Budget/backlog historical note, superseded by the `2026-05-26 10:40 UTC` handoff above:
+  - live `ai_budget` hard stop was real at the old cap: about `254` rewrites and `6.3M` tokens against `500` / `5M`;
+  - temporary `economy/medium` throttling was later replaced after the user explicitly chose a higher cap;
+  - old queue snapshot was about `published=154`, `rejected=35`, `ready_review=1`, `new=27`, active processable `28`.
 - Old known-bad live content still present:
   - published queue groups currently found: `6092`, `6230`, `6244`, `6296`, `6300`, `6325`, `6332`, `6352`, `6354`;
   - do not draft/quarantine/unpublish them without explicit approval for live content removal.

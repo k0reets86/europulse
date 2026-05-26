@@ -8,7 +8,7 @@
 - [ ] Do not run manual `collect`, `process`, or `publish`.
 - [ ] Do not bypass approval limits. Push requires exact user approval: `разрешаю push в GitHub origin/review/plugin-audit`.
 
-## Current Runtime Status 2026-05-26 10:20 UTC — score/night fix verified, AI budget throttled
+## Current Runtime Status 2026-05-26 10:40 UTC — score/night fix verified, AI budget raised
 
 - [x] User explicitly chose raising the AI limit over over-throttling daytime publishing.
 - [x] Raised repo/live AI limit ceiling:
@@ -35,7 +35,7 @@
 - [x] Updated `home_pool_test.php` because fixture `6395` is no longer stale after canonical selection backfill; canonical `low/41` now correctly means homepage-ineligible.
 - [x] Earlier `economy/medium` throttle was superseded after explicit user direction to raise the limit; live is now `normal/medium`.
 - [x] `ai_budget` hard stop was cleared by increasing the cap, without resetting counters.
-- [!] Local branch is clean but `ahead 2`: commits `9be2d40` and `bd9f4f9` are not pushed because GitHub push needs exact approval.
+- [!] Local branch is clean but `ahead 4`: commits `3f86e01`, `dcb1587`, `9be2d40`, and `bd9f4f9` are not pushed because GitHub push needs exact approval.
 - [!] Old known-bad published groups still live: `6092`, `6230`, `6244`, `6296`, `6300`, `6325`, `6332`, `6352`, `6354`.
 - [ ] Do not manually force queue stages; let the raised budget prove itself on autonomous cycles.
 - [ ] If user explicitly approves, push `review/plugin-audit` to GitHub.

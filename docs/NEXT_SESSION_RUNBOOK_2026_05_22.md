@@ -1,6 +1,16 @@
 # EuroPulse Next Session Runbook — 2026-05-22 23:30 UTC
 
-This document is the base runbook. Read it immediately after `LLM_START_HERE.md`, but the latest `2026-05-24 00:24 UTC` checkpoint in `LLM_START_HERE.md` overrides stale baselines below.
+This document is the base runbook. Read it immediately after `LLM_START_HERE.md`, but the latest `2026-05-26 10:40 UTC` checkpoint in `LLM_START_HERE.md` overrides stale baselines below.
+
+## Addendum — 2026-05-26 10:40 UTC
+
+- User explicitly chose raising the AI budget over pacing that would make daytime publishing weak.
+- Live AI settings are now `ai_budget_mode=normal`, `ai_selection_strictness=medium`, `ai_daily_request_soft_limit=800`, `ai_daily_token_soft_limit=12000000`.
+- Repo/live settings code now permits up to `1000` AI requests and `12,000,000` AI tokens per day; admin UI displays those max values.
+- Live budget proof after the change: `rewritten_today=269`, `tokens_today=6691309`, `request_limit=800`, `token_limit=12000000`, `hard_stop=false`. Counters were not reset.
+- Quality protection should come from publish-grade selection, serious-category score floor `45`, source sufficiency/source-expansion gates, and rendered quality audit. Do not use `economy` mode as the main quality filter unless the user explicitly requests lower throughput.
+- Branch `review/plugin-audit` is clean and `ahead 4`; local commits are `3f86e01`, `dcb1587`, `9be2d40`, `bd9f4f9`. Push still requires exact user approval: `разрешаю push в GitHub origin/review/plugin-audit`.
+- Next live work: observe fresh autonomous cycles under the raised budget, especially 06:00-22:00 Europe/Berlin output quality and backlog drain. Do not manually trigger `collect`, `process`, or `publish`.
 
 ## Addendum — 2026-05-24 00:24 UTC
 

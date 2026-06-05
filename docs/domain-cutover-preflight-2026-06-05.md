@@ -3,6 +3,16 @@
 ## Current State
 
 - Live site currently uses `http://204.168.148.47` as both `home` and `siteurl`.
+- Target domain: `europulse.today`.
+- Previous Namecheap DNS records before pointing the domain to this server:
+  - `ALIAS Record`, Host `@`, Value `ingress-derowd.easywp.com.`, TTL `1 min`
+  - `CNAME Record`, Host `www`, Value `europulse.today.`, TTL `1 min`
+  - `TXT Record`, Host `@`, Value `v=spf1 include:spf.easywp.com ~all`, TTL `30 min`
+- Rollback to the previous EasyWP site, if needed:
+  - remove the new `A Record @ -> 204.168.148.47`;
+  - restore `ALIAS Record @ -> ingress-derowd.easywp.com.`;
+  - keep `CNAME www -> europulse.today.` unless Namecheap/EasyWP support says otherwise;
+  - keep the SPF TXT record if EasyWP mail is still used.
 - Backup before domain work:
   - `/root/backups/europulse-pre-domain-20260605-212748/db.sql.gz`
   - `/root/backups/europulse-pre-domain-20260605-212748/live-code.tar.gz`

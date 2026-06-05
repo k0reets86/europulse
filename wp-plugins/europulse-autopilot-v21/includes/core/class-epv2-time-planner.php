@@ -20,9 +20,9 @@ final class EPV2_Time_Planner {
 		//   06–09  collect 1/час (на :00)               publish каждые 5 мин
 		//   09–16  collect 1/час (на :00)               publish каждые 5 мин
 		//   16–19  collect 1/час (на :00)               publish каждые 5 мин
-		//   19–22  collect 1/час (на :00)               publish каждые 5 мин
-		//   22–23  collect 1× (на :00 в 22:00)          publish OFF
-		//   23–06  collect OFF, publish OFF — только breaking
+		//   19–21  collect 1/час (на :00)               publish каждые 5 мин
+		//   21–22  collect 1× (на :00 в 21:00)          publish OFF
+		//   22–06  collect OFF, publish OFF — только breaking
 		// Breaking всегда обходит лимиты (см. should_collect/should_publish).
 		$timer_5  = range(0, 55, 5);
 		return [
@@ -34,11 +34,11 @@ final class EPV2_Time_Planner {
 				// Daytime peak (2026-05-12: 2/час → 1/час по operator-feedback — backlog в «новых»)
 				['start' => '16:00', 'end' => '19:00', 'mode' => 'daytime_peak',     'collect_minutes' => [0],     'publish_minutes' => $timer_5],
 				// Evening prime: один сбор в час
-				['start' => '19:00', 'end' => '22:00', 'mode' => 'evening_prime',    'collect_minutes' => [0],     'publish_minutes' => $timer_5],
-				// Last regular collect of the day at 22:00. After that only breaking.
-				['start' => '22:00', 'end' => '23:00', 'mode' => 'wind_down_final',  'collect_minutes' => [0],     'publish_minutes' => []],
+				['start' => '19:00', 'end' => '21:00', 'mode' => 'evening_prime',    'collect_minutes' => [0],     'publish_minutes' => $timer_5],
+				// Last regular collect of the day at 21:00. After that only breaking collection; queued tail may finish.
+				['start' => '21:00', 'end' => '22:00', 'mode' => 'wind_down_final',  'collect_minutes' => [0],     'publish_minutes' => []],
 				// Night: collect OFF, publish OFF — только breaking.
-				['start' => '23:00', 'end' => '06:00', 'mode' => 'night_monitor',    'collect_minutes' => [],      'publish_minutes' => []],
+				['start' => '22:00', 'end' => '06:00', 'mode' => 'night_monitor',    'collect_minutes' => [],      'publish_minutes' => []],
 			],
 			'breaking_watch_minutes' => [0, 30],
 			'timezone' => 'Europe/Berlin',
@@ -88,6 +88,14 @@ final class EPV2_Time_Planner {
 		if ($collect_minutes === []) {
 			return false;
 		}
+		// The 21:00 final collect is a one-shot business rule, but the external
+		// orchestrator loop can be busy with process/publish when minute :00
+		// passes. Give only this final window a short catch-up range so the last
+		// regular collect is not missed by loop jitter.
+		if ($mode === 'wind_down_final' && in_array(0, array_map('intval', $collect_minutes), true)) {
+			$minute = (int) self::now()->format('i');
+			return $minute < 15;
+		}
 		return self::minute_allowed($collect_minutes);
 	}
 
@@ -116,7 +124,8 @@ final class EPV2_Time_Planner {
 		$window = self::current_window();
 		$mode = (string) ($window['mode'] ?? '');
 		if (self::publish_breaking_only_mode($mode)) {
-			return class_exists('EPV2_Queue') && EPV2_Queue::has_due_breaking_publish_item();
+			return class_exists('EPV2_Queue')
+				&& (EPV2_Queue::has_due_publish_item() || EPV2_Queue::has_due_breaking_publish_item());
 		}
 		if (class_exists('EPV2_Queue') && EPV2_Queue::has_due_publish_item()) {
 			return true;
@@ -133,7 +142,61 @@ final class EPV2_Time_Planner {
 
 	public static function publish_requires_breaking_only(): bool {
 		$window = self::current_window();
-		return self::publish_breaking_only_mode((string) ($window['mode'] ?? ''));
+		if (! self::publish_breaking_only_mode((string) ($window['mode'] ?? ''))) {
+			return false;
+		}
+		return ! (class_exists('EPV2_Queue') && EPV2_Queue::has_due_publish_item());
+	}
+
+	public static function timestamp_allows_regular_publish(int $timestamp, int $offset_seconds = 0): bool {
+		if ($timestamp <= 0) {
+			return false;
+		}
+		try {
+			$profile = EPV2_Settings::get('time_schedule_profile', self::defaults());
+			$tz = new DateTimeZone((string) ($profile['timezone'] ?? 'Europe/Berlin'));
+		} catch (Throwable $e) {
+			return false;
+		}
+		$windows = is_array($profile['windows'] ?? null) ? $profile['windows'] : [];
+		if ($windows === []) {
+			return false;
+		}
+		$dt = (new DateTimeImmutable('@' . $timestamp))->setTimezone($tz);
+		$hm = $dt->format('H:i');
+		foreach ($windows as $window) {
+			$start = (string) ($window['start'] ?? '');
+			$end = (string) ($window['end'] ?? '');
+			if ($start === '' || $end === '' || ! self::time_in_range($hm, $start, $end)) {
+				continue;
+			}
+			$mode = (string) ($window['mode'] ?? '');
+			if (self::publish_breaking_only_mode($mode)) {
+				return false;
+			}
+			$publish_minutes = array_values(array_unique(array_map('intval', (array) ($window['publish_minutes'] ?? []))));
+			if ($publish_minutes === []) {
+				return false;
+			}
+			$offset_minutes = (int) floor($offset_seconds / MINUTE_IN_SECONDS);
+			$logical_minute = (((int) $dt->format('i') - $offset_minutes) + 60) % 60;
+			return in_array($logical_minute, $publish_minutes, true);
+		}
+		return false;
+	}
+
+	public static function next_regular_publish_slot_after(int $afterTimestamp, int $intervalMinutes = 5, int $offset_seconds = 0): ?int {
+		$intervalMinutes = max(5, $intervalMinutes);
+		$step = $intervalMinutes * MINUTE_IN_SECONDS;
+		$candidate = self::next_aligned_publish_timestamp_from($afterTimestamp, $intervalMinutes, $offset_seconds);
+		$max_checks = (int) ceil((7 * DAY_IN_SECONDS) / $step);
+		for ($i = 0; $i <= $max_checks; $i++) {
+			if (self::timestamp_allows_regular_publish($candidate, $offset_seconds)) {
+				return $candidate;
+			}
+			$candidate += $step;
+		}
+		return null;
 	}
 
 	public static function publish_budget_allows_item(bool $priority_override = false): bool {
@@ -212,8 +275,8 @@ final class EPV2_Time_Planner {
 			'daytime_active'  => 'Дневной актив (9:00–12:00, 5 мин)',
 			'lunch_peak'      => 'Обед (12:00–13:30, 5 мин)',
 			'daytime_mid'     => 'День мид (13:30–18:00, 8 мин)',
-			'evening_prime'   => 'Вечерний прайм (19:00–22:00, 5 мин)',
-			'wind_down_final' => 'Финальный сбор (22:00, дальше только breaking)',
+			'evening_prime'   => 'Вечерний прайм (19:00–21:00, 5 мин)',
+			'wind_down_final' => 'Финальный сбор (21:00, дальше только breaking)',
 			'wind_down'       => 'Wind-down (legacy)',
 			'wind_down_quiet' => 'Тихое окно (legacy, только breaking)',
 			'night_open'      => 'Ночь (legacy 00:00 collect закрыт)',
@@ -264,6 +327,25 @@ final class EPV2_Time_Planner {
 
 	private static function publish_breaking_only_mode(string $mode): bool {
 		return in_array($mode, ['wind_down_final', 'wind_down_quiet', 'night_open', 'night_monitor'], true);
+	}
+
+	private static function next_aligned_publish_timestamp_from(int $fromTimestamp, int $minutes, int $offset_seconds): int {
+		$minutes = max(5, $minutes);
+		$offset_minutes = (int) floor($offset_seconds / MINUTE_IN_SECONDS);
+		$now = max(0, $fromTimestamp);
+		$hour_start = (int) gmdate('U', strtotime(gmdate('Y-m-d H:00:00', $now)));
+		$window_minutes = [];
+		for ($minute = 0; $minute < 60; $minute += $minutes) {
+			$window_minutes[] = ($minute + $offset_minutes) % 60;
+		}
+		sort($window_minutes);
+		foreach ($window_minutes as $minute) {
+			$candidate = $hour_start + ($minute * MINUTE_IN_SECONDS);
+			if ($candidate > $now) {
+				return $candidate;
+			}
+		}
+		return $hour_start + HOUR_IN_SECONDS + ($window_minutes[0] * MINUTE_IN_SECONDS);
 	}
 
 	private static function minute_allowed(array $allowedMinutes): bool {

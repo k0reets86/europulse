@@ -601,6 +601,7 @@ Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "card_l
         ("deepseek", deepseek_api_key, "deepseek-chat"),
     ]
     provider_errors: list[str] = []
+    best_uniqueness_failed: RewriteResult | None = None
     for provider, api_key, model in candidates:
         if not api_key:
             continue
@@ -652,11 +653,25 @@ Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "card_l
                 else:
                     logger.warning("Rewrite anti-plagiarism retry via %s failed: %s", provider, retry.error)
             register_provider_success(provider)
+            if not result.uniqueness_passed:
+                if best_uniqueness_failed is None or result.uniqueness_pct > best_uniqueness_failed.uniqueness_pct:
+                    best_uniqueness_failed = result
+                provider_errors.append(
+                    f"{provider}/{model or 'default'}: uniqueness {result.uniqueness_pct:.1f}% < 85"
+                )
+                logger.warning(
+                    "Rewrite via %s failed anti-plagiarism gate after retry: %.1f%% < 85%%; trying fallback provider if available",
+                    provider,
+                    result.uniqueness_pct,
+                )
+                continue
             return result
         register_provider_failure(provider, result.error)
         provider_errors.append(f"{provider}/{model or 'default'}: {result.error}")
         logger.warning("Rewrite via %s failed: %s", provider, result.error)
 
+    if best_uniqueness_failed is not None:
+        return best_uniqueness_failed
     return RewriteResult(error="All AI providers failed: " + "; ".join(provider_errors))
 
 

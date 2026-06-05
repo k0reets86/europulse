@@ -281,6 +281,10 @@ final class EPV2_Jobs {
 		return self::next_scheduled_timestamp(self::HOOK_PUBLISH);
 	}
 
+	public static function publish_slot_offset_seconds(): int {
+		return self::hook_offset_seconds(self::HOOK_PUBLISH);
+	}
+
 	public static function next_publish_slot_after(int $afterTimestamp): int {
 		$minutes = max(5, (int) EPV2_Settings::get('publish_interval_minutes', 5));
 		$base = max($afterTimestamp, time());

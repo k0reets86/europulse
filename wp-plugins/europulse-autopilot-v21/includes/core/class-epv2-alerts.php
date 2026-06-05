@@ -54,7 +54,15 @@ final class EPV2_Alerts {
 		}
 		$ready_items = (int) $wpdb->get_var(
 			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue
-			 WHERE state IN ('ready_publish', 'retry_publish', 'publishing')"
+			 WHERE state = 'publishing'
+			    OR (
+			      state IN ('ready_publish', 'retry_publish')
+			      AND (
+			        JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.publish_not_before')) IS NULL
+			        OR JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.publish_not_before')) = ''
+			        OR CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.publish_not_before')) AS UNSIGNED) <= UNIX_TIMESTAMP(UTC_TIMESTAMP())
+			      )
+			    )"
 		);
 		if ($ready_items === 0) {
 			return false; // no items to publish — legitimate idle
@@ -164,13 +172,16 @@ final class EPV2_Alerts {
 		}
 		$window = EPV2_Time_Planner::current_window();
 		$mode = (string) ($window['mode'] ?? '');
+		if (method_exists('EPV2_Time_Planner', 'timestamp_allows_regular_publish')) {
+			$offset = method_exists('EPV2_Jobs', 'publish_slot_offset_seconds') ? EPV2_Jobs::publish_slot_offset_seconds() : 2 * MINUTE_IN_SECONDS;
+			return EPV2_Time_Planner::timestamp_allows_regular_publish(time(), $offset)
+				|| (class_exists('EPV2_Queue') && (EPV2_Queue::has_due_publish_item() || EPV2_Queue::has_due_breaking_publish_item()));
+		}
 		return in_array($mode, [
 			'morning_catchup',
 			'daytime_active',
 			'daytime_peak',
 			'evening_prime',
-			'wind_down_final',
-			'wind_down_quiet',
 		], true);
 	}
 }

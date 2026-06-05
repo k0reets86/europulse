@@ -428,13 +428,13 @@ final class EPV2_Worker_Client {
 		foreach ( (array) ( $story_card['entities_people'] ?? [] ) as $person ) {
 			$name = is_array( $person ) ? trim( (string) ( $person['name'] ?? '' ) ) : trim( (string) $person );
 			if ( mb_strlen( $name ) >= 4 ) {
-				$entity_candidates[] = $name;
+				$entity_candidates[] = [ 'name' => $name, 'type' => 'person' ];
 			}
 		}
 		foreach ( (array) ( $story_card['entities_organizations'] ?? [] ) as $org ) {
 			$name = is_array( $org ) ? trim( (string) ( $org['name'] ?? '' ) ) : trim( (string) $org );
 			if ( mb_strlen( $name ) >= 4 ) {
-				$entity_candidates[] = $name;
+				$entity_candidates[] = [ 'name' => $name, 'type' => 'organization' ];
 			}
 		}
 		if ( empty( $entity_candidates ) ) {
@@ -452,48 +452,89 @@ final class EPV2_Worker_Client {
 		$cutoff = gmdate( 'Y-m-d H:i:s', time() - 7 * DAY_IN_SECONDS );
 
 		// Try entities в порядке появления. Берём first matching.
-		foreach ( $entity_candidates as $entity ) {
-			// Surname-only match (last token) для лучшего recall —
-			// "Markus Söder" → match по "Söder", чтобы поймать
-			// previous "Söder kündigt an" посты.
-			$parts = preg_split( '/\s+/u', $entity ) ?: [];
-			$surname = end( $parts );
-			$surname = is_string( $surname ) ? $surname : $entity;
-			if ( mb_strlen( $surname ) < 4 ) {
-				$surname = $entity;
-			}
-			$like = '%' . $wpdb->esc_like( $surname ) . '%';
-			$rows = $wpdb->get_results( $wpdb->prepare(
-				"SELECT p.ID, p.post_title, p.post_date
-				 FROM {$wpdb->posts} p
-				 INNER JOIN {$wpdb->term_relationships} tr ON tr.object_id = p.ID
-				 INNER JOIN {$wpdb->term_taxonomy} tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
-				 INNER JOIN {$wpdb->terms} t ON t.term_id = tt.term_id
-				 WHERE p.post_status = 'publish'
-				   AND p.post_type = 'post'
-				   AND tt.taxonomy = 'category'
-				   AND t.slug = %s
-				   AND p.post_title LIKE %s
-				   AND p.post_date >= %s
-				   AND p.ID <> %d
-				 ORDER BY p.post_date DESC
-				 LIMIT 1",
-				$category, $like, $cutoff, $current_post_id
-			) );
-			if ( ! empty( $rows ) ) {
-				$row = $rows[0];
-				$url = get_permalink( (int) $row->ID );
-				if ( ! is_string( $url ) || $url === '' ) {
-					continue;
+		foreach ( $entity_candidates as $entity_entry ) {
+			$entity = trim( (string) ( $entity_entry['name'] ?? '' ) );
+			$type = (string) ( $entity_entry['type'] ?? '' );
+			foreach ( self::prior_coverage_search_terms( $entity, $type ) as $term ) {
+				$like = '%' . $wpdb->esc_like( $term ) . '%';
+				$rows = $wpdb->get_results( $wpdb->prepare(
+					"SELECT p.ID, p.post_title, p.post_date
+					 FROM {$wpdb->posts} p
+					 INNER JOIN {$wpdb->term_relationships} tr ON tr.object_id = p.ID
+					 INNER JOIN {$wpdb->term_taxonomy} tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
+					 INNER JOIN {$wpdb->terms} t ON t.term_id = tt.term_id
+					 WHERE p.post_status = 'publish'
+					   AND p.post_type = 'post'
+					   AND tt.taxonomy = 'category'
+					   AND t.slug = %s
+					   AND p.post_title LIKE %s
+					   AND p.post_date >= %s
+					   AND p.ID <> %d
+					 ORDER BY p.post_date DESC
+					 LIMIT 1",
+					$category, $like, $cutoff, $current_post_id
+				) );
+				if ( ! empty( $rows ) ) {
+					$row = $rows[0];
+					$url = get_permalink( (int) $row->ID );
+					if ( ! is_string( $url ) || $url === '' ) {
+						continue;
+					}
+					return [ [
+						'title'     => (string) $row->post_title,
+						'url'       => $url,
+						'post_date' => substr( (string) $row->post_date, 0, 10 ),
+						'entity'    => $term,
+					] ];
 				}
-				return [ [
-					'title'     => (string) $row->post_title,
-					'url'       => $url,
-					'post_date' => substr( (string) $row->post_date, 0, 10 ),
-					'entity'    => $surname,
-				] ];
 			}
 		}
 		return [];
+	}
+
+	private static function prior_coverage_search_terms( string $entity, string $type ): array {
+		$entity = trim( preg_replace( '/\s+/u', ' ', $entity ) ?? '' );
+		if ( mb_strlen( $entity ) < 4 ) {
+			return [];
+		}
+		$generic_geo = [
+			'berlin', 'bayern', 'bavaria', 'munich', 'münchen', 'deutschland', 'germany',
+			'ukraine', 'ukraina', 'russland', 'russia', 'europa', 'europe', 'usa', 'us',
+			'kyiv', 'kiew', 'köln', 'cologne', 'hamburg', 'leipzig',
+		];
+		$tokens = preg_split( '/\s+/u', $entity ) ?: [];
+
+		if ( $type === 'person' ) {
+			$surname = end( $tokens );
+			$surname = is_string( $surname ) ? trim( $surname ) : $entity;
+			$needle = mb_strtolower( $surname );
+			if ( mb_strlen( $surname ) >= 4 && ! in_array( $needle, $generic_geo, true ) ) {
+				return [ $surname ];
+			}
+			return [ $entity ];
+		}
+
+		$terms = [];
+		$entity_is_single_generic = count( $tokens ) === 1 && in_array( mb_strtolower( $entity ), $generic_geo, true );
+		if ( mb_strlen( $entity ) >= 6 && ! $entity_is_single_generic ) {
+			$terms[] = $entity;
+		}
+		for ( $i = 0; $i < count( $tokens ) - 1; $i++ ) {
+			$a = trim( (string) $tokens[ $i ] );
+			$b = trim( (string) $tokens[ $i + 1 ] );
+			if ( $a === '' || $b === '' ) {
+				continue;
+			}
+			$a_generic = in_array( mb_strtolower( $a ), $generic_geo, true );
+			$b_generic = in_array( mb_strtolower( $b ), $generic_geo, true );
+			if ( $a_generic && $b_generic ) {
+				continue;
+			}
+			$term = $a . ' ' . $b;
+			if ( mb_strlen( $term ) >= 5 ) {
+				$terms[] = $term;
+			}
+		}
+		return array_values( array_unique( array_filter( $terms ) ) );
 	}
 }

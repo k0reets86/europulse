@@ -1581,6 +1581,10 @@ input[type="submit"]:hover {
 	max-width: 22ch;
 }
 
+.ct-sidebar .ct-widget.widget_block:has(> p:empty) {
+	display: none;
+}
+
 @media (min-width: 1000px) {
 	[data-prefix="categories"] .ct-sidebar,
 	[data-prefix="single_blog_post"] .ct-sidebar {

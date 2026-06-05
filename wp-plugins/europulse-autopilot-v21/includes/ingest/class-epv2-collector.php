@@ -5,7 +5,10 @@ if (! defined('ABSPATH')) {
 }
 
 final class EPV2_Collector {
+	private static ?bool $run_final_collect_slot = null;
+
 	public static function run_scheduled(bool $force = false): void {
+		self::$run_final_collect_slot = self::detect_final_collect_slot_active();
 		if (! EPV2_Time_Planner::should_collect($force)) {
 			return;
 		}
@@ -43,9 +46,21 @@ final class EPV2_Collector {
 		// tick, но backpressure — это safety contract, не overridable
 		// time-planner gate. Hard cap (200) тоже fires при force=true
 		// — same pattern.
+		$state_new_snapshot = (int) $wpdb->get_var(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}epv2_queue WHERE state = 'new'"
+		);
+		$state_new_hard_cap = max(5, (int) EPV2_Settings::get('queue_state_new_hard_cap', 10));
 		$deferred_until = (int) get_option('epv2_collect_deferred_until', 0);
 		if ($deferred_until > time()) {
-			return;
+			$override = self::final_collect_backpressure_override_state($state_new_snapshot, $state_new_hard_cap, $pending_hard, null);
+			if (empty($override['allow'])) {
+				return;
+			}
+			if (class_exists('EPV2_Logger')) {
+				EPV2_Logger::info('collect', 'collect final slot overrides deferred_until', array_merge($override, [
+					'deferred_until' => gmdate('Y-m-d H:i:s', $deferred_until),
+				]));
+			}
 		}
 		// Backpressure: defer 10 min when pending >= capacity (12 для
 		// 5-мин publish). Apply regardless of $force — same reason as
@@ -256,17 +271,25 @@ final class EPV2_Collector {
 		);
 		$state_new_hard_cap = max(5, (int) EPV2_Settings::get('queue_state_new_hard_cap', 10));
 		if ($state_new_count >= $state_new_hard_cap) {
-			if (class_exists('EPV2_Logger')) {
-				EPV2_Logger::info('collect', 'collect deferred — state=new hard cap', [
-					'state_new'  => $state_new_count,
-					'hard_cap'   => $state_new_hard_cap,
-				]);
+			$final_override = self::final_collect_backpressure_override_state($state_new_count, $state_new_hard_cap, null, null);
+			if (! empty($final_override['allow'])) {
+				if (class_exists('EPV2_Logger')) {
+					EPV2_Logger::info('collect', 'collect final slot overrides state=new hard cap', $final_override);
+				}
+			} else {
+				if (class_exists('EPV2_Logger')) {
+					EPV2_Logger::info('collect', 'collect deferred — state=new hard cap', [
+						'state_new'  => $state_new_count,
+						'hard_cap'   => $state_new_hard_cap,
+						'final_slot_reason' => (string) ($final_override['reason'] ?? ''),
+					]);
+				}
+				// Persist physical defer для следующих 10 мин чтобы орxестратор
+				// не пробовал в каждый WP-cron tick. Без неё мы skip'ем только
+				// текущий tick, и следующий через 1 мин опять fire'ит.
+				update_option('epv2_collect_deferred_until', time() + 10 * MINUTE_IN_SECONDS, false);
+				return true;
 			}
-			// Persist physical defer для следующих 10 мин чтобы орxестратор
-			// не пробовал в каждый WP-cron tick. Без неё мы skip'ем только
-			// текущий tick, и следующий через 1 мин опять fire'ит.
-			update_option('epv2_collect_deferred_until', time() + 10 * MINUTE_IN_SECONDS, false);
-			return true;
 		}
 
 		$pending = (int) $wpdb->get_var(
@@ -291,6 +314,19 @@ final class EPV2_Collector {
 		// разрешало pending до 18 при capacity 12, что 1.5h работы.
 		$threshold = $capacity;
 		if ($pending <= $threshold) {
+			delete_option('epv2_collect_backpressure_total_seconds');
+			delete_option('epv2_collect_deferred_until');
+			return false;
+		}
+		$final_override = self::final_collect_backpressure_override_state($state_new_count, $state_new_hard_cap, $pending, $threshold);
+		if (! empty($final_override['allow'])) {
+			if (class_exists('EPV2_Logger')) {
+				EPV2_Logger::info('collect', 'collect final slot overrides capacity backpressure', array_merge($final_override, [
+					'pending' => $pending,
+					'capacity' => $capacity,
+					'threshold' => $threshold,
+				]));
+			}
 			delete_option('epv2_collect_backpressure_total_seconds');
 			delete_option('epv2_collect_deferred_until');
 			return false;
@@ -1192,7 +1228,103 @@ final class EPV2_Collector {
 	}
 
 	private static function effective_collect_per_category_limit(): int {
-		return max(1, (int) EPV2_Settings::get('max_collect_per_category', 2));
+		$limit = max(1, (int) EPV2_Settings::get('max_collect_per_category', 2));
+		if (self::final_collect_slot_active()) {
+			$final_limit = max(1, (int) EPV2_Settings::get('final_collect_per_category_limit', 1));
+			return min($limit, $final_limit);
+		}
+		return $limit;
+	}
+
+	private static function final_collect_slot_active(): bool {
+		if (self::$run_final_collect_slot !== null) {
+			return self::$run_final_collect_slot;
+		}
+		return self::detect_final_collect_slot_active();
+	}
+
+	private static function detect_final_collect_slot_active(): bool {
+		if (! class_exists('EPV2_Time_Planner')) {
+			return false;
+		}
+		$window = EPV2_Time_Planner::current_window();
+		if ((string) ($window['mode'] ?? '') !== 'wind_down_final') {
+			return false;
+		}
+		$collect_minutes = array_values(array_unique(array_map('intval', (array) ($window['collect_minutes'] ?? []))));
+		if ($collect_minutes === []) {
+			return false;
+		}
+		return in_array((int) EPV2_Time_Planner::now()->format('i'), $collect_minutes, true);
+	}
+
+	private static function final_collect_backpressure_override_state(int $state_new_count, int $state_new_hard_cap, ?int $pending, ?int $threshold): array {
+		if (! self::final_collect_slot_active()) {
+			return [
+				'allow' => false,
+				'reason' => 'not_final_collect_slot',
+			];
+		}
+
+		$multiplier = max(1, min(10, (int) EPV2_Settings::get('final_collect_backpressure_cap_multiplier', 3)));
+		$catastrophic_new_cap = max($state_new_hard_cap + 1, $state_new_hard_cap * $multiplier);
+		if ($state_new_count >= $catastrophic_new_cap) {
+			return [
+				'allow' => false,
+				'reason' => 'state_new_catastrophic',
+				'state_new' => $state_new_count,
+				'hard_cap' => $state_new_hard_cap,
+				'catastrophic_new_cap' => $catastrophic_new_cap,
+			];
+		}
+
+		if ($pending !== null) {
+			$pending_cap = $threshold !== null
+				? max($catastrophic_new_cap, $threshold * $multiplier)
+				: $catastrophic_new_cap;
+			if ($pending >= $pending_cap) {
+				return [
+					'allow' => false,
+					'reason' => 'pending_catastrophic',
+					'state_new' => $state_new_count,
+					'pending' => $pending,
+					'pending_cap' => $pending_cap,
+				];
+			}
+		}
+
+		if (! class_exists('EPV2_Budget_Manager')) {
+			return [
+				'allow' => false,
+				'reason' => 'budget_manager_missing',
+			];
+		}
+		$budget = EPV2_Budget_Manager::budget_state();
+		$request_limit = max(1, (int) ($budget['request_limit'] ?? 0));
+		$rewritten_today = max(0, (int) ($budget['rewritten_today'] ?? 0));
+		$request_headroom = $request_limit - $rewritten_today;
+		$min_headroom = max(20, (int) EPV2_Settings::get('final_collect_ai_request_headroom_min', 100));
+		if (! empty($budget['hard_stop']) || $request_headroom < $min_headroom) {
+			return [
+				'allow' => false,
+				'reason' => 'ai_budget_headroom_low',
+				'request_headroom' => $request_headroom,
+				'min_headroom' => $min_headroom,
+				'request_limit' => $request_limit,
+				'rewritten_today' => $rewritten_today,
+			];
+		}
+
+		return [
+			'allow' => true,
+			'reason' => 'final_collect_guarded_override',
+			'state_new' => $state_new_count,
+			'hard_cap' => $state_new_hard_cap,
+			'catastrophic_new_cap' => $catastrophic_new_cap,
+			'request_headroom' => $request_headroom,
+			'min_headroom' => $min_headroom,
+			'per_category_limit' => max(1, (int) EPV2_Settings::get('final_collect_per_category_limit', 1)),
+		];
 	}
 
 	private static function effective_queue_new_max_per_category(): int {

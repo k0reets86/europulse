@@ -424,6 +424,7 @@ add_filter('widget_block_content', function ($content) {
 					'Welt' => 'World',
 					'Politik' => 'Politics',
 					'Wirtschaft' => 'Economy',
+					'Meinung' => 'Opinion',
 					'Leben in Deutschland' => 'Life in Germany',
 					'Kultur' => 'Culture',
 					'Über uns' => 'About Us',
@@ -470,6 +471,7 @@ add_filter('widget_block_content', function ($content) {
 					'Welt' => 'Світ',
 					'Politik' => 'Політика',
 					'Wirtschaft' => 'Економіка',
+					'Meinung' => 'Думка',
 					'Leben in Deutschland' => 'Життя в Німеччині',
 					'Kultur' => 'Культура',
 					'Sport' => 'Спорт',
@@ -545,6 +547,46 @@ add_filter('render_block', function ($block_content) {
 
 	return str_replace('>Weiterlesen<', '>' . esc_html(europulse_t('read_more')) . '<', $block_content);
 }, 20);
+
+add_filter('gettext', function ($translation, $text, $domain) {
+	if (is_admin() || $domain !== 'blocksy' || ! function_exists('pll_current_language')) {
+		return $translation;
+	}
+
+	$lang = pll_current_language('slug');
+
+	if (! in_array($lang, ['de', 'en', 'uk'], true)) {
+		return $translation;
+	}
+
+	$map = [
+		'Category' => europulse_t('category_label'),
+		'No results' => europulse_t('no_results'),
+	];
+
+	return $map[$text] ?? $translation;
+}, 20, 3);
+
+add_filter('get_the_archive_title', function ($title, $original_title = '', $prefix = '') {
+	if (is_admin() || ! is_category() || ! function_exists('pll_current_language') || ! function_exists('europulse_t')) {
+		return $title;
+	}
+
+	$lang = pll_current_language('slug');
+	if (! in_array($lang, ['de', 'en', 'uk'], true)) {
+		return $title;
+	}
+
+	$label = esc_html(europulse_t('category_label'));
+	$updated = preg_replace(
+		'/(<span\b[^>]*\bclass=(["\'])[^"\']*\bct-title-label\b[^"\']*\2[^>]*>)[^<]*(<\/span>)/i',
+		'$1' . $label . '$3',
+		(string) $title,
+		1
+	);
+
+	return is_string($updated) && $updated !== '' ? $updated : $title;
+}, 20, 3);
 
 add_filter('posts_search', function ($search, $query) {
 	global $wpdb;
@@ -720,7 +762,13 @@ add_filter('rank_math/frontend/description', function ($description) {
 		}
 	}
 	if (is_front_page() || is_home()) {
-		return 'EuroPulse berichtet ueber Deutschland, Europa, die Welt, die Ukraine, Wirtschaft, Kultur, Sport und Community-Themen in drei Sprachen.';
+		$lang = function_exists('europulse_current_lang') ? europulse_current_lang() : 'de';
+		$descriptions = [
+			'de' => 'EuroPulse berichtet ueber Deutschland, Europa, die Welt, die Ukraine, Wirtschaft, Kultur, Sport und Community-Themen in drei Sprachen.',
+			'en' => 'EuroPulse covers Germany, Europe, the world, Ukraine, economy, culture, sport and community stories in three languages.',
+			'uk' => 'EuroPulse висвітлює Німеччину, Європу, світ, Україну, економіку, культуру, спорт і теми спільноти трьома мовами.',
+		];
+		return $descriptions[$lang] ?? $descriptions['de'];
 	}
 	return $description;
 }, 30);
@@ -1024,6 +1072,7 @@ add_action('blocksy:single:content:bottom', function () {
 
 add_action('wp_footer', function () {
 	$search_label = europulse_t('search');
+	$back_to_top_label = europulse_t('back_to_top');
 	$current_lang = europulse_current_lang();
 	?>
 	<div class="europulse-search-popover" data-europulse-search-popover aria-hidden="true">
@@ -1033,7 +1082,7 @@ add_action('wp_footer', function () {
 			<button class="europulse-search-popover-submit" type="submit"><?php echo esc_html($search_label); ?></button>
 		</form>
 	</div>
-	<button class="europulse-back-to-top" type="button" aria-label="Nach oben" data-europulse-back-to-top>
+	<button class="europulse-back-to-top" type="button" aria-label="<?php echo esc_attr($back_to_top_label); ?>" data-europulse-back-to-top>
 		<span aria-hidden="true">↑</span>
 	</button>
 	<script>

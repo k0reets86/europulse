@@ -124,6 +124,15 @@ function europulse_t(string $key): string {
 			'city_london' => 'London',
 			'section_empty' => 'Noch keine Artikel in %s.',
 			'section_more_soon' => 'Weitere %s-Themen erscheinen hier.',
+			'most_read_empty' => 'Die wichtigsten Themen erscheinen hier automatisch.',
+			'latest_empty' => 'Die neuesten Themen erscheinen hier automatisch.',
+			'home_latest_empty' => 'Die aktuelle Meldungsliste füllt sich automatisch mit den neuesten Veröffentlichungen.',
+			'secondary_empty' => 'Hier erscheinen drei sekundäre Geschichten mit klarer Hierarchie und ohne Magazin-Chaos.',
+			'analysis_empty' => 'Ausgewählte Analysen und Hintergründe erscheinen hier, sobald passende Beiträge veröffentlicht sind.',
+			'slider_empty' => 'Noch keine Leitgeschichten verfügbar.',
+			'back_to_top' => 'Nach oben',
+			'category_label' => 'Kategorie',
+			'no_results' => 'Keine Ergebnisse',
 			'slider_navigation' => 'Top-Themen Navigation',
 			'slider_topic_aria' => 'Thema %d',
 			'important_now' => 'Wichtig im Blick',
@@ -168,6 +177,15 @@ function europulse_t(string $key): string {
 			'city_london' => 'Лондон',
 			'section_empty' => 'Поки що немає матеріалів у рубриці %s.',
 			'section_more_soon' => 'Інші матеріали рубрики %s з’являться тут.',
+			'most_read_empty' => 'Найважливіші теми автоматично зʼявлятимуться тут.',
+			'latest_empty' => 'Найновіші теми автоматично зʼявлятимуться тут.',
+			'home_latest_empty' => 'Список актуальних новин автоматично наповнюється найновішими публікаціями.',
+			'secondary_empty' => 'Тут автоматично зʼявлятимуться додаткові важливі історії.',
+			'analysis_empty' => 'Добірні аналітичні матеріали та контекст зʼявляться тут, щойно будуть опубліковані відповідні тексти.',
+			'slider_empty' => 'Головні матеріали ще не доступні.',
+			'back_to_top' => 'До початку сторінки',
+			'category_label' => 'Рубрика',
+			'no_results' => 'Немає результатів',
 			'slider_navigation' => 'Навігація головними темами',
 			'slider_topic_aria' => 'Тема %d',
 			'important_now' => 'Важливо зараз',
@@ -212,6 +230,15 @@ function europulse_t(string $key): string {
 			'city_london' => 'London',
 			'section_empty' => 'No articles in %s yet.',
 			'section_more_soon' => 'More %s stories will appear here.',
+			'most_read_empty' => 'The most important stories will appear here automatically.',
+			'latest_empty' => 'The latest stories will appear here automatically.',
+			'home_latest_empty' => 'The latest story list fills automatically with the newest publications.',
+			'secondary_empty' => 'Secondary stories will appear here automatically.',
+			'analysis_empty' => 'Selected analysis and background stories will appear here when matching articles are published.',
+			'slider_empty' => 'No lead stories available yet.',
+			'back_to_top' => 'Back to top',
+			'category_label' => 'Category',
+			'no_results' => 'No results',
 			'slider_navigation' => 'Top stories navigation',
 			'slider_topic_aria' => 'Story %d',
 			'important_now' => 'Important Now',
@@ -1105,54 +1132,23 @@ add_action('pre_get_posts', function (WP_Query $query): void {
 		return;
 	}
 
+	if ($query->is_home() && ! $query->is_front_page()) {
+		$query->set('posts_per_page', 1);
+		$query->set('ignore_sticky_posts', true);
+		$query->set('no_found_rows', true);
+		return;
+	}
+
 	$post_type = $query->get('post_type');
 	if ($post_type && $post_type !== 'post' && $post_type !== ['post']) {
 		return;
 	}
 
-	$meta_query = $query->get('meta_query');
-	if (! is_array($meta_query)) {
-		$meta_query = [];
-	}
-
-	$meta_query[] = [
-		'relation' => 'OR',
-		[
-			'key' => '_epv2_queue_id',
-			'compare' => 'NOT EXISTS',
-		],
-		[
-			'key' => 'europulse_breaking',
-			'value' => '1',
-			'compare' => '=',
-		],
-		[
-			'key' => 'europulse_top_story',
-			'value' => '1',
-			'compare' => '=',
-		],
-		[
-			'key' => 'europulse_selection_decision',
-			'value' => ['priority', 'strong'],
-			'compare' => 'IN',
-		],
-		[
-			'relation' => 'AND',
-			[
-				'key' => 'europulse_selection_decision',
-				'value' => 'review',
-				'compare' => '=',
-			],
-			[
-				'key' => 'europulse_selection_score',
-				'value' => 40,
-				'type' => 'NUMERIC',
-				'compare' => '>=',
-			],
-		],
-	];
-
-	$query->set('meta_query', $meta_query);
+	// Published archives/search should list already-published posts directly.
+	// The publish gate and homepage pool handle editorial eligibility upstream;
+	// adding this OR-heavy postmeta filter to every cold category request costs
+	// about 1s on populated archives.
+	return;
 }, 20);
 
 function europulse_autopilot_home_pool(): array {

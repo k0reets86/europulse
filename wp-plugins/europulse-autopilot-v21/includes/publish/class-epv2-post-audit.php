@@ -149,6 +149,9 @@ final class EPV2_Post_Audit {
 		$clean_content = self::sync_inline_media_blocks($clean_content, $payload, $lang, $updated);
 		$clean_content = self::strip_trailing_weak_quote_blocks($clean_content);
 		$clean_content = self::strip_standalone_source_fragments($clean_content);
+		if (class_exists('EPV2_Publisher') && method_exists('EPV2_Publisher', 'link_plain_urls')) {
+			$clean_content = EPV2_Publisher::link_plain_urls($clean_content);
+		}
 		$clean_content = self::refresh_related_and_source_blocks($clean_content, $post_id, $categories, $lang, $source_url);
 		$clean_content = self::strip_trailing_content_artifacts($clean_content);
 		if (class_exists('EPV2_Quality_Gate')) {

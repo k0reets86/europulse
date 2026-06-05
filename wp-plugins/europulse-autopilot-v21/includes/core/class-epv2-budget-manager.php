@@ -407,6 +407,10 @@ final class EPV2_Budget_Manager {
 			return ['allow' => false, 'mode' => 'review_without_ai', 'reason' => 'достигнут AI-бюджет дня'];
 		}
 
+		if (self::reserve_final_collect_headroom_active($budget) && ! in_array($tier, ['A'], true)) {
+			return ['allow' => false, 'mode' => 'review_without_ai', 'reason' => 'резерв AI-бюджета сохранён для финального сбора в 21:00'];
+		}
+
 		if ($score < $threshold['ai']) {
 			return ['allow' => false, 'mode' => 'review_without_ai', 'reason' => 'материал ниже AI-порога, оставить на ручную проверку'];
 		}
@@ -420,6 +424,26 @@ final class EPV2_Budget_Manager {
 		}
 
 		return ['allow' => true, 'mode' => 'ai_full', 'reason' => 'материал прошёл score и budget gate'];
+	}
+
+	private static function reserve_final_collect_headroom_active(array $budget): bool {
+		if (! class_exists('EPV2_Time_Planner')) {
+			return false;
+		}
+		try {
+			$now = EPV2_Time_Planner::now();
+		} catch (Throwable $e) {
+			return false;
+		}
+		$hm = $now->format('H:i');
+		if ($hm < '06:00' || $hm >= '21:00') {
+			return false;
+		}
+		$request_limit = max(1, (int) ($budget['request_limit'] ?? 0));
+		$rewritten_today = max(0, (int) ($budget['rewritten_today'] ?? 0));
+		$headroom = $request_limit - $rewritten_today;
+		$min_headroom = max(20, (int) EPV2_Settings::get('final_collect_ai_request_headroom_min', 100));
+		return $headroom <= $min_headroom;
 	}
 
 	public static function should_keep_in_queue(array $analysis): array {

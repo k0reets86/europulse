@@ -93,6 +93,9 @@ final class EPV2_Settings {
 			'queue_new_max_per_category' => 8,
 			'queue_new_max_per_source' => 6,
 			'queue_state_new_hard_cap' => 10,
+			'final_collect_ai_request_headroom_min' => 100,
+			'final_collect_backpressure_cap_multiplier' => 3,
+			'final_collect_per_category_limit' => 1,
 			'trend_signal_enabled' => true,
 			'trend_regions' => ['DE', 'FR', 'IT', 'ES', 'PL', 'NL'],
 			'trend_min_hits' => 2,
@@ -227,6 +230,9 @@ final class EPV2_Settings {
 		$clean['queue_new_max_per_category'] = max(1, min(50, (int) ($data['queue_new_max_per_category'] ?? $current['queue_new_max_per_category'])));
 		$clean['queue_new_max_per_source'] = max(1, min(50, (int) ($data['queue_new_max_per_source'] ?? $current['queue_new_max_per_source'])));
 		$clean['queue_state_new_hard_cap'] = max(5, min(100, (int) ($data['queue_state_new_hard_cap'] ?? $current['queue_state_new_hard_cap'])));
+		$clean['final_collect_ai_request_headroom_min'] = max(20, min(500, (int) ($data['final_collect_ai_request_headroom_min'] ?? $current['final_collect_ai_request_headroom_min'])));
+		$clean['final_collect_backpressure_cap_multiplier'] = max(1, min(10, (int) ($data['final_collect_backpressure_cap_multiplier'] ?? $current['final_collect_backpressure_cap_multiplier'])));
+		$clean['final_collect_per_category_limit'] = max(1, min(5, (int) ($data['final_collect_per_category_limit'] ?? $current['final_collect_per_category_limit'])));
 		$clean['trend_signal_enabled'] = ! empty($data['trend_signal_enabled']);
 		$clean['trend_regions'] = array_values(array_filter(array_map(static fn($v) => strtoupper(trim((string) $v)), is_array($data['trend_regions'] ?? null) ? $data['trend_regions'] : $current['trend_regions'])));
 		$clean['trend_min_hits'] = max(2, min(6, (int) ($data['trend_min_hits'] ?? $current['trend_min_hits'])));

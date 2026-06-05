@@ -139,6 +139,125 @@ _LENGTH_UPGRADE: dict[str, str] = {
     "analysis": "analysis",
 }
 
+_SECTION_CATEGORIES = {
+    "meinung",
+    "veranstaltungen",
+    "ukrainische-initiativen",
+    "vereine-projekte",
+    "treffen-networking",
+}
+
+
+def _normalize_category_list(categories: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for category in categories:
+        slug = str(category or "").strip().lower()
+        if slug and slug not in normalized:
+            normalized.append(slug)
+    return normalized
+
+
+def _story_card_entities(story_card: dict | None, key: str) -> list:
+    if not isinstance(story_card, dict):
+        return []
+    direct = story_card.get(f"entities_{key}")
+    if isinstance(direct, list):
+        return direct
+    entities = story_card.get("entities")
+    if isinstance(entities, dict) and isinstance(entities.get(key), list):
+        return entities.get(key) or []
+    return []
+
+
+def _story_card_blob(req: WorkerRequest, story_card: dict | None, original_text: str) -> str:
+    parts: list[str] = [
+        req.original_title,
+        req.original_excerpt,
+        original_text[:6000],
+        req.original_url,
+    ]
+    if isinstance(story_card, dict):
+        parts.extend([
+            str(story_card.get("kind") or ""),
+            str(story_card.get("editorial_reason") or ""),
+            str((story_card.get("category") or {}).get("rationale") or "") if isinstance(story_card.get("category"), dict) else "",
+        ])
+        for key in ("topics", "tags", "key_facts", "search_queries"):
+            values = story_card.get(key)
+            if isinstance(values, list):
+                parts.extend(str(value) for value in values if str(value).strip())
+        for org in _story_card_entities(story_card, "organizations"):
+            if isinstance(org, dict):
+                parts.append(str(org.get("name") or ""))
+                parts.append(str(org.get("kind") or ""))
+            else:
+                parts.append(str(org))
+        for place in _story_card_entities(story_card, "places"):
+            parts.append(str(place))
+    return " ".join(part for part in parts if part).casefold()
+
+
+def _has(pattern: str, text: str) -> bool:
+    return re.search(pattern, text, flags=re.IGNORECASE | re.UNICODE) is not None
+
+
+def _section_category_candidates(req: WorkerRequest, story_card: dict | None, original_text: str) -> list[str]:
+    blob = _story_card_blob(req, story_card, original_text)
+    title = str(req.original_title or "").casefold()
+    kind = str(story_card.get("kind") or "").strip().lower() if isinstance(story_card, dict) else ""
+    candidates: list[str] = []
+
+    if (
+        kind in {"opinion", "op_ed", "op-ed", "kommentar", "kolumne", "meinung", "editorial"}
+        or _has(r"^\s*(kommentar|kolumne|glosse|leitartikel|editorial|gastbeitrag|meinung|op-?ed|opinion|думка|колонка|коментар)\b", title)
+    ):
+        candidates.append("meinung")
+
+    event_signal = (
+        kind == "community_event"
+        or _has(r"\b(veranstaltung|event|termin|kalender|konzert|lesung|ausstellung|workshop|webinar|seminar|benefiz|anmeldung|tickets?|meetup|поді[яї]|захід|анонс|концерт|виставк|воркшоп|вебінар|семінар|реєстрац)\b", blob)
+    )
+    event_grounding = _has(
+        r"(\b\d{1,2}[.\/-]\d{1,2}(?:[.\/-]\d{2,4})?\b|\b\d{1,2}[:.]\d{2}\s*(?:uhr)?\b|\b(januar|februar|märz|maerz|april|mai|juni|juli|august|september|oktober|november|dezember)\b|\b(ort|adresse|eintritt|tickets?|anmeldung|registration|venue|місце|адрес|квитк|реєстрац)\b)",
+        blob,
+    )
+    if event_signal and event_grounding:
+        candidates.append("veranstaltungen")
+
+    if _has(r"\b(netzwerk|networking|vernetzung|netzwerktreffen|meetup|stammtisch|sprechstunde|beratung|workshop|job\s*fair|career\s*fair|bildungsmesse|karrieremesse|vereinstreffen|зустріч|нетворк|консультац|ярмарок\s+ваканс)\b", blob):
+        candidates.append("treffen-networking")
+
+    ukrainian_signal = _has(r"\b(ukrainisch|ukrainian|україн)", blob)
+    initiative_signal = _has(r"\b(initiative|projekt|verein|gemeinde|community|diaspora|hilfe|support|solidarit[aä]t|ehrenamt|freiwillig|volunteer|ініціатив|проєкт|громад|діаспор|допомог|волонтер|культурн)\b", blob)
+    if ukrainian_signal and initiative_signal:
+        candidates.append("ukrainische-initiativen")
+
+    orgs = _story_card_entities(story_card, "organizations")
+    has_named_org = any(
+        isinstance(org, dict) and str(org.get("name") or "").strip()
+        for org in orgs
+    )
+    if _has(r"\b(verein|vereine|initiative|projekt|ngo|non-?profit|gemeinnützig|gemeinnuetzig|ehrenamt|freiwillig|association|ініціатив|проєкт|організаці|громадськ|волонтер)\b", blob) and has_named_org:
+        candidates.append("vereine-projekte")
+
+    return _normalize_category_list(candidates)
+
+
+def _augment_section_categories(ctx: PipelineContext, story_card: dict | None, original_text: str) -> None:
+    categories = _normalize_category_list(ctx.categories)
+    proposed = str(ctx.request.category_proposed or "").strip().lower()
+    if categories and categories[0] in _SECTION_CATEGORIES and proposed and proposed not in _SECTION_CATEGORIES and proposed not in categories:
+        categories = [proposed] + categories
+
+    for candidate in _section_category_candidates(ctx.request, story_card, original_text):
+        if candidate in categories:
+            continue
+        if len(categories) >= 3:
+            break
+        categories.append(candidate)
+
+    ctx.categories = categories
+
 
 async def _run_full_bundle(ctx: PipelineContext) -> None:
     req = ctx.request
@@ -210,6 +329,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             cleaned = [str(t).strip() for t in card_tags if isinstance(t, (str,)) and str(t).strip()]
             if cleaned:
                 ctx.tags = cleaned[:8]
+    _augment_section_categories(ctx, _story_card_init, original_text)
 
     # 2. Enrich sources — mandatory for thin content (<500 words), otherwise only when semantic flags it.
     # The PHP build_payload now seeds short Google-News-stub bodies with
@@ -223,8 +343,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     card_facts_count = 0
     if isinstance(_story_card_init, dict):
         card_facts_count = len(_story_card_init.get("key_facts") or [])
-    if source_word_count < 35:
-        ctx.blockers.append("Primary source too thin for autopublish")
+    thin_primary_source_needs_support = source_word_count < 35 and card_facts_count < 3
     force_enrichment = source_word_count < 500
     supporting_urls: list[str] = []
     supporting_rich: list[dict[str, str]] = []
@@ -236,6 +355,11 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             ctx.semantic.key_phrases, req.original_url, limit=5
         )
         supporting_urls = [entry["url"] for entry in supporting_rich]
+    if (
+        thin_primary_source_needs_support
+        and _supporting_entries_with_loaded_content(supporting_rich) < 2
+    ):
+        ctx.blockers.append("Primary source too thin for autopublish")
 
     # Group E: adjust length profile based on source richness and enrichment outcome.
     # Operator-агреемент 2026-05-09: «адекватные статьи», не короткие заметки.
@@ -560,6 +684,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             ctx.blockers.append(
                 f"plagiarism_gate_en: uniqueness {en_result.uniqueness_pct:.1f}% < 85%"
             )
+        ctx.blockers.extend(_english_translation_integrity_blockers(ctx.english))
     for lang, package in {"de": ctx.german_master, "uk": ctx.ukrainian, "en": ctx.english}.items():
         if not _language_package_complete(package):
             ctx.blockers.append(f"{lang.upper()} language package incomplete")
@@ -919,6 +1044,27 @@ def _language_package_complete(package: LanguagePackage) -> bool:
         bool((package.excerpt or "").strip()),
         bool((package.content or "").strip()),
     ])
+
+
+def _english_translation_integrity_blockers(package: LanguagePackage) -> list[str]:
+    text = " ".join([
+        package.title or "",
+        package.excerpt or "",
+        getattr(package, "card_lead", "") or "",
+        package.content or "",
+    ])
+    plain = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    plain = re.sub(r"\s+", " ", plain).strip()
+    if not plain:
+        return []
+
+    blockers: list[str] = []
+    # Catch lost geography qualifiers such as "Izmail in Oblast". Valid
+    # forms like "in Odesa Oblast" are not matched because the admin type is
+    # not the first word after "in".
+    if re.search(r"\bin\s+(?:the\s+)?(?:Oblast|Region|Province|District)\b", plain):
+        blockers.append("translation_integrity_en: bare administrative area name")
+    return blockers
 
 
 def _usable_supporting_url(url: str) -> bool:

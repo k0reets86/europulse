@@ -905,12 +905,53 @@ final class EPV2_Publisher {
 		return trim((string) preg_replace("/\n{3,}/", "\n\n", $content));
 	}
 
+	public static function link_plain_urls(string $content): string {
+		if ($content === '' || stripos($content, 'http') === false) {
+			return $content;
+		}
+		$parts = preg_split('/(<a\b[^>]*>.*?<\/a>)/isu', $content, -1, PREG_SPLIT_DELIM_CAPTURE);
+		if (! is_array($parts)) {
+			return $content;
+		}
+		foreach ($parts as $idx => $part) {
+			if ($part === '' || preg_match('/^<a\b/iu', $part)) {
+				continue;
+			}
+			$parts[$idx] = preg_replace_callback(
+				'/(?<!["\'=])\bhttps?:\/\/[^\s<>()]+/iu',
+				static function (array $match): string {
+					$raw = (string) ($match[0] ?? '');
+					$url = rtrim($raw, '.,;:');
+					$trail = substr($raw, strlen($url));
+					if ($url === '' || ! wp_http_validate_url($url)) {
+						return $raw;
+					}
+					$href = esc_url($url);
+					if ($href === '') {
+						return $raw;
+					}
+					$home_host = strtolower((string) wp_parse_url(home_url('/'), PHP_URL_HOST));
+					$url_host = strtolower((string) wp_parse_url($url, PHP_URL_HOST));
+					$home_host = preg_replace('/^www\./i', '', $home_host) ?: $home_host;
+					$url_host = preg_replace('/^www\./i', '', $url_host) ?: $url_host;
+					$external_attrs = ($home_host !== '' && $url_host !== '' && $home_host !== $url_host)
+						? ' target="_blank" rel="noopener nofollow"'
+						: '';
+					return '<a href="' . $href . '"' . $external_attrs . '>' . esc_html($url) . '</a>' . $trail;
+				},
+				$part
+			) ?? $part;
+		}
+		return implode('', $parts);
+	}
+
 	private static function build_post_content(string $content, string $excerpt, string $media_url, array $inline_media_urls, string $source_url, string $lang, array $categories, int $post_id = 0, array $link_sources = []): string {
 		$prefix = EPV2_Media::content_prefix($media_url, $lang);
 		$inline_media_urls = array_values(array_filter(EPV2_Media::normalize_media_list($inline_media_urls), static function (string $url) use ($media_url): bool {
 			return $url !== '' && $url !== $media_url;
 		}));
 		$content = self::strip_unbacked_backlinks($content);
+		$content = self::link_plain_urls($content);
 		$clean_content = self::strip_duplicate_lead($content, $excerpt);
 		// Source-linking: первое упоминание каждого источника оборачиваем
 		// в <a>...</a> для legal-attribution. Применяется ДО media-инжекции

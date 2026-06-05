@@ -1153,55 +1153,28 @@ final class EPV2_Queue {
 	}
 
 	/**
-	 * POLICY 2026-05-14: auto mode = никакого ручного разбора. Items в
-	 * manual_review/ready_review = провалили автоматику → rejected сразу
-	 * (без 5-минутного wait, без recycle, без attempted resurrection).
+	 * Bounded review rescue.
 	 *
-	 * Function name сохранён для совместимости с orchestrator bridge_maintenance
-	 * dict key 'auto_promoted_complete_manual_rows', но semantic перевернут:
-	 * теперь возвращает count of items moved to rejected, не to retry_process.
+	 * 2026-06-03: auto mode больше не должен массово переводить
+	 * manual_review/ready_review в rejected. Это убивало материалы, которые
+	 * worker уже собрал или мог добрать через ready_review automation-resume.
 	 *
-	 * В semi mode (automation_requires_publish_grade=false) сохраняется старая
-	 * resurrection-логика для backward compat — operator-supervised режим.
+	 * Вместо этого промоутим только technically-complete rows с сильными
+	 * quality-сигналами и loop cap. Остальные остаются в review queue:
+	 * ready_review с resume-маркерами подберёт selector, а неразрешимые строки
+	 * удалит age-based trim без ложного rejected-сигнала.
 	 */
 	public static function auto_promote_complete_manual_review_items(int $limit = 30): int {
-		if (self::automation_requires_publish_grade()) {
-			// AUTO MODE: всё что в review queue — failed automation → reject.
-			global $wpdb;
-			$table = $wpdb->prefix . 'epv2_queue';
-			$rows = $wpdb->get_results($wpdb->prepare(
-				"SELECT id FROM {$table}
-				 WHERE state IN ('manual_review','ready_review')
-				   AND (
-					 JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.manual_override_at')) IS NULL
-					 OR JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.manual_override_at')) = ''
-				   )
-				 ORDER BY updated_at ASC
-				 LIMIT %d",
-				max(1, min(100, $limit))
-			));
-			if (! is_array($rows) || $rows === []) return 0;
-			$rejected = 0;
-			foreach ($rows as $row) {
-				if (! ($row instanceof stdClass)) continue;
-				self::mark_state((int) $row->id, 'rejected', [
-					'error_message' => 'auto_reject_review_policy_2026-05-14: failed automation, no manual triage in auto mode',
-				]);
-				$rejected++;
-			}
-			if ($rejected > 0 && class_exists('EPV2_Logger')) {
-				EPV2_Logger::info('queue', "auto_reject_review_items: $rejected → rejected (auto mode, no manual recycle)");
-			}
-			return $rejected;
-		}
-
-		// SEMI MODE: legacy resurrection-логика — operator решает что промоутить.
 		global $wpdb;
 		$table = $wpdb->prefix . 'epv2_queue';
 		$rows = $wpdb->get_results($wpdb->prepare(
 			"SELECT " . self::SUMMARY_FIELDS . " FROM {$table}
 			 WHERE state IN ('manual_review','ready_review')
 			   AND updated_at < DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+			   AND (
+				 JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.manual_override_at')) IS NULL
+				 OR JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.manual_override_at')) = ''
+			   )
 			 ORDER BY updated_at ASC
 			 LIMIT %d",
 			max(1, min(100, $limit))
@@ -1213,6 +1186,10 @@ final class EPV2_Queue {
 			if (! ($row instanceof stdClass)) continue;
 			$payload = self::row_payload($row);
 			if ($payload === []) continue;
+			$notes = self::row_notes($row);
+			if (self::item_has_explicit_manual_confirmation_marker($row) || self::row_has_sticky_review_blocker($row, $payload, $notes)) {
+				continue;
+			}
 
 			// Quality scores — softer criteria (2026-05-10): items с
 			// quality=100 + rel/goo >= 80 публикабельны. Раньше требовалось
@@ -1270,7 +1247,6 @@ final class EPV2_Queue {
 			// Without this, items with quality=100 but failing some other
 			// gate (media relevance, contract integrity) burn AI tokens
 			// in an infinite cycle.
-			$notes = self::row_notes($row);
 			$sys_check = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
 			$prior_promotes = (int) ($sys_check['auto_promote_count'] ?? 0);
 			if ($prior_promotes >= 2) {
@@ -2399,18 +2375,31 @@ final class EPV2_Queue {
 					]);
 				}
 				continue;
-			}
-			$earliest_slot = self::earliest_publish_slot_from_ready_at($ready_at);
-			if ($previous_slot <= 0 && $current > 0 && ! $anchored) {
-				$scheduled_slot = $current;
-				$needsRepair = false;
-			} else {
-				$minimum_slot = $previous_slot > 0
-					? max($previous_slot + $interval, $earliest_slot)
-					: max($earliest_slot, $first_slot);
-				$needsRepair = $anchored || $current <= 0 || $current < $minimum_slot;
-				$scheduled_slot = $needsRepair ? $minimum_slot : $current;
-			}
+				}
+				$earliest_slot = self::earliest_publish_slot_from_ready_at($ready_at);
+				if (
+					$previous_slot <= 0
+					&& $current > 0
+					&& ! $anchored
+					&& $current <= time()
+					&& self::publish_slot_allows_regular_window(time())
+				) {
+					$scheduled_slot = $current;
+					$needsRepair = false;
+				} else {
+					$next_after_previous = $previous_slot > 0
+						? EPV2_Jobs::next_publish_slot_after($previous_slot + $interval - 1)
+						: 0;
+					$minimum_slot = $previous_slot > 0
+						? max($next_after_previous, $earliest_slot)
+						: max($earliest_slot, $first_slot);
+						$needsRepair = $anchored
+							|| $current <= 0
+							|| $current < $minimum_slot
+							|| $current > $maxReasonable
+							|| ! self::publish_slot_allows_regular_window($current);
+					$scheduled_slot = $needsRepair ? $minimum_slot : $current;
+				}
 			if ($needsRepair) {
 				$notes['_system']['ready_publish_at'] = ! empty($notes['_system']['ready_publish_at'])
 					? (string) $notes['_system']['ready_publish_at']
@@ -2434,7 +2423,7 @@ final class EPV2_Queue {
 			usort($items, [self::class, 'compare_publish_queue_order']);
 
 			$interval = max(5, (int) EPV2_Settings::get('publish_interval_minutes', 5)) * MINUTE_IN_SECONDS;
-			$slot = max(time(), $published_at ?: time()) + $interval;
+			$slot = EPV2_Jobs::next_publish_slot_after(max(time(), $published_at ?: time()) + $interval - 1);
 			foreach ($items as $item) {
 				$notes = self::row_notes($item);
 				$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
@@ -2458,7 +2447,7 @@ final class EPV2_Queue {
 				self::update_fields((int) $item->id, [
 					'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 				]);
-				$slot += $interval;
+				$slot = EPV2_Jobs::next_publish_slot_after($slot + $interval - 1);
 			}
 		}
 	
@@ -2503,7 +2492,7 @@ final class EPV2_Queue {
 			}
 			$_meta_total = (int) ($_meta['tokens'] ?? 0);
 			if ($_runtime_tokens > 0 || $_meta_total > 0) {
-				EPV2_Stats::record_payload_ai_usage($bump_payload);
+				EPV2_Stats::record_payload_ai_usage($bump_payload, (int) $id);
 			}
 		}
 		// Central terminal-state guard. Eight independent code paths used to
@@ -2944,7 +2933,7 @@ final class EPV2_Queue {
 		if ($latest_not_before <= 0) {
 			return $base_slot;
 		}
-		return max($base_slot, $latest_not_before + ($interval_minutes * MINUTE_IN_SECONDS));
+		return max($base_slot, EPV2_Jobs::next_publish_slot_after($latest_not_before + ($interval_minutes * MINUTE_IN_SECONDS) - 1));
 	}
 
 	private static function canonicalize_single_workflow_state(int $id, string $state, ?object $current = null, array $extra = []): string {
@@ -3020,7 +3009,14 @@ final class EPV2_Queue {
 
 	private static function first_waiting_publish_slot(): int {
 		$interval = max(5, (int) EPV2_Settings::get('publish_interval_minutes', 5)) * MINUTE_IN_SECONDS;
-		return time() + $interval;
+		return EPV2_Jobs::next_publish_slot_after(time() + $interval - 1);
+	}
+
+	private static function publish_slot_allows_regular_window(int $timestamp): bool {
+		if ($timestamp <= 0) {
+			return false;
+		}
+		return true;
 	}
 
 	private static function earliest_publish_slot_from_ready_at(string $readyAt): int {
@@ -3029,7 +3025,7 @@ final class EPV2_Queue {
 		if ($readyTs === false || $readyTs <= 0) {
 			return self::first_waiting_publish_slot();
 		}
-		return $readyTs + $interval;
+		return EPV2_Jobs::next_publish_slot_after($readyTs + $interval - 1);
 	}
 
 	private static function compare_publish_queue_order(object $a, object $b): int {
@@ -3270,7 +3266,7 @@ final class EPV2_Queue {
 					}
 				}
 				if ($br_total > 0 || (int) ($bm['tokens'] ?? 0) > 0) {
-					EPV2_Stats::record_payload_ai_usage($bump_payload);
+					EPV2_Stats::record_payload_ai_usage($bump_payload, (int) $id);
 				}
 			}
 		}
@@ -4353,6 +4349,84 @@ final class EPV2_Queue {
 		}
 		$message = mb_strtolower((string) ($row->error_message ?? ''));
 		return preg_match('/требует ручного подтверждения (media|translation)/u', $message) === 1;
+	}
+
+	private static function row_has_sticky_review_blocker(object $row, array $payload, ?array $notes = null): bool {
+		$notes = is_array($notes) ? $notes : self::row_notes($row);
+		$system = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+		foreach (['worker_blockers', 'last_publish_gate_blockers'] as $key) {
+			if (is_array($system[$key] ?? null) && self::non_empty_string_values($system[$key]) !== []) {
+				return true;
+			}
+		}
+
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		if (is_array($meta['blockers'] ?? null) && self::non_empty_string_values($meta['blockers']) !== []) {
+			return true;
+		}
+
+		$signals = [
+			(string) ($row->error_message ?? ''),
+			(string) ($system['last_stage_blocker'] ?? ''),
+			(string) ($system['quarantine_reason'] ?? ''),
+			(string) ($system['workflow_terminal_reason'] ?? ''),
+			(string) ($system['manual_confirmation_required'] ?? ''),
+		];
+		foreach (['worker_blockers', 'last_publish_gate_blockers'] as $key) {
+			$value = $system[$key] ?? null;
+			if (is_array($value)) {
+				$signals = array_merge($signals, array_map('strval', $value));
+			} elseif (is_scalar($value)) {
+				$signals[] = (string) $value;
+			}
+		}
+		if (is_array($meta['blockers'] ?? null)) {
+			$signals = array_merge($signals, array_map('strval', $meta['blockers']));
+		}
+
+		$text = mb_strtolower(implode(' ', array_filter(array_map('trim', $signals))));
+		if ($text === '') {
+			return false;
+		}
+		foreach ([
+			'translation_integrity',
+			'unsupported_known_figure',
+			'primary source too thin',
+			'too thin for autopublish',
+			'thin_source_dossier',
+			'source_expansion_risk',
+			'plagiarism',
+			'hallucination',
+			'invented',
+			'unsupported_numbers',
+			'unsupported_quote',
+			'payload_contract',
+			'media_contract',
+			'generic_stock_featured_media',
+			'broken multilingual',
+			'attempt cap reached',
+			'manual review required',
+			'stage_attempt_limit',
+			'исчерпания попыток',
+			'worker_blockers',
+			'worker_terminal_outcome',
+			'selection_publish_blocked',
+			'workflow_quarantine',
+		] as $needle) {
+			if (strpos($text, $needle) !== false) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static function non_empty_string_values(array $values): array {
+		return array_values(array_filter(array_map(static function ($value): string {
+			if (is_scalar($value)) {
+				return trim((string) $value);
+			}
+			return '';
+		}, $values), static fn(string $value): bool => $value !== ''));
 	}
 
 	private static function row_notes_require_manual_confirmation(object $row): bool {

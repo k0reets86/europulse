@@ -687,7 +687,66 @@ final class EPV2_Categorizer {
 		if ($primary === '') {
 			return $current;
 		}
-		return self::canonical_slug($primary);
+		$primary = self::canonical_slug($primary);
+		$current_categories = self::category_list_from_csv($current);
+		$secondary = self::trusted_story_card_secondary($story_card, $min_confidence);
+		$section_tags = ['meinung', 'veranstaltungen', 'ukrainische-initiativen', 'vereine-projekte', 'treffen-networking'];
+
+		if (in_array($primary, $section_tags, true)) {
+			$parent = $secondary !== '' && ! in_array($secondary, $section_tags, true)
+				? $secondary
+				: '';
+			if ($parent === '') {
+				foreach ($current_categories as $candidate) {
+					if (! in_array($candidate, $section_tags, true)) {
+						$parent = $candidate;
+						break;
+					}
+				}
+			}
+			$categories = $parent !== '' ? [$parent, $primary] : [$primary];
+			return implode(',', self::dedupe_categories($categories));
+		}
+
+		$categories = [$primary];
+		if ($secondary !== '' && $secondary !== $primary) {
+			$categories[] = $secondary;
+		}
+		foreach ($current_categories as $candidate) {
+			if (in_array($candidate, $section_tags, true)) {
+				$categories[] = $candidate;
+			}
+		}
+		return implode(',', array_slice(self::dedupe_categories($categories), 0, 3));
+	}
+
+	private static function trusted_story_card_secondary(array $story_card, float $min_confidence = 0.6): string {
+		$secondary = self::canonical_slug((string) ($story_card['category']['secondary'] ?? ''));
+		if ($secondary === '') {
+			return '';
+		}
+		try {
+			$confidence = (float) ($story_card['category']['secondary_confidence'] ?? 0.0);
+		} catch (Throwable $e) {
+			$confidence = 0.0;
+		}
+		return $confidence >= $min_confidence ? $secondary : '';
+	}
+
+	private static function category_list_from_csv(string $value): array {
+		$items = preg_split('/\s*,\s*/', $value) ?: [];
+		return self::dedupe_categories(array_map(static fn($item): string => self::canonical_slug((string) $item), $items));
+	}
+
+	private static function dedupe_categories(array $categories): array {
+		$clean = [];
+		foreach ($categories as $category) {
+			$category = self::canonical_slug((string) $category);
+			if ($category !== '' && ! in_array($category, $clean, true)) {
+				$clean[] = $category;
+			}
+		}
+		return $clean;
 	}
 
 	public static function refine_with_event_context(string $current, array $dossier = [], string $title = '', string $content = ''): string {

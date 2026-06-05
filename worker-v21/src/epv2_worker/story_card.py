@@ -53,7 +53,12 @@ CANONICAL_CATEGORIES = (
     "europa",
     "kultur",
     "sport",
+    "meinung",
     "community",
+    "veranstaltungen",
+    "ukrainische-initiativen",
+    "vereine-projekte",
+    "treffen-networking",
 )
 
 
@@ -63,9 +68,10 @@ class StoryCardCategory:
     confidence: float = 0.0
     rationale: str = ""
     # Editorial-calibration cross-tag: max one extra category, only when both
-    # rubrics are equally central. Sub-rubrics (Bayern, München, Auto, IT,
-    # Technologie, Veranstaltungen et al.) inherit from parent automatically
-    # and never count as a secondary slot. Empty string when no second tag.
+    # rubrics are equally central. Geographic/vertical sub-rubrics (Bayern,
+    # München, Auto, IT, Technologie) inherit from parent automatically and
+    # never count as a secondary slot. Editorial section tags such as Meinung
+    # or Veranstaltungen may be secondary. Empty string when no second tag.
     secondary: str = ""
     secondary_confidence: float = 0.0
 
@@ -174,9 +180,14 @@ _SYSTEM_PROMPT = (
     "  - Set ONE primary category. Add `secondary` ONLY when both rubrics are equally central\n"
     "    (e.g. charity concert in Berlin for Ukraine = community + ukraine; political rally\n"
     "    of Ukrainians at Bundestag = politik + ukraine).\n"
-    "  - Sub-rubrics (bayern, muenchen, auto, it, technologie) inherit from parent automatically;\n"
+    "  - Geographic/vertical sub-rubrics (bayern, muenchen, auto, it, technologie) inherit from parent automatically;\n"
     "    they NEVER occupy the secondary slot. If story is München-local, primary stays as the\n"
     "    parent topic (e.g. community), and the München aspect is captured in geography.\n"
+    "  - Editorial section tags MAY be secondary when explicit: meinung for opinion/op-ed/column;\n"
+    "    veranstaltungen for event announcements with date/place/organizer; treffen-networking for\n"
+    "    meetups, consultations, workshops or networking; vereine-projekte for named civic/NGO\n"
+    "    associations or projects; ukrainische-initiativen for named Ukrainian diaspora/help/culture\n"
+    "    initiatives in Germany. Keep the topical parent first (e.g. community + veranstaltungen).\n"
     "  - Never assign a secondary if you can plausibly say «primarily X, Y is incidental».\n"
     "  - Leave secondary='' when not needed.\n\n"
     "Editorial position on Russia/Ukraine (applies in politik, ukraine, welt and any rubric where the topic touches):\n"
@@ -360,7 +371,7 @@ def _coerce_card(raw: dict[str, Any]) -> StoryCard:
         # Editorial calibration cross-tag (max one secondary, never sub-rubric)
         secondary = str(cat.get("secondary") or "").strip().lower()
         if secondary in CANONICAL_CATEGORIES and secondary != primary:
-            # Reject sub-rubric values in the secondary slot — those inherit
+            # Reject geographic/vertical sub-rubric values in the secondary slot — those inherit
             # from parent automatically and must not occupy the cross-tag.
             sub_rubrics = {"bayern", "muenchen", "auto", "it", "technologie"}
             if secondary not in sub_rubrics:

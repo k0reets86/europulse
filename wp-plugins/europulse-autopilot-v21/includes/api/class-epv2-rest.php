@@ -433,12 +433,18 @@ final class EPV2_REST {
 		// зависает. Освобождаем чтобы category_cap не блокировал ingest
 		// (один stuck processing_de держит cap всю рубрику на часы).
 		$cleanup['sanitized_stuck_processing_de_rows'] = EPV2_Queue::sanitize_stuck_processing_de_items(20);
-		// Items в manual_review с qual=100 + всеми 3 языками + media —
-		// auto-promote назад в retry_process (carry-over quarantine cleanup).
-		$cleanup['auto_promoted_complete_manual_rows'] = EPV2_Queue::auto_promote_complete_manual_review_items(30);
-		// Operator-агреемент 2026-05-09: «всё что больше 80 чисти». Терминальные
-		// rejected/error/duplicate items, выходящие за пределы 80, удаляются
-		// каждым maintenance тиком — admin (heavy path лимитирован 80 items по
+			// Items в manual_review с qual=100 + всеми 3 языками + media —
+			// auto-promote назад в retry_process (carry-over quarantine cleanup).
+			$cleanup['auto_promoted_complete_manual_rows'] = EPV2_Queue::auto_promote_complete_manual_review_items(30);
+			// Server-orchestrator mode skips EPV2_Jobs::maintain_runtime_state(),
+			// so keep ready_publish slots normalized here as well. This prevents
+			// rows from carrying stale publish_not_before values into closed
+			// wind-down/night windows where the publish thread will not run them.
+			EPV2_Queue::normalize_ready_publish_schedule();
+			$cleanup['normalized_ready_publish_schedule'] = true;
+			// Operator-агреемент 2026-05-09: «всё что больше 80 чисти». Терминальные
+			// rejected/error/duplicate items, выходящие за пределы 80, удаляются
+			// каждым maintenance тиком — admin (heavy path лимитирован 80 items по
 		// created_at) больше не вытесняет manual_review/ready_publish из видимости.
 		$cleanup['trimmed_terminal_rows'] = EPV2_Queue::trim_old_terminal_items(80);
 		// 2026-05-13 operator-spec: age-based cleanup для rejected items.

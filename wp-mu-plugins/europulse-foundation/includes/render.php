@@ -1,5 +1,37 @@
 <?php
 
+function europulse_fragment_cache_key(string $fragment, array $parts = []): string {
+	$last_changed = function_exists('wp_cache_get_last_changed') ? (string) wp_cache_get_last_changed('posts') : '';
+	if ($last_changed === '') {
+		$last_changed = (string) get_lastpostmodified('GMT');
+	}
+
+	$parts = array_merge(
+		[
+			'fragment' => sanitize_key($fragment),
+			'lang' => function_exists('europulse_current_lang') ? europulse_current_lang() : 'de',
+			'posts_changed' => $last_changed,
+		],
+		$parts
+	);
+
+	return 'europulse_frag_' . md5((string) wp_json_encode($parts));
+}
+
+function europulse_fragment_cache_get(string $key): ?string {
+	$cached = get_transient($key);
+
+	return is_string($cached) && $cached !== '' ? $cached : null;
+}
+
+function europulse_fragment_cache_set(string $key, string $html, int $ttl = 600): string {
+	if ($html !== '') {
+		set_transient($key, $html, max(60, $ttl));
+	}
+
+	return $html;
+}
+
 function europulse_render_post_media_link(int $post_id, string $size, string $class, string $placeholder_class): string {
 	$title = trim(wp_strip_all_tags(get_the_title($post_id)));
 	$aria_label = $title !== '' ? $title : europulse_t('read_more');
@@ -89,13 +121,23 @@ add_shortcode('europulse_most_read', function ($atts) {
 	);
 
 	$limit = max(1, (int) $atts['posts']);
+	$cache_key = europulse_fragment_cache_key('most_read', [
+		'limit' => $limit,
+		'thumbs' => ! empty($atts['thumbs']) ? 1 : 0,
+		'today' => wp_date('Y-m-d', current_time('timestamp')),
+	]);
+	$cached = europulse_fragment_cache_get($cache_key);
+	if ($cached !== null) {
+		return $cached;
+	}
+
 	$slider_ids = europulse_home_zone_ids('slider', 3);
 	$latest_ids = europulse_home_zone_ids('latest', 6, $slider_ids);
 	$analysis_ids = europulse_home_zone_ids('analysis', 3, array_merge($slider_ids, $latest_ids));
 	$post_ids = europulse_home_zone_ids('most_read', $limit, array_merge($slider_ids, $latest_ids, $analysis_ids));
 
 	if ($post_ids === []) {
-		return '<p>Die wichtigsten Themen erscheinen hier automatisch.</p>';
+		return europulse_fragment_cache_set($cache_key, '<p>' . esc_html(europulse_t('most_read_empty')) . '</p>', 300);
 	}
 
 	$query = new WP_Query([
@@ -148,7 +190,7 @@ add_shortcode('europulse_most_read', function ($atts) {
 	</ul>
 	<?php
 
-	return trim(ob_get_clean());
+	return europulse_fragment_cache_set($cache_key, trim(ob_get_clean()), 300);
 });
 
 add_shortcode('europulse_latest_list', function ($atts) {
@@ -168,6 +210,19 @@ add_shortcode('europulse_latest_list', function ($atts) {
 	$today_key = wp_date('Y-m-d', current_time('timestamp'));
 	$groups = [];
 	$max_num_pages = 1;
+	$request_uri = isset($_SERVER['REQUEST_URI']) ? sanitize_text_field(wp_unslash((string) $_SERVER['REQUEST_URI'])) : '';
+	$request_path = (string) wp_parse_url($request_uri, PHP_URL_PATH);
+	$cache_key = europulse_fragment_cache_key('latest_list', [
+		'per_page' => $per_page,
+		'current_page' => $current_page,
+		'thumbs' => ! empty($atts['thumbs']) ? 1 : 0,
+		'today' => $today_key,
+		'request_path' => $request_path,
+	]);
+	$cached = europulse_fragment_cache_get($cache_key);
+	if ($cached !== null) {
+		return $cached;
+	}
 
 	$add_post_to_groups = static function (int $post_id, array $entry = []) use (&$groups, $today_key, $today_label): void {
 		$post = get_post($post_id);
@@ -240,7 +295,7 @@ add_shortcode('europulse_latest_list', function ($atts) {
 		]);
 
 		if (! $query->have_posts()) {
-			return '<p>Die neuesten Themen erscheinen hier automatisch.</p>';
+			return europulse_fragment_cache_set($cache_key, '<p>' . esc_html(europulse_t('latest_empty')) . '</p>', 300);
 		}
 		$max_num_pages = max(1, (int) $query->max_num_pages);
 		while ($query->have_posts()) {
@@ -251,7 +306,7 @@ add_shortcode('europulse_latest_list', function ($atts) {
 	}
 
 	if ($groups === []) {
-		return '<p>Die neuesten Themen erscheinen hier automatisch.</p>';
+		return europulse_fragment_cache_set($cache_key, '<p>' . esc_html(europulse_t('latest_empty')) . '</p>', 300);
 	}
 
 	ob_start();
@@ -289,8 +344,9 @@ add_shortcode('europulse_latest_list', function ($atts) {
 	}
 
 	if ($max_num_pages > 1) {
+		$pagination_base_url = $request_path !== '' ? home_url($request_path) : home_url('/');
 		$pagination = paginate_links([
-			'base' => esc_url_raw(add_query_arg('ep_page', '%#%')),
+			'base' => esc_url_raw(add_query_arg('ep_page', '%#%', $pagination_base_url)),
 			'format' => '',
 			'current' => $current_page,
 			'total' => $max_num_pages,
@@ -307,7 +363,7 @@ add_shortcode('europulse_latest_list', function ($atts) {
 
 	echo '</section>';
 
-	return trim(ob_get_clean());
+	return europulse_fragment_cache_set($cache_key, trim(ob_get_clean()), 300);
 });
 
 add_shortcode('europulse_home_latest', function ($atts) {
@@ -334,7 +390,7 @@ add_shortcode('europulse_home_latest', function ($atts) {
 	]);
 
 	if (! $query->have_posts()) {
-		return '<p>Die aktuelle Meldungsliste füllt sich automatisch mit den neuesten Veröffentlichungen.</p>';
+		return '<p>' . esc_html(europulse_t('home_latest_empty')) . '</p>';
 	}
 
 	ob_start();
@@ -395,7 +451,7 @@ add_shortcode('europulse_secondary_stories', function ($atts) {
 	]);
 
 	if (! $query->have_posts()) {
-		return '<p>Hier erscheinen drei sekundäre Geschichten mit klarer Hierarchie und ohne Magazin-Chaos.</p>';
+		return '<p>' . esc_html(europulse_t('secondary_empty')) . '</p>';
 	}
 
 	ob_start();
@@ -428,7 +484,7 @@ add_shortcode('europulse_analysis_block', function ($atts) {
 	$post_ids = europulse_home_zone_ids('analysis', max(1, (int) $atts['posts']), $exclude);
 
 	if ($post_ids === []) {
-		return '<p>Analyse und Hintergründe erscheinen hier automatisch.</p>';
+		return '<p>' . esc_html(europulse_t('analysis_empty')) . '</p>';
 	}
 
 	ob_start();
@@ -662,7 +718,7 @@ add_shortcode('europulse_top_slider', function ($atts) {
 	$post_ids = europulse_home_zone_ids('slider', max(1, (int) $atts['posts']));
 
 	if ($post_ids === []) {
-		return '<div class="europulse-top-slider europulse-top-slider--empty"><p>Noch keine Leitgeschichten verfügbar.</p></div>';
+		return '<div class="europulse-top-slider europulse-top-slider--empty"><p>' . esc_html(europulse_t('slider_empty')) . '</p></div>';
 	}
 
 	ob_start();

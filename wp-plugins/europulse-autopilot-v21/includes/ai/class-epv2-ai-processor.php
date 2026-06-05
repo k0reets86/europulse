@@ -536,37 +536,48 @@ final class EPV2_AI_Processor {
 					$rescue_selection_drift =
 						(int) ($item->story_score ?? 0) >= 40
 						|| in_array($card_estimate_for_selection, ['high', 'medium'], true);
-					if ($rescue_selection_drift) {
-						self::log_process_item_step('rebuild_bundle_selection_short_circuit_rescued', (int) $item->id, [
-							'run_id' => $run,
-							'selection_decision' => $existing_selection_decision,
-							'story_score' => (int) ($item->story_score ?? 0),
-							'story_card_estimate' => $card_estimate_for_selection,
-						]);
-					} else {
-						$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
-						$notes_for_terminal = is_array(json_decode((string) $fresh_item->admin_notes, true)) ? json_decode((string) $fresh_item->admin_notes, true) : [];
-						$notes_for_terminal['_system'] = is_array($notes_for_terminal['_system'] ?? null) ? $notes_for_terminal['_system'] : [];
-						$notes_for_terminal['_system']['workflow_terminal_reason'] = 'selection_publish_blocked';
-						$notes_for_terminal['_system']['workflow_step_status'] = 'terminal';
-						$notes_for_terminal['_system']['workflow_owner_token'] = '';
-						EPV2_Queue::mark_state((int) $item->id, 'rejected', [
-							'admin_notes' => wp_json_encode($notes_for_terminal, JSON_UNESCAPED_UNICODE),
-							'error_message' => sprintf(
+					$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
+					$payload_for_terminal = is_array($payload_for_stage) ? $payload_for_stage : [];
+					$payload_for_terminal['_meta'] = is_array($payload_for_terminal['_meta'] ?? null) ? $payload_for_terminal['_meta'] : [];
+					$payload_for_terminal['_meta']['pipeline_stage'] = '';
+					$notes_for_terminal = is_array(json_decode((string) $fresh_item->admin_notes, true)) ? json_decode((string) $fresh_item->admin_notes, true) : [];
+					$notes_for_terminal['_system'] = is_array($notes_for_terminal['_system'] ?? null) ? $notes_for_terminal['_system'] : [];
+					$notes_for_terminal['_system']['workflow_terminal_reason'] = 'selection_publish_blocked';
+					$notes_for_terminal['_system']['quarantine_reason'] = 'selection_' . $existing_selection_decision;
+					$notes_for_terminal['_system']['workflow_step'] = '';
+					$notes_for_terminal['_system']['workflow_step_status'] = 'terminal';
+					$notes_for_terminal['_system']['workflow_owner_token'] = '';
+					$notes_for_terminal['_system']['workflow_heartbeat_at'] = '';
+					$terminal_state = $rescue_selection_drift ? 'ready_review' : 'rejected';
+					if ($terminal_state === 'ready_review') {
+						$notes_for_terminal['_system']['manual_confirmation_required'] = 'selection_publish_blocked';
+						$notes_for_terminal['_system']['next_operator_action'] = 'manual_editorial_review';
+					}
+					EPV2_Queue::mark_state((int) $item->id, $terminal_state, [
+						'ai_payload' => wp_json_encode($payload_for_terminal, JSON_UNESCAPED_UNICODE),
+						'admin_notes' => wp_json_encode($notes_for_terminal, JSON_UNESCAPED_UNICODE),
+						'error_message' => $terminal_state === 'ready_review'
+							? sprintf(
+								'Материал остановлен до дорогой обработки: предварительный selection decision "%s"; нужен ручной обзор.',
+								$existing_selection_decision
+							)
+							: sprintf(
 								'Материал снят на rebuild_bundle: предварительный selection decision "%s" не пересматривается перезапуском.',
 								$existing_selection_decision
 							),
-						]);
-						self::log_process_item_step('rebuild_bundle_short_circuit_selection_reject', (int) $item->id, [
-							'run_id' => $run,
-							'selection_decision' => $existing_selection_decision,
-							'attempts_saved' => max(0, 6 - $existing_attempts),
-						]);
-						$count++;
-						$run_payload['processed_item_id'] = (int) $item->id;
-						$run_payload['result'] = 'rebuild_bundle_short_circuit_selection_reject';
-						break;
-					}
+					]);
+					self::log_process_item_step('rebuild_bundle_short_circuit_selection_blocked', (int) $item->id, [
+						'run_id' => $run,
+						'selection_decision' => $existing_selection_decision,
+						'terminal_state' => $terminal_state,
+						'story_score' => (int) ($item->story_score ?? 0),
+						'story_card_estimate' => $card_estimate_for_selection,
+						'attempts_saved' => max(0, 6 - $existing_attempts),
+					]);
+					$count++;
+					$run_payload['processed_item_id'] = (int) $item->id;
+					$run_payload['result'] = 'rebuild_bundle_short_circuit_selection_' . $terminal_state;
+					break;
 				}
 				if (
 					$pipeline_stage === 'rebuild_bundle'
@@ -684,6 +695,61 @@ final class EPV2_AI_Processor {
 						continue;
 						}
 					}
+					if (
+						$existing_payload !== []
+						&& in_array($pipeline_stage, ['translate_uk', 'translate_en'], true)
+						&& self::payload_selection_blocks_automatic_publish($existing_payload)
+					) {
+						$payload_for_terminal = self::set_payload_pipeline_stage($existing_payload, '');
+						$selection_decision = sanitize_key((string) ($payload_for_terminal['_meta']['selection']['decision'] ?? ''));
+						$terminal_gate = EPV2_Publish_Gate::evaluate($item, $payload_for_terminal, [
+							'context' => 'pre_translation_stage_selection_block',
+						]);
+						$terminal_state = empty($terminal_gate['selection_publishable']) ? 'rejected' : 'ready_review';
+						$terminal_notes = [
+							'selection' => is_array($payload_for_terminal['_meta']['selection'] ?? null) ? $payload_for_terminal['_meta']['selection'] : [],
+							'gate' => ['allow' => false, 'mode' => 'selection_block', 'reason' => 'selection blocks translation stage'],
+							'_system' => [
+								'workflow_terminal_reason' => 'selection_publish_blocked',
+								'quarantine_reason' => 'selection_' . ($selection_decision !== '' ? $selection_decision : 'blocked'),
+								'last_publish_gate_blockers' => array_values((array) ($terminal_gate['blockers'] ?? [])),
+								'workflow_step' => '',
+								'workflow_step_status' => 'terminal',
+								'workflow_owner_token' => '',
+								'workflow_heartbeat_at' => '',
+								'next_operator_action' => $terminal_state === 'ready_review' ? 'manual_editorial_review' : 'review_source_or_restore_manually',
+							],
+						];
+						if ($terminal_state === 'ready_review') {
+							$terminal_notes['_system']['manual_confirmation_required'] = 'selection_publish_blocked';
+						}
+						EPV2_Queue::mark_state((int) $item->id, $terminal_state, [
+							'ai_payload' => wp_json_encode($payload_for_terminal, JSON_UNESCAPED_UNICODE),
+							'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
+							'error_message' => $terminal_state === 'ready_review'
+								? sprintf(
+									'Материал остановлен до стадии %s: selection decision "%s"; нужен ручной обзор.',
+									$pipeline_stage,
+									$selection_decision !== '' ? $selection_decision : 'blocked'
+								)
+								: sprintf(
+									'Материал снят до стадии %s: selection decision "%s" не пересматривается перезапуском.',
+									$pipeline_stage,
+									$selection_decision !== '' ? $selection_decision : 'blocked'
+								),
+						]);
+						self::log_process_item_step('pre_translation_stage_selection_block', (int) $item->id, [
+							'run_id' => $run,
+							'pipeline_stage' => $pipeline_stage,
+							'state' => $terminal_state,
+							'selection_decision' => $selection_decision,
+							'duration_ms' => self::duration_ms_since($item_started_at),
+						]);
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'pre_translation_stage_selection_' . $terminal_state;
+						break;
+					}
 					if ($existing_payload !== [] && in_array($pipeline_stage, ['translate_uk', 'translate_en'], true) && self::worker_pipeline_enabled()) {
 						$run_payload['branch'] = 'worker_single_translation_stage';
 						$worker_stage = $pipeline_stage;
@@ -773,6 +839,58 @@ final class EPV2_AI_Processor {
 						$count++;
 						$run_payload['processed_item_id'] = (int) $item->id;
 						$run_payload['result'] = 'queued_' . $next_translation_stage . '_stage';
+						break;
+					}
+					if (
+						$existing_payload !== []
+						&& self::payload_stage_requires_translation_finish($existing_payload)
+						&& self::payload_selection_blocks_automatic_publish($existing_payload)
+					) {
+						$payload_for_terminal = self::set_payload_pipeline_stage($existing_payload, '');
+						$selection_decision = sanitize_key((string) ($payload_for_terminal['_meta']['selection']['decision'] ?? ''));
+						$terminal_gate = EPV2_Publish_Gate::evaluate($item, $payload_for_terminal, [
+							'context' => 'pre_translation_finish_selection_block',
+						]);
+						$terminal_state = empty($terminal_gate['selection_publishable']) ? 'rejected' : 'ready_review';
+						$terminal_notes = [
+							'selection' => is_array($payload_for_terminal['_meta']['selection'] ?? null) ? $payload_for_terminal['_meta']['selection'] : [],
+							'gate' => ['allow' => false, 'mode' => 'selection_block', 'reason' => 'selection blocks translation finish'],
+							'_system' => [
+								'workflow_terminal_reason' => 'selection_publish_blocked',
+								'quarantine_reason' => 'selection_' . ($selection_decision !== '' ? $selection_decision : 'blocked'),
+								'last_publish_gate_blockers' => array_values((array) ($terminal_gate['blockers'] ?? [])),
+								'workflow_step' => '',
+								'workflow_step_status' => 'terminal',
+								'workflow_owner_token' => '',
+								'workflow_heartbeat_at' => '',
+								'next_operator_action' => $terminal_state === 'ready_review' ? 'manual_editorial_review' : 'review_source_or_restore_manually',
+							],
+						];
+						if ($terminal_state === 'ready_review') {
+							$terminal_notes['_system']['manual_confirmation_required'] = 'selection_publish_blocked';
+						}
+						EPV2_Queue::mark_state((int) $item->id, $terminal_state, [
+							'ai_payload' => wp_json_encode($payload_for_terminal, JSON_UNESCAPED_UNICODE),
+							'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
+							'error_message' => $terminal_state === 'ready_review'
+								? sprintf(
+									'Материал остановлен до завершения переводов: selection decision "%s"; нужен ручной обзор.',
+									$selection_decision !== '' ? $selection_decision : 'blocked'
+								)
+								: sprintf(
+									'Материал снят до завершения переводов: selection decision "%s" не пересматривается перезапуском.',
+									$selection_decision !== '' ? $selection_decision : 'blocked'
+								),
+						]);
+						self::log_process_item_step('pre_translation_finish_selection_block', (int) $item->id, [
+							'run_id' => $run,
+							'state' => $terminal_state,
+							'selection_decision' => $selection_decision,
+							'duration_ms' => self::duration_ms_since($item_started_at),
+						]);
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'pre_translation_finish_selection_' . $terminal_state;
 						break;
 					}
 					if ($existing_payload !== [] && self::payload_stage_requires_translation_finish($existing_payload)) {
@@ -1194,13 +1312,34 @@ final class EPV2_AI_Processor {
 					'reused_selection' => ($reused_existing_context && $stored_selection !== []) ? 1 : 0,
 				]);
 				if (! $reused_existing_context && self::should_reject_inside_queue($item, $analysis)) {
-					$run_payload['result'] = self::force_item_continuation(
-						$item,
-						$existing_payload !== [] ? $existing_payload : $baseline_payload,
-						'build_de_master',
-						'Материал не списан внутри очереди: запускаю принудительную доводку вместо reject.'
-					);
-					continue;
+					$terminal_gate = ['allow' => false, 'mode' => 'reject', 'reason' => 'primary analysis terminal reject'];
+					$terminal_notes = [
+						'selection' => $analysis,
+						'gate' => $terminal_gate,
+						'_system' => [
+							'workflow_terminal_reason' => 'selection_publish_blocked',
+							'workflow_step_status' => 'terminal',
+							'workflow_owner_token' => '',
+							'workflow_heartbeat_at' => '',
+							'quarantine_reason' => 'selection_primary_analysis',
+						],
+					];
+					EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+						'error_message' => 'Материал снят на первичном анализе: не проходит queue/publish-priority, AI rewrite не запускается и не пересматривается перезапуском.',
+						'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
+					]);
+					EPV2_Queue::clear_active_automation_item((int) $item->id);
+					if (class_exists('EPV2_Learning_Journal')) {
+						EPV2_Learning_Journal::record('quarantine_rejected', (int) $item->id, 'primary_analysis_terminal', [
+							'score' => (int) ($analysis['score'] ?? 0),
+							'decision' => (string) ($analysis['decision'] ?? ''),
+							'category' => (string) ($analysis['category'] ?? ''),
+						]);
+					}
+					$count++;
+					$run_payload['processed_item_id'] = (int) $item->id;
+					$run_payload['result'] = 'rejected_by_primary_analysis';
+					break;
 				}
 				if ($reused_existing_context) {
 					$gate = [
@@ -1324,16 +1463,31 @@ final class EPV2_AI_Processor {
 						$has_editorial_payload = true;
 					}
 				if (! empty($gate['mode']) && $gate['mode'] === 'reject') {
-					$gate['allow'] = true;
-					$gate['mode'] = 'ai_forced_enrichment';
-					$gate['reason'] = 'queued material forced through completion contract';
+					$terminal_notes = [
+						'selection' => $analysis,
+						'gate' => $gate,
+						'_system' => [
+							'workflow_terminal_reason' => 'selection_publish_blocked',
+							'workflow_step_status' => 'terminal',
+							'workflow_owner_token' => '',
+							'workflow_heartbeat_at' => '',
+							'quarantine_reason' => 'selection_gate_reject',
+						],
+					];
+					EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+						'error_message' => sprintf(
+							'Материал снят на первичном gate: %s. AI rewrite не запускается и не пересматривается перезапуском.',
+							(string) ($gate['reason'] ?? 'selection gate rejected item')
+						),
+						'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
+					]);
+					EPV2_Queue::clear_active_automation_item((int) $item->id);
+					$count++;
+					$run_payload['processed_item_id'] = (int) $item->id;
+					$run_payload['result'] = 'rejected_by_primary_gate';
+					break;
 				}
 				{
-					if (self::automation_requires_publish_grade() && empty($gate['allow'])) {
-						$gate['allow'] = true;
-						$gate['mode'] = 'ai_forced_enrichment';
-						$gate['reason'] = 'queued candidate forced through enrichment to reach publish-grade';
-					}
 					if ($auto_rework) {
 						$gate['allow'] = true;
 						$gate['mode'] = 'ai_rebuild_enrichment';
@@ -1345,7 +1499,6 @@ final class EPV2_AI_Processor {
 							$auto_rework
 							|| $auto_finish
 							|| ! empty($gate['allow'])
-							|| ($existing_payload !== [] && self::payload_is_review_ready($existing_payload) && self::automation_requires_publish_grade())
 						);
 					if ($use_worker) {
 						$config = EPV2_Settings::get_ai_config();
@@ -1527,7 +1680,7 @@ final class EPV2_AI_Processor {
 								'run_id' => $run,
 								'duration_ms' => self::duration_ms_since($item_started_at),
 							]);
-					} elseif (($auto_finish || ! $auto_rework) && $existing_payload !== [] && self::payload_is_review_ready($existing_payload) && self::automation_requires_publish_grade()) {
+					} elseif (($auto_finish || ! $auto_rework) && ! empty($gate['allow']) && $existing_payload !== [] && self::payload_is_review_ready($existing_payload) && self::automation_requires_publish_grade()) {
 						EPV2_Lock_Manager::heartbeat('process', $lock, (int) EPV2_Settings::get('job_lock_ttl_seconds', 900));
 						if (self::payload_needs_enrichment_rebuild($existing_payload) && ! self::publish_finish_resume_is_viable($existing_payload)) {
 							$payload = self::attempt_publish_grade_lift(
@@ -1599,6 +1752,60 @@ final class EPV2_AI_Processor {
 						'run_id' => $run,
 						'duration_ms' => self::duration_ms_since($item_started_at),
 					]);
+					if (! empty($payload['_meta']['translations_deferred']) && self::payload_selection_blocks_automatic_publish($payload)) {
+						$payload = self::set_payload_pipeline_stage($payload, '');
+						$selection_decision = sanitize_key((string) ($payload['_meta']['selection']['decision'] ?? ''));
+						$terminal_gate = EPV2_Publish_Gate::evaluate($item, $payload, [
+							'context' => 'post_rewrite_pre_translation',
+						]);
+						$terminal_state = empty($terminal_gate['selection_publishable']) ? 'rejected' : 'ready_review';
+						$terminal_notes = [
+							'selection' => is_array($payload['_meta']['selection'] ?? null) ? $payload['_meta']['selection'] : $analysis,
+							'gate' => $gate,
+							'_system' => [
+								'workflow_terminal_reason' => 'selection_publish_blocked',
+								'quarantine_reason' => 'selection_' . ($selection_decision !== '' ? $selection_decision : 'blocked'),
+								'worker_stage_at_terminal' => (string) ($worker_stage ?? 'generate_review_payload'),
+								'last_publish_gate_blockers' => array_values((array) ($terminal_gate['blockers'] ?? [])),
+								'workflow_step' => '',
+								'workflow_step_status' => 'terminal',
+								'workflow_owner_token' => '',
+								'workflow_heartbeat_at' => '',
+								'next_operator_action' => $terminal_state === 'ready_review' ? 'manual_editorial_review' : 'review_source_or_restore_manually',
+							],
+						];
+						if ($terminal_state === 'ready_review') {
+							$terminal_notes['_system']['manual_confirmation_required'] = 'selection_publish_blocked';
+						}
+						EPV2_Queue::mark_state((int) $item->id, $terminal_state, [
+							'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
+							'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+							'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
+							'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
+							'ai_tokens' => self::payload_total_tokens($payload),
+							'error_message' => $terminal_state === 'ready_review'
+								? sprintf(
+									'Материал остановлен до переводов: selection decision "%s"; нужен ручной обзор.',
+									$selection_decision !== '' ? $selection_decision : 'blocked'
+								)
+								: sprintf(
+									'Материал снят до переводов: selection decision "%s" не пересматривается перезапуском.',
+									$selection_decision !== '' ? $selection_decision : 'blocked'
+								),
+							'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
+						]);
+						self::log_process_item_step('post_rewrite_pre_translation_selection_block', (int) $item->id, [
+							'run_id' => $run,
+							'state' => $terminal_state,
+							'selection_decision' => $selection_decision,
+							'worker_stage' => (string) ($worker_stage ?? ''),
+							'duration_ms' => self::duration_ms_since($item_started_at),
+						]);
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'post_rewrite_pre_translation_selection_' . $terminal_state;
+						break;
+					}
 					if (! empty($payload['_meta']['translations_deferred'])) {
 						if (! self::de_master_is_viable($payload)) {
 							throw new RuntimeException('AI rewrite did not reach minimum DE master quality');
@@ -7019,10 +7226,49 @@ final class EPV2_AI_Processor {
 
 		$recent_same_item_streak = EPV2_Runs::recent_processed_item_streak('process', (int) ($item->id ?? 0), 4);
 		$selection_decision = sanitize_key((string) ($payload['_meta']['selection']['decision'] ?? ''));
-		if (
-			$recent_same_item_streak >= 3
-			|| in_array($selection_decision, ['reject', 'low'], true)
-		) {
+		if (in_array($selection_decision, ['reject', 'low'], true)) {
+			$payload = self::set_payload_pipeline_stage($payload, '');
+			$terminal_gate = EPV2_Publish_Gate::evaluate($item, $payload, [
+				'context' => 'de_master_quality_selection_block',
+			]);
+			$terminal_state = empty($terminal_gate['selection_publishable']) ? 'rejected' : 'ready_review';
+			$terminal_notes = [
+				'selection' => $analysis,
+				'gate' => $gate,
+				'_system' => [
+					'workflow_terminal_reason' => 'selection_publish_blocked',
+					'quarantine_reason' => 'selection_' . $selection_decision,
+					'last_publish_gate_blockers' => array_values((array) ($terminal_gate['blockers'] ?? [])),
+					'workflow_step' => '',
+					'workflow_step_status' => 'terminal',
+					'workflow_owner_token' => '',
+					'workflow_heartbeat_at' => '',
+					'next_operator_action' => $terminal_state === 'ready_review' ? 'manual_editorial_review' : 'review_source_or_restore_manually',
+				],
+			];
+			if ($terminal_state === 'ready_review') {
+				$terminal_notes['_system']['manual_confirmation_required'] = 'selection_publish_blocked';
+			}
+			EPV2_Queue::mark_state((int) $item->id, $terminal_state, [
+				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
+				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
+				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
+				'ai_tokens' => self::payload_total_tokens($payload),
+				'error_message' => $terminal_state === 'ready_review'
+					? sprintf(
+						'Материал остановлен после DE master: selection decision "%s"; нужен ручной обзор.',
+						$selection_decision
+					)
+					: sprintf(
+						'Материал снят после DE master: selection decision "%s" не пересматривается перезапуском.',
+						$selection_decision
+					),
+				'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
+			]);
+			return 'de_master_selection_' . $terminal_state;
+		}
+		if ($recent_same_item_streak >= 3) {
 			return self::force_item_continuation(
 				$item,
 				self::refresh_stage_checklist(self::set_payload_pipeline_stage($payload, 'rebuild_bundle')),
@@ -8145,6 +8391,22 @@ final class EPV2_AI_Processor {
 
 		if (! empty($current_selection['category']) && empty($analysis['initial_category']) && (string) $current_selection['category'] !== (string) ($analysis['category'] ?? '')) {
 			$analysis['initial_category'] = (string) $current_selection['category'];
+		}
+
+		$current_decision = sanitize_key((string) ($current_selection['decision'] ?? ''));
+		$analysis_decision = sanitize_key((string) ($analysis['decision'] ?? ''));
+		if (
+			in_array($current_decision, ['review', 'strong', 'priority'], true)
+			&& in_array($analysis_decision, ['low', 'reject'], true)
+			&& empty($analysis['breaking_candidate'])
+			&& empty($analysis['breaking_watch'])
+			&& empty($analysis['top_story_candidate'])
+		) {
+			$payload['_meta']['runtime_selection'] = $analysis;
+			$analysis = $current_selection;
+			if (! empty($payload['categories'][0])) {
+				$analysis['category'] = sanitize_title((string) $payload['categories'][0]);
+			}
 		}
 
 		$payload['_meta']['selection'] = $analysis;

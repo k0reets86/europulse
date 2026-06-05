@@ -176,3 +176,121 @@ add_action('get_template_part_template-parts/content', function ($slug, $name, $
 	echo '<a href="' . esc_url($home) . '" style="display:inline-block;padding:0.6rem 1.25rem;background:#1a3268;color:#fff;text-decoration:none;border-radius:4px;font-weight:600;">' . esc_html($copy['cta']) . '</a>';
 	echo '</div>';
 }, 10, 3);
+
+add_filter('get_search_form', function ($form) {
+	if (is_admin() || ! (is_category() || is_tag() || is_tax())) {
+		return $form;
+	}
+
+	global $wp_query;
+	if ($wp_query instanceof WP_Query && (int) $wp_query->post_count === 0) {
+		return '';
+	}
+
+	return $form;
+}, 20);
+
+function europulse_localize_shared_widget_content(string $content): string {
+	if (is_admin() || ! function_exists('pll_current_language')) {
+		return $content;
+	}
+
+	$lang = (string) pll_current_language('slug');
+	if (! in_array($lang, ['en', 'uk'], true)) {
+		return $content;
+	}
+
+	$copy = [
+		'en' => [
+			'important' => 'Important Now',
+			'description' => 'A calm news portal for Germany, Europe, Ukraine and community topics.',
+			'sections' => 'Sections',
+			'service' => 'Editorial & Service',
+			'search' => 'Search',
+			'home' => 'Home',
+		],
+		'uk' => [
+			'important' => 'Важливо зараз',
+			'description' => 'Спокійний новинний портал про Німеччину, Європу, Україну та теми спільноти.',
+			'sections' => 'Рубрики',
+			'service' => 'Редакція і сервіс',
+			'search' => 'Пошук',
+			'home' => 'Головна',
+		],
+	][$lang];
+
+	$content = str_replace(
+		[
+			'>Wichtig im Blick<',
+			'>Ruhiges Nachrichtenportal für Deutschland, Europa, die Ukraine und Community-Themen.<',
+			'>Rubriken<',
+			'>Redaktion &amp; Service<',
+			'>Search<',
+			'placeholder="Search"',
+			'aria-label="Search"',
+		],
+		[
+			'>' . esc_html($copy['important']) . '<',
+			'>' . esc_html($copy['description']) . '<',
+			'>' . esc_html($copy['sections']) . '<',
+			'>' . esc_html($copy['service']) . '<',
+			'>' . esc_html($copy['search']) . '<',
+			'placeholder="' . esc_attr($copy['search']) . '"',
+			'aria-label="' . esc_attr($copy['search']) . '"',
+		],
+		$content
+	);
+
+	$category_slugs = [
+		'Deutschland' => 'deutschland',
+		'München' => 'muenchen',
+		'Bayern' => 'bayern',
+		'Ukraine' => 'ukraine',
+		'Politik' => 'politik',
+		'Wirtschaft' => 'wirtschaft',
+		'Welt' => 'welt',
+		'Sport' => 'sport',
+		'Meinung' => 'meinung',
+		'Leben in Deutschland' => 'leben-in-deutschland',
+		'Kultur' => 'kultur',
+		'Community' => 'community',
+	];
+
+	$content = preg_replace_callback(
+		'/<a\b[^>]*>(Startseite|Deutschland|München|Bayern|Ukraine|Politik|Wirtschaft|Welt|Sport|Meinung|Leben in Deutschland|Kultur|Community)<\/a>/u',
+		static function (array $matches) use ($lang, $copy, $category_slugs): string {
+			$label = (string) ($matches[1] ?? '');
+			if ($label === 'Startseite') {
+				$home = function_exists('pll_home_url') ? pll_home_url($lang) : home_url('/');
+				return '<a href="' . esc_url($home) . '">' . esc_html($copy['home']) . '</a>';
+			}
+
+			$slug = $category_slugs[$label] ?? '';
+			if ($slug === '' || ! function_exists('europulse_category_archive_url')) {
+				return $matches[0];
+			}
+
+			$url = europulse_category_archive_url($slug, $lang);
+			if ($url === '') {
+				return $matches[0];
+			}
+
+			$name = $label;
+			if (class_exists('EPV2_Taxonomy_Map')) {
+				$mapped = EPV2_Taxonomy_Map::map($slug, $lang);
+				$term_id = (int) ($mapped['term_id'] ?? 0);
+				$term = $term_id > 0 ? get_term($term_id, 'category') : null;
+				if ($term instanceof WP_Term && ! is_wp_error($term)) {
+					$name = (string) $term->name;
+				}
+			}
+
+			return '<a href="' . esc_url($url) . '">' . esc_html($name) . '</a>';
+		},
+		$content
+	);
+
+	return is_string($content) ? $content : '';
+}
+
+add_filter('widget_block_content', 'europulse_localize_shared_widget_content', 20);

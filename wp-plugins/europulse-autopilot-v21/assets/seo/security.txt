@@ -1,5 +1,5 @@
 # EuroPulse security contact (RFC 9116)
-Contact: mailto:security@europulse.eu
-Expires: 2027-05-06T00:00:00Z
+Contact: mailto:europepulse.com@gmail.com
+Expires: 2027-06-06T00:00:00Z
 Preferred-Languages: de, en, uk
-Canonical: https://europulse.eu/.well-known/security.txt
+Canonical: https://europulse.today/.well-known/security.txt

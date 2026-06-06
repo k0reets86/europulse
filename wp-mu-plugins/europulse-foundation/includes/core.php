@@ -643,7 +643,22 @@ function europulse_format_city_time(string $timezone): string {
 }
 
 function europulse_render_utility_times(): string {
-	return '<span class="europulse-utility-time-city">' . esc_html(sprintf('%s %s', europulse_t('city_berlin'), europulse_format_city_time('Europe/Berlin'))) . '</span>';
+	$cities = [
+		['city_kyiv', 'Europe/Kyiv'],
+		['city_berlin', 'Europe/Berlin'],
+		['city_london', 'Europe/London'],
+	];
+	$items = [];
+
+	foreach ($cities as $index => [$label_key, $timezone]) {
+		$items[] = sprintf(
+			'<span class="europulse-utility-time-city" style="--ep-time-index:%d">%s</span>',
+			$index,
+			esc_html(sprintf('%s %s', europulse_t($label_key), europulse_format_city_time($timezone)))
+		);
+	}
+
+	return '<span class="europulse-utility-time-rotator">' . implode('', $items) . '</span>';
 }
 
 function europulse_is_breaking($post_id = null) {
@@ -2259,7 +2274,7 @@ function europulse_slider_headline(int $post_id): string {
 
 function europulse_render_lang_switcher() {
 	if (! function_exists('pll_the_languages')) {
-		return '<span>DE / UK / EN</span>';
+		return '<span>UKR / DE / EN</span>';
 	}
 
 	$languages = pll_the_languages([
@@ -2269,10 +2284,10 @@ function europulse_render_lang_switcher() {
 	]);
 
 	if (! is_array($languages) || empty($languages)) {
-		return '<span>DE / UK / EN</span>';
+		return '<span>UKR / DE / EN</span>';
 	}
 
-	$order = ['de' => 1, 'uk' => 2, 'en' => 3];
+	$order = ['uk' => 1, 'de' => 2, 'en' => 3];
 	uasort($languages, static function ($a, $b) use ($order) {
 		$a_order = $order[$a['slug']] ?? 99;
 		$b_order = $order[$b['slug']] ?? 99;

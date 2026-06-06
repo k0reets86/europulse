@@ -1,7 +1,7 @@
 /* TEAM */
 
-Project: EuroPulse — Trilingual European news for the Ukrainian diaspora
-Site: https://europulse.eu/
+Project: EuroPulse — Ukrainian-operated multilingual news and blog project
+Site: https://europulse.today/
 Languages: de, uk, en
 
 /* THANKS */
@@ -12,7 +12,7 @@ the editorial pipeline, and the source publications named in every article.
 
 /* SITE */
 
-Last update: 2026-05-06
+Last update: 2026-06-06
 Standards: HTML5, RFC 9116, Schema.org, Sitemaps.org, Google News Sitemap,
   IndexNow.
 Languages of the editorial pipeline: PHP 8.3, Python 3.12, MariaDB 10.11.

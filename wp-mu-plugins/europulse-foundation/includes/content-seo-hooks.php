@@ -405,6 +405,7 @@ add_filter('widget_block_content', function ($content) {
 		if (in_array($lang, ['de', 'en', 'uk'], true)) {
 			$replacements = [
 				'de' => [
+					'Ruhiges Nachrichtenportal für Deutschland, Europa, die Ukraine und Community-Themen.' => 'Ukrainisch betriebenes, mehrsprachiges Nachrichten- und Blogprojekt über die Ukraine, Europa und das Leben in Deutschland.',
 					// R18 2026-05-14: dynamic resolver replaces inline ternaries.
 					'href="/?cat=14"' => 'href="/?cat=' . europulse_resolve_term_id('deutschland', 'de', 14) . '"',
 					'href="/?cat=16"' => 'href="/?cat=' . europulse_resolve_term_id('ukraine', 'de', 16) . '"',
@@ -418,7 +419,7 @@ add_filter('widget_block_content', function ($content) {
 				],
 				'en' => [
 					'EuroPulse' => 'EuroPulse',
-					'Ruhiges Nachrichtenportal für Deutschland, Europa, die Ukraine und Community-Themen.' => 'Calm editorial news portal for Germany, Europe, the world, Ukraine and community topics.',
+					'Ruhiges Nachrichtenportal für Deutschland, Europa, die Ukraine und Community-Themen.' => 'A Ukrainian-operated multilingual news and blog project covering Ukraine, Europe and life in Germany.',
 					'Rubriken' => 'Sections',
 					'Redaktion &amp; Service' => 'Editorial &amp; Service',
 					'Rechtliches' => 'Legal',
@@ -462,9 +463,19 @@ add_filter('widget_block_content', function ($content) {
 					'href="/?page_id=3"' => 'href="' . get_permalink(295) . '"',
 					'href="/?page_id=42"' => 'href="' . get_permalink(291) . '"',
 					'href="/?page_id=43"' => 'href="' . get_permalink(293) . '"',
+					'href="https://europulse.today/ueber-uns/"' => 'href="' . get_permalink(279) . '"',
+					'href="https://europulse.today/kontakt/"' => 'href="' . get_permalink(281) . '"',
+					'href="https://europulse.today/werbung/"' => 'href="' . get_permalink(283) . '"',
+					'href="https://europulse.today/community-einreichen/"' => 'href="' . get_permalink(285) . '"',
+					'href="https://europulse.today/korrekturen/"' => 'href="' . get_permalink(287) . '"',
+					'href="https://europulse.today/archiv/"' => 'href="' . get_permalink(312) . '"',
+					'href="https://europulse.today/impressum/"' => 'href="' . get_permalink(289) . '"',
+					'href="https://europulse.today/datenschutz/"' => 'href="' . get_permalink(295) . '"',
+					'href="https://europulse.today/cookie-einstellungen/"' => 'href="' . get_permalink(291) . '"',
+					'href="https://europulse.today/nutzungsbedingungen/"' => 'href="' . get_permalink(293) . '"',
 				],
 				'uk' => [
-					'Ruhiges Nachrichtenportal für Deutschland, Europa, die Ukraine und Community-Themen.' => 'Спокійний редакційний новинний портал про Німеччину, Європу, світ, Україну та теми спільноти.',
+					'Ruhiges Nachrichtenportal für Deutschland, Europa, die Ukraine und Community-Themen.' => 'Український багатомовний новинний і блоговий проєкт про Україну, Європу та життя в Німеччині.',
 					'Rubriken' => 'Розділи',
 					'Redaktion &amp; Service' => 'Редакція та сервіс',
 					'Rechtliches' => 'Правова інформація',
@@ -511,6 +522,16 @@ add_filter('widget_block_content', function ($content) {
 					'href="/?page_id=3"' => 'href="' . get_permalink(294) . '"',
 					'href="/?page_id=42"' => 'href="' . get_permalink(290) . '"',
 					'href="/?page_id=43"' => 'href="' . get_permalink(292) . '"',
+					'href="https://europulse.today/ueber-uns/"' => 'href="' . get_permalink(278) . '"',
+					'href="https://europulse.today/kontakt/"' => 'href="' . get_permalink(280) . '"',
+					'href="https://europulse.today/werbung/"' => 'href="' . get_permalink(282) . '"',
+					'href="https://europulse.today/community-einreichen/"' => 'href="' . get_permalink(284) . '"',
+					'href="https://europulse.today/korrekturen/"' => 'href="' . get_permalink(286) . '"',
+					'href="https://europulse.today/archiv/"' => 'href="' . get_permalink(311) . '"',
+					'href="https://europulse.today/impressum/"' => 'href="' . get_permalink(288) . '"',
+					'href="https://europulse.today/datenschutz/"' => 'href="' . get_permalink(294) . '"',
+					'href="https://europulse.today/cookie-einstellungen/"' => 'href="' . get_permalink(290) . '"',
+					'href="https://europulse.today/nutzungsbedingungen/"' => 'href="' . get_permalink(292) . '"',
 				],
 			];
 

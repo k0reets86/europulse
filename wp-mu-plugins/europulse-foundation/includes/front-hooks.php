@@ -196,14 +196,22 @@ function europulse_localize_shared_widget_content(string $content): string {
 	}
 
 	$lang = (string) pll_current_language('slug');
-	if (! in_array($lang, ['en', 'uk'], true)) {
+	if (! in_array($lang, ['de', 'en', 'uk'], true)) {
 		return $content;
 	}
 
 	$copy = [
+		'de' => [
+			'important' => 'Wichtig im Blick',
+			'description' => 'Ukrainisch betriebenes, mehrsprachiges Nachrichten- und Blogprojekt über die Ukraine, Europa und das Leben in Deutschland.',
+			'sections' => 'Rubriken',
+			'service' => 'Redaktion & Service',
+			'search' => 'Suche',
+			'home' => 'Startseite',
+		],
 		'en' => [
 			'important' => 'Important Now',
-			'description' => 'A calm news portal for Germany, Europe, Ukraine and community topics.',
+			'description' => 'A Ukrainian-operated multilingual news and blog project covering Ukraine, Europe and life in Germany.',
 			'sections' => 'Sections',
 			'service' => 'Editorial & Service',
 			'search' => 'Search',
@@ -211,7 +219,7 @@ function europulse_localize_shared_widget_content(string $content): string {
 		],
 		'uk' => [
 			'important' => 'Важливо зараз',
-			'description' => 'Спокійний новинний портал про Німеччину, Європу, Україну та теми спільноти.',
+			'description' => 'Український багатомовний новинний і блоговий проєкт про Україну, Європу та життя в Німеччині.',
 			'sections' => 'Рубрики',
 			'service' => 'Редакція і сервіс',
 			'search' => 'Пошук',

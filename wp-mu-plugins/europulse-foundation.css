@@ -1228,6 +1228,43 @@ html[lang^="en"] .entry-card.europulse-breaking .entry-title::before {
 	display: none !important;
 }
 
+.europulse-utility-time-rotator {
+	display: inline-grid;
+	min-width: 10.5em;
+	vertical-align: bottom;
+}
+
+.europulse-utility-time-city {
+	grid-area: 1 / 1;
+	opacity: 0;
+	animation: europulse-city-time-cycle 30s linear infinite;
+	animation-delay: calc(var(--ep-time-index, 0) * 10s);
+	white-space: nowrap;
+}
+
+@keyframes europulse-city-time-cycle {
+	0%,
+	30% {
+		opacity: 1;
+	}
+
+	33.333%,
+	100% {
+		opacity: 0;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.europulse-utility-time-city {
+		animation: none;
+		opacity: 0;
+	}
+
+	.europulse-utility-time-city:first-child {
+		opacity: 1;
+	}
+}
+
 @media (max-width: 781px) {
 	.europulse-home-aside-column {
 		display: none !important;

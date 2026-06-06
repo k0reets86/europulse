@@ -2538,9 +2538,10 @@ final class EPV2_Queue {
 					'context' => 'ready_publish',
 				]);
 				if (empty($gate['allowed'])) {
+					$gate_blockers = array_values(array_filter(array_map('strval', (array) ($gate['blockers'] ?? []))));
 					$incoming_notes = is_array($incoming_notes ?? null) ? $incoming_notes : [];
 					$incoming_notes['_system'] = is_array($incoming_notes['_system'] ?? null) ? $incoming_notes['_system'] : [];
-					$incoming_notes['_system']['last_publish_gate_blockers'] = array_values((array) ($gate['blockers'] ?? []));
+					$incoming_notes['_system']['last_publish_gate_blockers'] = $gate_blockers;
 					$incoming_notes['_system']['workflow_step'] = '';
 					$incoming_notes['_system']['workflow_step_status'] = '';
 					if (empty($gate['selection_publishable'])) {
@@ -2549,12 +2550,24 @@ final class EPV2_Queue {
 						$incoming_notes['_system']['quarantine_reason'] = 'selection_' . sanitize_key((string) ($gate['selection_decision'] ?? 'blocked'));
 						$incoming_notes['_system']['next_operator_action'] = 'review_source_or_restore_manually';
 						$extra['error_message'] = 'Материал снят с автопубликации: canonical publish gate заблокировал selection decision "' . (string) ($gate['selection_decision'] ?? 'unknown') . '".';
+					} elseif (self::ready_publish_gate_blockers_are_terminal($gate_blockers)) {
+						$state = self::automation_requires_publish_grade() ? 'rejected' : 'ready_review';
+						$incoming_notes['_system']['workflow_terminal_reason'] = 'ready_publish_gate_hard_blockers';
+						$incoming_notes['_system']['quarantine_reason'] = 'ready_publish_gate_' . sanitize_key((string) ($gate_blockers[0] ?? 'hard_blocker'));
+						$incoming_notes['_system']['last_stage_blocker'] = implode(',', $gate_blockers);
+						$incoming_notes['_system']['next_operator_action'] = $state === 'ready_review'
+							? 'manual_editorial_review'
+							: 'review_source_or_restore_manually';
+						unset($incoming_notes['_system']['retry_after'], $incoming_notes['_system']['workflow_not_before']);
+						$extra['error_message'] = $state === 'ready_review'
+							? 'Материал остановлен для ручной проверки: canonical publish gate вернул стабильные blockers (' . implode(', ', $gate_blockers) . ').'
+							: 'Материал снят с автопубликации: canonical publish gate вернул стабильные blockers (' . implode(', ', $gate_blockers) . ').';
 					} else {
 						$state = 'retry_process';
 						$incoming_notes['_system']['retry_after'] = gmdate('Y-m-d H:i:s', time() + (30 * MINUTE_IN_SECONDS));
 						$incoming_notes['_system']['workflow_not_before'] = $incoming_notes['_system']['retry_after'];
-						$incoming_notes['_system']['last_stage_blocker'] = implode(',', array_values((array) ($gate['blockers'] ?? [])));
-						$extra['error_message'] = 'Пакет снят из ready_publish: canonical publish gate не пройден (' . implode(', ', array_values((array) ($gate['blockers'] ?? []))) . ').';
+						$incoming_notes['_system']['last_stage_blocker'] = implode(',', $gate_blockers);
+						$extra['error_message'] = 'Пакет снят из ready_publish: canonical publish gate не пройден (' . implode(', ', $gate_blockers) . ').';
 					}
 					$extra['category_final'] = implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))) ?: (string) ($current->category_final ?? $current->category_proposed ?? '');
 					$extra['admin_notes'] = wp_json_encode($incoming_notes, JSON_UNESCAPED_UNICODE);
@@ -2595,16 +2608,23 @@ final class EPV2_Queue {
 			$current_state = (string) ($current->state ?? '');
 			$is_existing_ready = in_array($current_state, ['ready_publish', 'retry_publish', 'publishing'], true);
 			$incoming_payload_json = array_key_exists('ai_payload', $extra) ? (string) $extra['ai_payload'] : (string) ($current->ai_payload ?? '');
-			$incoming_payload = json_decode($incoming_payload_json, true);
-			$incoming_payload = is_array($incoming_payload) ? $incoming_payload : [];
-			if ($incoming_payload !== []) {
-				$incoming_payload = EPV2_AI_Processor::normalize_existing_payload($incoming_payload, false);
-			}
-			$publish_limit_override = self::payload_has_publish_limit_override($incoming_payload, $current);
-			if (! $is_existing_ready && ! EPV2_Time_Planner::publish_budget_allows_item($publish_limit_override)) {
-				$notes['_system']['ready_publish_at'] = gmdate('Y-m-d H:i:s');
-				$notes['_system']['publish_not_before'] = EPV2_Jobs::next_publish_slot_after(EPV2_Time_Planner::next_publish_budget_slot_timestamp());
-				$notes['_system']['publish_deferred_by_daily_limit'] = true;
+				$incoming_payload = json_decode($incoming_payload_json, true);
+				$incoming_payload = is_array($incoming_payload) ? $incoming_payload : [];
+				if ($incoming_payload !== []) {
+					$incoming_payload = EPV2_AI_Processor::normalize_existing_payload($incoming_payload, false);
+				}
+				$final_selection = is_array($incoming_payload['_meta']['selection'] ?? null) ? $incoming_payload['_meta']['selection'] : [];
+				if ($final_selection !== []) {
+					$notes['selection'] = $final_selection;
+					if (! array_key_exists('story_score', $extra)) {
+						$extra['story_score'] = max((int) ($current->story_score ?? 0), (int) ($final_selection['score'] ?? 0));
+					}
+				}
+				$publish_limit_override = self::payload_has_publish_limit_override($incoming_payload, $current);
+				if (! $is_existing_ready && ! EPV2_Time_Planner::publish_budget_allows_item($publish_limit_override)) {
+					$notes['_system']['ready_publish_at'] = gmdate('Y-m-d H:i:s');
+					$notes['_system']['publish_not_before'] = EPV2_Jobs::next_publish_slot_after(EPV2_Time_Planner::next_publish_budget_slot_timestamp());
+					$notes['_system']['publish_deferred_by_daily_limit'] = true;
 			} elseif (
 				! $is_existing_ready
 				&& ! EPV2_Time_Planner::publish_category_budget_allows_item(self::row_primary_category($current, $incoming_payload), $publish_limit_override)
@@ -4016,15 +4036,15 @@ final class EPV2_Queue {
 			if (self::row_has_live_published_posts($item)) {
 				continue;
 			}
-			if (! self::item_has_priority_publish_override($item)) {
-				continue;
+				if (! self::item_has_priority_publish_override($item)) {
+					continue;
+				}
+				if (self::publish_due($item) && self::item_is_publishable_read_only($item)) {
+					return true;
+				}
 			}
-			if (self::publish_due($item)) {
-				return true;
-			}
+			return false;
 		}
-		return false;
-	}
 
 	public static function has_due_publish_item(): bool {
 		$items = self::get_queue_items_summary(['states' => ['ready_publish', 'retry_publish'], 'limit' => 30]);
@@ -4032,15 +4052,15 @@ final class EPV2_Queue {
 			return false;
 		}
 		foreach ($items as $item) {
-			if (self::row_has_live_published_posts($item)) {
-				continue;
+				if (self::row_has_live_published_posts($item)) {
+					continue;
+				}
+				if (self::publish_due($item) && self::item_is_publishable_read_only($item)) {
+					return true;
+				}
 			}
-			if (self::publish_due($item)) {
-				return true;
-			}
+			return false;
 		}
-		return false;
-	}
 
 	public static function has_due_breaking_publish_item(): bool {
 		$items = self::get_queue_items_summary(['states' => ['ready_publish', 'retry_publish'], 'limit' => 50]);
@@ -4051,15 +4071,15 @@ final class EPV2_Queue {
 			if (self::row_has_live_published_posts($item)) {
 				continue;
 			}
-			if (! self::row_is_breaking($item)) {
-				continue;
+				if (! self::row_is_breaking($item)) {
+					continue;
+				}
+				if (self::publish_due($item) && self::item_is_publishable_read_only($item)) {
+					return true;
+				}
 			}
-			if (self::publish_due($item)) {
-				return true;
-			}
+			return false;
 		}
-		return false;
-	}
 
 	private static function publish_due(object $row): bool {
 		$notes = self::row_notes($row);
@@ -4240,6 +4260,32 @@ final class EPV2_Queue {
 	private static function automation_requires_publish_grade(): bool {
 		$mode = (string) EPV2_Settings::get('mode', 'semi');
 		return $mode === 'auto';
+	}
+
+	private static function ready_publish_gate_blockers_are_terminal(array $blockers): bool {
+		$text = strtolower(implode(' ', array_map('strval', $blockers)));
+		if ($text === '') {
+			return false;
+		}
+		foreach ([
+			'source_expansion_risk',
+			'thin_source_dossier',
+			'primary source too thin',
+			'too thin for autopublish',
+			'plagiarism',
+			'hallucination',
+			'invented',
+			'unsupported_numbers',
+			'unsupported_quote',
+			'payload_contract',
+			'translation_integrity',
+			'unsupported_known_figure',
+		] as $needle) {
+			if (strpos($text, $needle) !== false) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static function has_active_processing_item(int $maxAge = 90): bool {
@@ -5083,19 +5129,29 @@ final class EPV2_Queue {
 		}
 
 		$earliest_wait = 0;
-		foreach ($rows as $row) {
-			if (! ($row instanceof stdClass)) {
-				continue;
+			foreach ($rows as $row) {
+				if (! ($row instanceof stdClass)) {
+					continue;
+				}
+				$publish_row = self::get_item((int) ($row->id ?? 0));
+				if (! ($publish_row instanceof stdClass)) {
+					continue;
+				}
+				$notes = self::row_notes($publish_row);
+				$not_before = (int) ($notes['_system']['publish_not_before'] ?? 0);
+				if ($not_before <= 0 || $not_before <= time()) {
+					if (self::item_is_publishable_read_only($publish_row, false)) {
+						return time();
+					}
+					continue;
+				}
+				if (! self::item_is_publishable_read_only($publish_row, true)) {
+					continue;
+				}
+				if ($earliest_wait <= 0 || $not_before < $earliest_wait) {
+					$earliest_wait = $not_before;
+				}
 			}
-			$notes = self::row_notes($row);
-			$not_before = (int) ($notes['_system']['publish_not_before'] ?? 0);
-			if ($not_before <= 0 || $not_before <= time()) {
-				return time();
-			}
-			if ($earliest_wait <= 0 || $not_before < $earliest_wait) {
-				$earliest_wait = $not_before;
-			}
-		}
 
 		return $earliest_wait > 0 ? $earliest_wait : null;
 	}

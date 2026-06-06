@@ -377,6 +377,10 @@ add_action('wp_head', function () {
 		return;
 	}
 
+	if (class_exists('RankMath') || function_exists('rank_math')) {
+		return;
+	}
+
 	$canonical = function_exists('europulse_self_canonical_url') ? europulse_self_canonical_url() : '';
 	if ($canonical === '') {
 		return;
@@ -1000,6 +1004,9 @@ add_filter('rank_math/json_ld', function ($data, $jsonld = null) {
 add_action('init', function () {
 	remove_action('wp_head', 'rsd_link');
 	remove_action('wp_head', 'wlwmanifest_link');
+	if (class_exists('RankMath') || function_exists('rank_math')) {
+		remove_action('wp_head', 'rel_canonical');
+	}
 }, 30);
 
 add_action('blocksy:single:content:top', function () {

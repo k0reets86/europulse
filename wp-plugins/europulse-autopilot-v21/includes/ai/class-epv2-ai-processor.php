@@ -516,7 +516,9 @@ final class EPV2_AI_Processor {
 				// still on rebuild_bundle, terminalize to ready_review so the
 				// pulse can move past the stuck row instead of burning AI on
 				// the next 100 rebuilds. Operator can salvage from review.
-				$existing_attempts = (int) (json_decode((string) ($item->admin_notes ?? ''), true)['_system']['workflow_step_attempts'] ?? 0);
+				$fresh_workflow_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
+				$fresh_workflow_system = EPV2_Queue::workflow_system_payload($fresh_workflow_item);
+				$existing_attempts = (int) ($fresh_workflow_system['workflow_step_attempts'] ?? 0);
 				// Short-circuit on selection-rejected items. The earlier
 				// rebuild loop kept calling the worker (~5K tokens per run)
 				// even when every prior attempt had _meta.selection.decision
@@ -579,10 +581,11 @@ final class EPV2_AI_Processor {
 					$run_payload['result'] = 'rebuild_bundle_short_circuit_selection_' . $terminal_state;
 					break;
 				}
+				$rebuild_attempt_cap = self::rebuild_bundle_attempt_cap($item, $payload_for_stage);
 				if (
 					$pipeline_stage === 'rebuild_bundle'
 					&& (string) $workflow_step === 'build_de_master'
-					&& $existing_attempts >= 6
+					&& $existing_attempts >= $rebuild_attempt_cap
 				) {
 					$fresh_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
 					$payload_for_terminal = is_array($payload_for_stage) ? $payload_for_stage : [];
@@ -599,13 +602,15 @@ final class EPV2_AI_Processor {
 						'ai_payload' => wp_json_encode($payload_for_terminal, JSON_UNESCAPED_UNICODE),
 						'admin_notes' => wp_json_encode($notes_for_terminal, JSON_UNESCAPED_UNICODE),
 						'error_message' => sprintf(
-							'rebuild_bundle attempt cap reached (workflow_step_attempts=%d): manual review required.',
-							$existing_attempts
+							'rebuild_bundle attempt cap reached (workflow_step_attempts=%d/%d): manual review required.',
+							$existing_attempts,
+							$rebuild_attempt_cap
 						),
 					]);
 					self::log_process_item_step('rebuild_bundle_attempt_cap_terminated', (int) $item->id, [
 						'run_id' => $run,
 						'attempts' => $existing_attempts,
+						'attempt_cap' => $rebuild_attempt_cap,
 						'duration_ms' => self::duration_ms_since($item_started_at),
 					]);
 					$count++;
@@ -1572,8 +1577,24 @@ final class EPV2_AI_Processor {
 						// terminal по importance, скипаем worker call.
 						$stage_cap_targets = ['build_de_master', 'rebuild_bundle', 'publish_finish', 'publish_ready_gate'];
 						if (in_array((string) $worker_stage, $stage_cap_targets, true)) {
+							$pre_system_item = EPV2_Queue::get_item((int) $item->id) ?: $item;
+							$pre_system = EPV2_Queue::workflow_system_payload($pre_system_item);
+							$workflow_step_for_cap = sanitize_key((string) ($pre_system['workflow_step'] ?? ''));
+							$effective_stage_for_cap = (string) $worker_stage;
+							if ($worker_stage === 'publish_finish' && $workflow_step_for_cap === 'publish_ready_gate') {
+								$effective_stage_for_cap = 'publish_ready_gate';
+							}
 							$pre_attempts = EPV2_Queue::stage_recent_attempts((int) $item->id, (string) $worker_stage, HOUR_IN_SECONDS);
-							$stage_limit = EPV2_Queue::stage_attempt_limit_public((string) $worker_stage);
+							if ($effective_stage_for_cap !== (string) $worker_stage) {
+								$pre_attempts = max(
+									$pre_attempts,
+									EPV2_Queue::stage_recent_attempts((int) $item->id, $effective_stage_for_cap, HOUR_IN_SECONDS)
+								);
+							}
+							if ($workflow_step_for_cap === sanitize_key($effective_stage_for_cap)) {
+								$pre_attempts = max($pre_attempts, (int) ($pre_system['workflow_step_attempts'] ?? 0));
+							}
+							$stage_limit = EPV2_Queue::stage_attempt_limit_public($effective_stage_for_cap);
 							if ($pre_attempts >= $stage_limit) {
 								$pre_importance = class_exists('EPV2_Importance_Score')
 									? (int) EPV2_Importance_Score::compute($item, $existing_payload)
@@ -1592,7 +1613,7 @@ final class EPV2_AI_Processor {
 									: [];
 								$pre_notes['_system'] = is_array($pre_notes['_system'] ?? null) ? $pre_notes['_system'] : [];
 								$pre_notes['_system']['workflow_terminal_reason'] = 'inline_stage_attempt_cap';
-								$pre_notes['_system']['quarantine_reason'] = 'inline_short_circuit_' . sanitize_key((string) $worker_stage);
+								$pre_notes['_system']['quarantine_reason'] = 'inline_short_circuit_' . sanitize_key($effective_stage_for_cap);
 								$pre_notes['_system']['workflow_step_status'] = 'terminal';
 								$pre_notes['_system']['workflow_owner_token'] = '';
 								$pre_notes['_system']['workflow_heartbeat_at'] = '';
@@ -1610,16 +1631,19 @@ final class EPV2_AI_Processor {
 								EPV2_Queue::mark_state((int) $item->id, $pre_state, [
 									'admin_notes'   => wp_json_encode($pre_notes, JSON_UNESCAPED_UNICODE),
 									'error_message' => sprintf(
-										'Материал снят: стадия "%s" уже выполнила %d попыток за час (cap=%d), не пересматривается перезапуском. Inline short-circuit до новой AI-затраты.',
-										$worker_stage,
+										'Материал снят: стадия "%s" уже выполнила %d попыток (cap=%d, worker=%s), не пересматривается перезапуском. Inline short-circuit до новой AI-затраты.',
+										$effective_stage_for_cap,
 										$pre_attempts,
-										$stage_limit
+										$stage_limit,
+										$worker_stage
 									),
 								]);
 								EPV2_Queue::clear_active_automation_item((int) $item->id);
 								self::log_process_item_step('inline_stage_attempt_cap_terminated', (int) $item->id, [
 									'run_id'        => $run,
 									'worker_stage'  => $worker_stage,
+									'cap_stage'     => $effective_stage_for_cap,
+									'workflow_step' => $workflow_step_for_cap,
 									'attempts'      => $pre_attempts,
 									'cap'           => $stage_limit,
 									'importance'    => $pre_importance,
@@ -1630,7 +1654,7 @@ final class EPV2_AI_Processor {
 									EPV2_Learning_Journal::record(
 										$pre_state === 'manual_review' ? 'manual_review_landed' : 'quarantine_rejected',
 										(int) $item->id,
-										'inline_short_circuit_' . sanitize_key((string) $worker_stage),
+										'inline_short_circuit_' . sanitize_key($effective_stage_for_cap),
 										[
 											'attempts'  => $pre_attempts,
 											'limit'     => $stage_limit,
@@ -2671,6 +2695,28 @@ final class EPV2_AI_Processor {
 		return 1;
 	}
 
+	private static function rebuild_bundle_attempt_cap(object $item, array $payload): int {
+		$score = (int) ($item->story_score ?? 0);
+		$selection = is_array($payload['_meta']['selection'] ?? null) ? $payload['_meta']['selection'] : [];
+		$decision = sanitize_key((string) ($selection['decision'] ?? ''));
+		if ($score <= 0 && isset($selection['score'])) {
+			$score = (int) $selection['score'];
+		}
+		$is_breaking_or_top = ! empty($payload['_meta']['breaking'])
+			|| ! empty($payload['_meta']['top_story'])
+			|| ! empty($payload['_meta']['breaking_watch']);
+
+		if ($is_breaking_or_top || $score >= 60 || in_array($decision, ['must_publish', 'strong'], true)) {
+			return 6;
+		}
+
+		if ($score >= 50 || $decision === 'publish') {
+			return 4;
+		}
+
+		return 3;
+	}
+
 	private static function assert_stage_transition_ready(array $payload, string $stage): void {
 		$checklist = self::payload_stage_checklist(self::refresh_stage_checklist($payload));
 		switch ($stage) {
@@ -3709,24 +3755,29 @@ final class EPV2_AI_Processor {
 			return false;
 		}
 		$payload = self::set_payload_pipeline_stage($payload, '');
-		$notes = $item ? json_decode((string) ($item->admin_notes ?? ''), true) : [];
-		$notes = is_array($notes) ? $notes : [];
-		$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
-		$notes['_system']['ready_publish_at'] = gmdate('Y-m-d H:i:s');
-		$publish_interval = max(5, (int) EPV2_Settings::get('publish_interval_minutes', 5)) * MINUTE_IN_SECONDS;
-		$notes['_system']['publish_not_before'] = time() + $publish_interval;
-		$notes['_system']['workflow_step'] = '';
-		$notes['_system']['workflow_step_status'] = '';
+			$notes = $item ? json_decode((string) ($item->admin_notes ?? ''), true) : [];
+			$notes = is_array($notes) ? $notes : [];
+			$notes['_system'] = is_array($notes['_system'] ?? null) ? $notes['_system'] : [];
+			$final_selection = is_array($payload['_meta']['selection'] ?? null) ? $payload['_meta']['selection'] : [];
+			if ($final_selection !== []) {
+				$notes['selection'] = $final_selection;
+			}
+			$notes['_system']['ready_publish_at'] = gmdate('Y-m-d H:i:s');
+			$publish_interval = max(5, (int) EPV2_Settings::get('publish_interval_minutes', 5)) * MINUTE_IN_SECONDS;
+			$notes['_system']['publish_not_before'] = time() + $publish_interval;
+			$notes['_system']['workflow_step'] = '';
+			$notes['_system']['workflow_step_status'] = '';
 		$notes['_system']['workflow_owner_token'] = '';
 		$notes['_system']['workflow_heartbeat_at'] = '';
 		unset($notes['_system']['retry_after'], $notes['_system']['workflow_not_before'], $notes['_system']['live_status'], $notes['_system']['live_status_code']);
 		EPV2_Queue::update_fields($item_id, [
-			'state' => 'ready_publish',
-			'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
-			'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
-			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
-			'error_message' => '',
-			]);
+				'state' => 'ready_publish',
+				'category_final' => implode(',', array_values(array_filter((array) ($payload['categories'] ?? [])))),
+				'ai_payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE),
+				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
+				'story_score' => max((int) ($item->story_score ?? 0), (int) ($final_selection['score'] ?? 0)),
+				'error_message' => '',
+				]);
 			EPV2_Queue::clear_active_automation_item($item_id);
 			EPV2_Queue::normalize_ready_publish_schedule(false);
 			return true;

@@ -1029,7 +1029,50 @@ function europulse_home_section_ids(string $canonical_slug, int $limit, int $off
 		$fallback_ids = array_slice($fallback_ids, $offset);
 	}
 
-	return array_slice($fallback_ids, 0, $limit);
+	$fallback_ids = array_slice($fallback_ids, 0, $limit);
+	if ($fallback_ids !== []) {
+		return $fallback_ids;
+	}
+
+	$mapped_term_id = 0;
+	if (class_exists('EPV2_Taxonomy_Map')) {
+		$mapped = EPV2_Taxonomy_Map::map($canonical_slug, europulse_current_lang());
+		$mapped_term_id = (int) ($mapped['term_id'] ?? 0);
+	}
+
+	if ($mapped_term_id <= 0) {
+		return [];
+	}
+
+	$archive_fallback_query = new WP_Query([
+		'post_type' => 'post',
+		'post_status' => 'publish',
+		'posts_per_page' => $limit + $offset,
+		'orderby' => 'date',
+		'order' => 'DESC',
+		'post__not_in' => $exclude_ids,
+		'tax_query' => [
+			[
+				'taxonomy' => 'category',
+				'field' => 'term_id',
+				'terms' => [$mapped_term_id],
+			],
+		],
+		'lang' => europulse_current_lang(),
+		'ignore_sticky_posts' => true,
+		'fields' => 'ids',
+		'no_found_rows' => true,
+	]);
+
+	$archive_fallback_ids = array_values(array_filter(array_map('intval', $archive_fallback_query->posts), static function (int $post_id): bool {
+		return $post_id > 0 && europulse_home_post_is_eligible($post_id);
+	}));
+
+	if ($offset > 0) {
+		$archive_fallback_ids = array_slice($archive_fallback_ids, $offset);
+	}
+
+	return array_slice($archive_fallback_ids, 0, $limit);
 }
 
 function europulse_home_post_is_eligible(int $post_id, ?WP_Post $post = null): bool {

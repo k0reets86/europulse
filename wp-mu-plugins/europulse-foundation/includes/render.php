@@ -770,7 +770,7 @@ add_shortcode('europulse_top_slider', function ($atts) {
 						<?php endif; ?>
 						</div>
 						<?php $slider_headline = europulse_slider_headline($slider_post_id); ?>
-						<h1 class="europulse-top-slide-title <?php echo esc_attr(europulse_title_length_class($slider_headline)); ?>"><a href="<?php echo esc_url(get_permalink($slider_post_id)); ?>"><?php echo esc_html($slider_headline); ?></a></h1>
+						<h2 class="europulse-top-slide-title <?php echo esc_attr(europulse_title_length_class($slider_headline)); ?>"><a href="<?php echo esc_url(get_permalink($slider_post_id)); ?>"><?php echo esc_html($slider_headline); ?></a></h2>
 						<div class="europulse-top-slide-excerpt"><?php echo esc_html(europulse_context_excerpt($slider_post_id, 'slider')); ?></div>
 					</div>
 				</article>

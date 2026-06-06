@@ -595,11 +595,16 @@ def main() -> int:
     _install_signal_handlers()
     # 2026-05-12 W4.1: start parallel publish thread.
     start_publish_thread()
-    last_collect = time.time()
+    # Do not treat orchestrator startup as a completed collect. Regular collect
+    # windows are narrow; a restart shortly before :00 must not consume the next
+    # scheduled hourly run via the cooldown check.
+    last_collect = 0.0
     last_process = 0.0
     last_publish = 0.0
     last_maintenance = 0.0
-    last_breaking_scan = 0.0
+    # Allow the next scheduled :00/:30 boundary to fire after restart, but do
+    # not trigger the overshoot guard immediately in an arbitrary startup minute.
+    last_breaking_scan = time.time() - 120
     last_breaking_scan_minute = -1  # track which minute we already fired in
     last_publish_thread_check = 0.0  # track when we last verified thread health
 

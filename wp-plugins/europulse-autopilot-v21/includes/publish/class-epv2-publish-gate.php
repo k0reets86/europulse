@@ -196,6 +196,11 @@ final class EPV2_Publish_Gate {
 	}
 
 	public static function selection_decision(?object $item, array $payload = []): string {
+		$payload_decision = sanitize_key((string) ($payload['_meta']['selection']['decision'] ?? ''));
+		if ($payload_decision !== '') {
+			return $payload_decision;
+		}
+
 		if ($item) {
 			$notes = json_decode((string) ($item->admin_notes ?? ''), true);
 			$notes = is_array($notes) ? $notes : [];
@@ -209,6 +214,11 @@ final class EPV2_Publish_Gate {
 	}
 
 	private static function selection_score(?object $item, array $payload = []): int {
+		$payload_score = (int) ($payload['_meta']['selection']['score'] ?? 0);
+		if ($payload_score > 0) {
+			return $payload_score;
+		}
+
 		if ($item) {
 			$notes = json_decode((string) ($item->admin_notes ?? ''), true);
 			$notes = is_array($notes) ? $notes : [];
@@ -216,11 +226,6 @@ final class EPV2_Publish_Gate {
 			if ($score > 0) {
 				return $score;
 			}
-		}
-
-		$score = (int) ($payload['_meta']['selection']['score'] ?? 0);
-		if ($score > 0) {
-			return $score;
 		}
 
 		return $item ? max(0, (int) ($item->story_score ?? 0)) : 0;

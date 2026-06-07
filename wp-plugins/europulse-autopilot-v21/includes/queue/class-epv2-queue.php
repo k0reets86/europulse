@@ -2106,7 +2106,7 @@ final class EPV2_Queue {
 		self::promote_live_published_rows(20);
 		$table = $wpdb->prefix . 'epv2_queue';
 		$now = time();
-		$limit = $breaking_only ? 50 : 10;
+		$limit = $breaking_only ? 50 : 30;
 		$due_clause = $force ? '1=1' : $wpdb->prepare(
 			"COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.publish_not_before')) AS UNSIGNED), 0) <= %d",
 			$now
@@ -2120,16 +2120,56 @@ final class EPV2_Queue {
 			ORDER BY COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(admin_notes, '$._system.publish_not_before')) AS UNSIGNED), 0) ASC, id ASC
 			LIMIT {$limit}"
 		);
+		$candidates = [];
 		foreach ((array) $ids as $id) {
 			$item = self::get_item((int) $id);
 			if ($breaking_only && is_object($item) && ! self::row_is_breaking($item)) {
 				continue;
 			}
 			if (is_object($item) && (string) ($item->state ?? '') === 'ready_publish' && self::item_is_publishable_read_only($item, $force)) {
-				return $item;
+				$candidates[] = $item;
 			}
 		}
-		return null;
+		return self::select_publish_candidate_with_category_balance($candidates, $force || $breaking_only);
+	}
+
+	/**
+	 * Keep the normal due order unless the last two published story bundles
+	 * already share the same final category and a ready alternative exists.
+	 */
+	private static function select_publish_candidate_with_category_balance(array $candidates, bool $bypass_balance = false): ?object {
+		if ($candidates === []) {
+			return null;
+		}
+		if ($bypass_balance) {
+			return $candidates[0];
+		}
+		$streak_category = self::recent_publish_streak_category(2);
+		if ($streak_category === '') {
+			return $candidates[0];
+		}
+		foreach ($candidates as $candidate) {
+			if (self::item_has_priority_publish_override($candidate)) {
+				return $candidate;
+			}
+			$payload = self::row_payload($candidate);
+			$category = self::category_streak_key(self::row_primary_category($candidate, $payload));
+			if ($category === '') {
+				continue;
+			}
+			if ($category !== $streak_category) {
+				if ($candidate !== $candidates[0] && class_exists('EPV2_Logger')) {
+					EPV2_Logger::info('publish', 'category streak guard selected alternate', [
+						'skipped_item_id' => (int) ($candidates[0]->id ?? 0),
+						'selected_item_id' => (int) ($candidate->id ?? 0),
+						'streak_category' => $streak_category,
+						'selected_category' => $category,
+					]);
+				}
+				return $candidate;
+			}
+		}
+		return $candidates[0];
 	}
 
 	private static function item_is_publishable_read_only(object $item, bool $force = false): bool {
@@ -4025,6 +4065,47 @@ final class EPV2_Queue {
 			}
 		}
 		return '';
+	}
+
+	private static function recent_publish_streak_category(int $threshold = 2): string {
+		global $wpdb;
+		$threshold = max(2, min(5, $threshold));
+		$since = gmdate('Y-m-d H:i:s', time() - (12 * HOUR_IN_SECONDS));
+		$limit = $threshold;
+		$rows = $wpdb->get_results($wpdb->prepare(
+			"SELECT
+				qpm.meta_value AS queue_id,
+				MAX(p.post_date_gmt) AS published_gmt,
+				COALESCE(SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(cpm.meta_value, '') ORDER BY p.ID ASC SEPARATOR ','), ',', 1), '') AS primary_category
+			FROM {$wpdb->posts} p
+			INNER JOIN {$wpdb->postmeta} qpm ON qpm.post_id = p.ID AND qpm.meta_key = '_epv2_queue_id'
+			LEFT JOIN {$wpdb->postmeta} cpm ON cpm.post_id = p.ID AND cpm.meta_key = '_epv2_primary_category'
+			WHERE p.post_status = 'publish'
+			  AND p.post_type = 'post'
+			  AND p.post_date_gmt >= %s
+			GROUP BY qpm.meta_value
+			ORDER BY MAX(p.post_date_gmt) DESC
+			LIMIT %d",
+			$since,
+			$limit
+		));
+		if (count((array) $rows) < $threshold) {
+			return '';
+		}
+		$categories = [];
+		foreach ((array) $rows as $row) {
+			$category = self::category_streak_key((string) ($row->primary_category ?? ''));
+			if ($category === '') {
+				return '';
+			}
+			$categories[] = $category;
+		}
+		return count(array_unique($categories)) === 1 ? $categories[0] : '';
+	}
+
+	private static function category_streak_key(string $category): string {
+		$category = sanitize_key(trim($category));
+		return $category;
 	}
 
 	public static function has_due_priority_publish_item(): bool {

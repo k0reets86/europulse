@@ -2162,7 +2162,113 @@ body.blog[data-prefix="blog"] .entries[data-archive="default"] + .ct-pagination 
 	margin-top: 18px;
 }
 
+.europulse-cookie-banner {
+	position: fixed;
+	right: 20px;
+	bottom: 20px;
+	z-index: 9999;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 18px;
+	width: min(720px, calc(100vw - 40px));
+	padding: 18px;
+	border: 1px solid rgba(15, 23, 42, 0.14);
+	border-radius: 8px;
+	background: #ffffff;
+	box-shadow: 0 18px 48px rgba(15, 23, 42, 0.18);
+	color: #0f172a;
+}
+
+.europulse-cookie-banner[hidden] {
+	display: none;
+}
+
+.europulse-cookie-banner__copy {
+	min-width: 0;
+}
+
+.europulse-cookie-banner__copy strong {
+	display: block;
+	margin-bottom: 6px;
+	font-size: 15px;
+	line-height: 1.25;
+}
+
+.europulse-cookie-banner__copy p {
+	margin: 0;
+	color: #334155;
+	font-size: 13px;
+	line-height: 1.45;
+}
+
+.europulse-cookie-banner__links {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	margin-top: 8px;
+	font-size: 12px;
+	font-weight: 700;
+}
+
+.europulse-cookie-banner__links a {
+	color: #0f766e;
+	text-decoration: none;
+}
+
+.europulse-cookie-banner__links a:hover {
+	text-decoration: underline;
+}
+
+.europulse-cookie-banner__actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.europulse-cookie-banner__actions button {
+	min-height: 38px;
+	padding: 0 14px;
+	border-radius: 6px;
+	font-size: 12px;
+	font-weight: 800;
+	line-height: 1;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.europulse-cookie-banner__primary {
+	border: 1px solid #0f766e;
+	background: #0f766e;
+	color: #ffffff;
+}
+
+.europulse-cookie-banner__secondary {
+	border: 1px solid #cbd5e1;
+	background: #ffffff;
+	color: #0f172a;
+}
+
 @media (max-width: 767px) {
+	.europulse-cookie-banner {
+		right: 12px;
+		bottom: 12px;
+		grid-template-columns: 1fr;
+		width: calc(100vw - 24px);
+		gap: 14px;
+		padding: 14px;
+	}
+
+	.europulse-cookie-banner__actions {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.europulse-cookie-banner__actions button {
+		width: 100%;
+		padding: 0 10px;
+		font-size: 11px;
+	}
+
 	body.blog[data-prefix="blog"] .entries[data-archive="default"] .entry-card {
 		flex-wrap: wrap !important;
 		gap: 8px !important;

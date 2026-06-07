@@ -302,3 +302,126 @@ function europulse_localize_shared_widget_content(string $content): string {
 }
 
 add_filter('widget_block_content', 'europulse_localize_shared_widget_content', 20);
+
+function europulse_cookie_page_url(string $type): string {
+	$lang = function_exists('europulse_current_lang') ? europulse_current_lang() : 'de';
+	$ids = [
+		'cookie' => ['de' => 42, 'uk' => 290, 'en' => 291],
+		'privacy' => ['de' => 3, 'uk' => 294, 'en' => 295],
+	];
+	$post_id = (int) ($ids[$type][$lang] ?? $ids[$type]['de'] ?? 0);
+	if ($post_id > 0) {
+		$url = get_permalink($post_id);
+		if (is_string($url) && $url !== '') {
+			return $url;
+		}
+	}
+	return home_url('/');
+}
+
+function europulse_cookie_banner_copy(): array {
+	$lang = function_exists('europulse_current_lang') ? europulse_current_lang() : 'de';
+	$copy = [
+		'de' => [
+			'title' => 'Cookie-Einstellungen',
+			'body' => 'Wir verwenden notwendige Cookies für Betrieb, Sicherheit, Sprache und Einwilligungsverwaltung. Optionale Analyse- oder Werbetechnologien werden nur nach Ihrer Zustimmung aktiviert.',
+			'accept' => 'Alle akzeptieren',
+			'essential' => 'Nur notwendige',
+			'settings' => 'Einstellungen',
+			'privacy' => 'Datenschutz',
+		],
+		'uk' => [
+			'title' => 'Налаштування cookie',
+			'body' => 'Ми використовуємо необхідні cookie для роботи сайту, безпеки, мови та керування згодою. Необовʼязкова аналітика або реклама активуються лише після вашої згоди.',
+			'accept' => 'Прийняти всі',
+			'essential' => 'Лише необхідні',
+			'settings' => 'Налаштування',
+			'privacy' => 'Конфіденційність',
+		],
+		'en' => [
+			'title' => 'Cookie settings',
+			'body' => 'We use necessary cookies for site operation, security, language and consent management. Optional analytics or advertising technologies are activated only after your consent.',
+			'accept' => 'Accept all',
+			'essential' => 'Essential only',
+			'settings' => 'Settings',
+			'privacy' => 'Privacy',
+		],
+	];
+	return $copy[$lang] ?? $copy['de'];
+}
+
+function europulse_cookie_consent_value(): string {
+	$value = isset($_COOKIE['ep_cookie_consent']) ? sanitize_key((string) wp_unslash($_COOKIE['ep_cookie_consent'])) : '';
+	return in_array($value, ['all', 'essential'], true) ? $value : '';
+}
+
+add_action('wp_head', function (): void {
+	if (is_admin()) {
+		return;
+	}
+	$granted = europulse_cookie_consent_value() === 'all';
+	$state = $granted ? 'granted' : 'denied';
+	?>
+	<script>
+		window.dataLayer = window.dataLayer || [];
+		function gtag(){dataLayer.push(arguments);}
+		gtag('consent', 'default', {
+			ad_storage: '<?php echo esc_js($state); ?>',
+			analytics_storage: '<?php echo esc_js($state); ?>',
+			ad_user_data: '<?php echo esc_js($state); ?>',
+			ad_personalization: '<?php echo esc_js($state); ?>',
+			wait_for_update: 500
+		});
+	</script>
+	<?php
+}, 0);
+
+add_action('wp_footer', function (): void {
+	if (is_admin() || europulse_cookie_consent_value() !== '') {
+		return;
+	}
+	$copy = europulse_cookie_banner_copy();
+	?>
+	<div class="europulse-cookie-banner" data-ep-cookie-banner role="dialog" aria-live="polite" aria-label="<?php echo esc_attr($copy['title']); ?>">
+		<div class="europulse-cookie-banner__copy">
+			<strong><?php echo esc_html($copy['title']); ?></strong>
+			<p><?php echo esc_html($copy['body']); ?></p>
+			<div class="europulse-cookie-banner__links">
+				<a href="<?php echo esc_url(europulse_cookie_page_url('cookie')); ?>"><?php echo esc_html($copy['settings']); ?></a>
+				<a href="<?php echo esc_url(europulse_cookie_page_url('privacy')); ?>"><?php echo esc_html($copy['privacy']); ?></a>
+			</div>
+		</div>
+		<div class="europulse-cookie-banner__actions">
+			<button type="button" class="europulse-cookie-banner__secondary" data-ep-cookie-choice="essential"><?php echo esc_html($copy['essential']); ?></button>
+			<button type="button" class="europulse-cookie-banner__primary" data-ep-cookie-choice="all"><?php echo esc_html($copy['accept']); ?></button>
+		</div>
+	</div>
+	<script>
+		(() => {
+			const banner = document.querySelector('[data-ep-cookie-banner]');
+			if (! banner) {
+				return;
+			}
+			const consentState = (choice) => choice === 'all' ? 'granted' : 'denied';
+			const applyConsent = (choice) => {
+				const expires = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toUTCString();
+				document.cookie = 'ep_cookie_consent=' + encodeURIComponent(choice) + '; expires=' + expires + '; path=/; secure; SameSite=Lax';
+				window.dataLayer = window.dataLayer || [];
+				if (typeof window.gtag === 'function') {
+					const state = consentState(choice);
+					window.gtag('consent', 'update', {
+						ad_storage: state,
+						analytics_storage: state,
+						ad_user_data: state,
+						ad_personalization: state
+					});
+				}
+				banner.hidden = true;
+			};
+			banner.querySelectorAll('[data-ep-cookie-choice]').forEach((button) => {
+				button.addEventListener('click', () => applyConsent(button.dataset.epCookieChoice || 'essential'));
+			});
+		})();
+	</script>
+	<?php
+}, 30);

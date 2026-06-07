@@ -5671,10 +5671,12 @@ final class EPV2_Queue {
 		// Limit=4 allows full pipeline progression; chronic recyclers
 		// still caught via separate workflow_step_attempts counter (per-
 		// stage real attempts) + watchdog quarantine_pathological_loops.
-		// publish_ready_gate kept tighter — это final check, retries rare.
+		// 2026-06-07: keep publish_ready_gate at 4 as well. The final check can
+		// legitimately bounce through rebuild/finish several times for media or
+		// enrichment repair; cap=2 wrongly rejected restored publishable items.
 		$stage = sanitize_key($stage);
 		return match ($stage) {
-			'publish_ready_gate' => 2,
+			'publish_ready_gate' => 4,
 			'build_de_master',
 			'rebuild_bundle',
 			'publish_finish',

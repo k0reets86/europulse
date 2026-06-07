@@ -1592,7 +1592,10 @@ final class EPV2_AI_Processor {
 								);
 							}
 							if ($workflow_step_for_cap === sanitize_key($effective_stage_for_cap)) {
-								$pre_attempts = max($pre_attempts, (int) ($pre_system['workflow_step_attempts'] ?? 0));
+								// workflow_step_attempts was incremented for the run that is
+								// about to start. The inline cap must count completed attempts,
+								// otherwise the allowed Nth attempt is blocked before worker call.
+								$pre_attempts = max($pre_attempts, max(0, (int) ($pre_system['workflow_step_attempts'] ?? 0) - 1));
 							}
 							$stage_limit = EPV2_Queue::stage_attempt_limit_public($effective_stage_for_cap);
 							if ($pre_attempts >= $stage_limit) {

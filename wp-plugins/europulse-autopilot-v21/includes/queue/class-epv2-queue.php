@@ -5729,7 +5729,10 @@ final class EPV2_Queue {
 			// with error/failed/retry. Exclude "queued_OTHER_stage" (success).
 			$stage_safe = $wpdb->_real_escape($stage);
 			$stage_filter = "AND (
-				JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'queued_{$stage_safe}_stage'
+				(
+					JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'queued_{$stage_safe}_stage'
+					AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_stage')) = '{$stage_safe}'
+				)
 				OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'error_%'
 				OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'failed_%'
 				OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.result')) LIKE 'retry_%'

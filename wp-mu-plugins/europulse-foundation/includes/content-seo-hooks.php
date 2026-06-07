@@ -196,6 +196,129 @@ add_filter('robots_txt', function ($output, $public) {
 	return implode("\n", array_values(array_filter($filtered)));
 }, 20, 2);
 
+function europulse_sitemap_xml_escape(string $value): string {
+	return htmlspecialchars($value, ENT_XML1 | ENT_COMPAT, 'UTF-8');
+}
+
+function europulse_post_type_lastmod_gmt(string $post_type): string {
+	global $wpdb;
+	$lastmod = (string) $wpdb->get_var($wpdb->prepare(
+		"SELECT post_modified_gmt
+		 FROM {$wpdb->posts}
+		 WHERE post_type = %s
+		   AND post_status = 'publish'
+		   AND post_password = ''
+		 ORDER BY post_modified_gmt DESC
+		 LIMIT 1",
+		$post_type
+	));
+
+	return $lastmod === '0000-00-00 00:00:00' ? '' : $lastmod;
+}
+
+function europulse_sitemap_index_entry_xml(string $loc, string $lastmod): string {
+	$xml = "\t<sitemap>\n";
+	$xml .= "\t\t<loc>" . europulse_sitemap_xml_escape($loc) . "</loc>\n";
+	if ($lastmod !== '') {
+		$xml .= "\t\t<lastmod>" . europulse_sitemap_xml_escape(europulse_sitemap_lastmod_iso($lastmod)) . "</lastmod>\n";
+	}
+	$xml .= "\t</sitemap>\n";
+	return $xml;
+}
+
+function europulse_output_sitemap_index_override(): void {
+	global $wpdb;
+
+	$latest_post = europulse_latest_sitemap_lastmod_gmt();
+	$latest_page = europulse_post_type_lastmod_gmt('page');
+	$items_per_page = 100;
+	if (class_exists('RankMath\\Helper')) {
+		$items_per_page = max(1, absint(\RankMath\Helper::get_settings('sitemap.items_per_page', 100)));
+	}
+	$post_count = (int) $wpdb->get_var(
+		"SELECT COUNT(ID)
+		 FROM {$wpdb->posts}
+		 WHERE post_type = 'post'
+		   AND post_status = 'publish'
+		   AND post_password = ''"
+	);
+	$post_pages = max(1, (int) ceil($post_count / $items_per_page));
+
+	status_header(200);
+	header('Content-Type: application/xml; charset=UTF-8');
+
+	echo '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+	echo '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' . "\n";
+	for ($page = 1; $page <= $post_pages; $page++) {
+		$slug = $post_pages > 1 ? "/post-sitemap{$page}.xml" : '/post-sitemap.xml';
+		echo europulse_sitemap_index_entry_xml(home_url($slug), $latest_post);
+	}
+	echo europulse_sitemap_index_entry_xml(home_url('/page-sitemap.xml'), $latest_page !== '' ? $latest_page : $latest_post);
+	echo europulse_sitemap_index_entry_xml(home_url('/category-sitemap.xml'), $latest_post);
+	echo europulse_sitemap_index_entry_xml(home_url('/localized-category-sitemap.xml'), $latest_post);
+	echo europulse_sitemap_index_entry_xml(home_url('/news-sitemap.xml'), $latest_post);
+	echo '</sitemapindex>';
+	exit;
+}
+
+function europulse_output_localized_category_sitemap(): void {
+	$latest_post = europulse_latest_sitemap_lastmod_gmt();
+	$terms = get_terms([
+		'taxonomy' => 'category',
+		'hide_empty' => true,
+		'number' => 200,
+		'orderby' => 'slug',
+		'order' => 'ASC',
+	]);
+
+	status_header(200);
+	header('Content-Type: application/xml; charset=UTF-8');
+
+	echo '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+	echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' . "\n";
+	if (! is_wp_error($terms)) {
+		foreach ($terms as $term) {
+			if (! $term instanceof WP_Term) {
+				continue;
+			}
+			$link = get_term_link($term);
+			if (! is_string($link) || $link === '' || is_wp_error($link)) {
+				continue;
+			}
+			echo "\t<url>\n";
+			echo "\t\t<loc>" . europulse_sitemap_xml_escape($link) . "</loc>\n";
+			if ($latest_post !== '') {
+				echo "\t\t<lastmod>" . europulse_sitemap_xml_escape(europulse_sitemap_lastmod_iso($latest_post)) . "</lastmod>\n";
+			}
+			echo "\t</url>\n";
+		}
+	}
+	echo '</urlset>';
+	exit;
+}
+
+add_action('template_redirect', function () {
+	$request_uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+	$path = $request_uri !== '' ? (string) wp_parse_url(home_url($request_uri), PHP_URL_PATH) : '';
+	$sitemap = sanitize_key((string) ($_GET['sitemap'] ?? ''));
+	if ($path === '/sitemap_index.xml' || $sitemap === '1') {
+		europulse_output_sitemap_index_override();
+	}
+	if ($path === '/localized-category-sitemap.xml') {
+		europulse_output_localized_category_sitemap();
+	}
+}, 0);
+
+add_action('parse_query', function ($query): void {
+	if (is_object($query) && method_exists($query, 'is_main_query') && ! $query->is_main_query()) {
+		return;
+	}
+
+	if ((string) get_query_var('sitemap') === '1') {
+		europulse_output_sitemap_index_override();
+	}
+}, 0);
+
 add_action('template_redirect', function () {
 	$request_uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
 	if ($request_uri === '') {
@@ -869,6 +992,83 @@ add_filter('rank_math/sitemap/entry', function ($url, $type, $object) {
 
 	return $url;
 }, 30, 3);
+
+function europulse_latest_sitemap_lastmod_gmt(): string {
+	static $lastmod = null;
+	if ($lastmod !== null) {
+		return $lastmod;
+	}
+
+	global $wpdb;
+	$lastmod = (string) $wpdb->get_var(
+		"SELECT post_modified_gmt
+		 FROM {$wpdb->posts}
+		 WHERE post_type = 'post'
+		   AND post_status = 'publish'
+		   AND post_password = ''
+		 ORDER BY post_modified_gmt DESC
+		 LIMIT 1"
+	);
+
+	if ($lastmod === '0000-00-00 00:00:00') {
+		$lastmod = '';
+	}
+
+	return $lastmod;
+}
+
+function europulse_sitemap_lastmod_iso(string $mysql_gmt): string {
+	$timestamp = strtotime($mysql_gmt . ' UTC');
+	if (! $timestamp) {
+		$timestamp = time();
+	}
+
+	return gmdate('c', $timestamp);
+}
+
+add_filter('rank_math/sitemap/index/entry', function ($item, $type, $object_type) {
+	if (! is_array($item)) {
+		return $item;
+	}
+
+	$loc = (string) ($item['loc'] ?? '');
+	$path = (string) wp_parse_url($loc, PHP_URL_PATH);
+	$latest = europulse_latest_sitemap_lastmod_gmt();
+	if ($latest === '') {
+		return $item;
+	}
+
+	if ($type === 'post' && $object_type === 'post' && preg_match('~/post-sitemap(1)?\.xml$~', $path)) {
+		$item['lastmod'] = $latest;
+	}
+
+	if ($type === 'term' && $object_type === 'category' && preg_match('~/category-sitemap\.xml$~', $path)) {
+		$item['lastmod'] = $latest;
+	}
+
+	return $item;
+}, 30, 3);
+
+add_filter('rank_math/sitemap/index', function ($xml) {
+	$xml = (string) $xml;
+	if (strpos($xml, '/news-sitemap.xml') !== false) {
+		return $xml;
+	}
+
+	$latest = europulse_latest_sitemap_lastmod_gmt();
+	if ($latest === '') {
+		return $xml;
+	}
+
+	$loc = htmlspecialchars(home_url('/news-sitemap.xml'), ENT_XML1 | ENT_COMPAT, 'UTF-8');
+	$lastmod = htmlspecialchars(europulse_sitemap_lastmod_iso($latest), ENT_XML1 | ENT_COMPAT, 'UTF-8');
+
+	return $xml
+		. "\t<sitemap>\n"
+		. "\t\t<loc>{$loc}</loc>\n"
+		. "\t\t<lastmod>{$lastmod}</lastmod>\n"
+		. "\t</sitemap>\n";
+}, 30);
 
 add_filter('rank_math/sitemap/post_sitemap_url', function ($url, $generator) {
 	$loc = is_array($url) ? (string) ($url['loc'] ?? '') : '';

@@ -143,6 +143,8 @@ class RewriteResult:
     uniqueness_pct: float = 100.0
     uniqueness_passed: bool = True
     uniqueness_reason: str = ""
+    # Совпавшие с источником фразы (триграммы) — для адресного retry.
+    uniqueness_shared: list[str] = field(default_factory=list)
     # B3 (2026-05-12): soft validator warnings. Раньше валидатор date/name
     # бросал error и REJECT'ил весь rewrite (item уходил в retry → cap →
     # manual_review). Теперь validators могут возвращать warning'и, и rewrite
@@ -617,12 +619,22 @@ Gib zurück: {{"title": "...", "lead": "ein Satz / 1–2 Sätze Teaser", "card_l
             result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
             _annotate_uniqueness(result, source_text=source_text, story_card=story_card, language="de")
             if not result.uniqueness_passed:
+                shared_block = ""
+                if result.uniqueness_shared:
+                    listed = "\n".join(f"- {phrase}" for phrase in result.uniqueness_shared)
+                    shared_block = (
+                        "\nDiese Wortfolgen stammen wörtlich aus der Quelle und MÜSSEN "
+                        "komplett anders formuliert werden (Synonyme + andere Satzarchitektur, "
+                        "Eigennamen dürfen bleiben):\n" + listed + "\n"
+                    )
                 retry_prompt = (
                     user_prompt
-                    + "\n\nANTI-PLAGIARISM RETRY: The previous German rewrite was too close to the source. "
+                    + "\n\nANTI-PLAGIARISM RETRY: The previous German rewrite was too close to the source "
+                    f"(uniqueness {result.uniqueness_pct:.0f}%, required 85%). "
                     "Rewrite again with new sentence structure, different paragraph order where possible, "
                     "no copied trigrams, and no source-like phrasing. Keep every factual detail anchored "
-                    "to the source or dossier, but express it in original newsroom German."
+                    "to the source or dossier, but express it in original newsroom German.\n"
+                    + shared_block
                 )
                 if provider == "deepseek":
                     retry = await _call_deepseek(
@@ -715,6 +727,7 @@ def _annotate_uniqueness(
     result.uniqueness_pct = round(verdict.uniqueness_pct, 1)
     result.uniqueness_passed = verdict.passed
     result.uniqueness_reason = verdict.reason
+    result.uniqueness_shared = list(verdict.shared_samples)
 
 
 def _safe_ultrathin_rewrite(original_title: str, original_content: str, source_url: str = "") -> RewriteResult:

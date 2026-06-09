@@ -256,6 +256,7 @@ final class EPV2_Publisher {
 			$cat_body = (string) ($de_lang['content'] ?? $item->original_content ?? '');
 			$categories = EPV2_Categorizer::expand_with_subcategories($categories, $cat_title, $cat_body);
 		}
+		$categories = self::append_analysis_rubric($categories, $payload);
 		$existing_posts = self::extract_existing_posts($item);
 		$post_ids = [];
 		$post_term_ids = [];
@@ -551,6 +552,7 @@ final class EPV2_Publisher {
 				(string) ($de_lang_r['content'] ?? $item->original_content ?? '')
 			);
 		}
+		$categories = self::append_analysis_rubric($categories, $payload);
 		$source_dossier = is_array($payload['_meta']['source_dossier'] ?? null) ? $payload['_meta']['source_dossier'] : [];
 		$source_url = EPV2_Source_Enricher::best_source_url($source_dossier, (string) $item->original_url);
 		$shared_media_url = trim((string) ($payload['featured_media_url'] ?? $payload['media_url'] ?? ''));
@@ -1268,6 +1270,27 @@ final class EPV2_Publisher {
 		if (metadata_exists('post', $post_id, $meta_key)) {
 			delete_post_meta($post_id, $meta_key);
 		}
+	}
+
+	/**
+	 * Широкие/глубокие форматы (analysis, feature, extended_news) дополнительно
+	 * получают рубрику "meinung" — ею питается блок «Analyse & Hintergründe» /
+	 * «Аналітика та контекст» на главной. Решение оператора 2026-06-09: пока
+	 * нет чистой аналитики, блок наполняют качественные широкие материалы.
+	 */
+	private static function append_analysis_rubric(array $categories, array $payload): array {
+		if (! class_exists('EPV2_Content_Kinds') || in_array('meinung', $categories, true)) {
+			return $categories;
+		}
+		$kind = EPV2_Content_Kinds::detect_kind($payload);
+		if (in_array($kind, [
+			EPV2_Content_Kinds::KIND_ANALYSIS,
+			EPV2_Content_Kinds::KIND_FEATURE,
+			EPV2_Content_Kinds::KIND_EXTENDED_NEWS,
+		], true)) {
+			$categories[] = 'meinung';
+		}
+		return $categories;
 	}
 
 	private static function extract_existing_posts(object $item): array {

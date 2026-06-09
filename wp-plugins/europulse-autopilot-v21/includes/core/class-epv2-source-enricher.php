@@ -2172,6 +2172,14 @@ if (! defined('ABSPATH')) {
 		try {
 			return EPV2_HTML_Reader::fetch_document($url);
 		} catch (Throwable $e) {
+			// Сбой скачивания полного текста раньше глотался молча — статья
+			// строилась из RSS-огрызка без какого-либо следа в логах.
+			if (class_exists('EPV2_Logger')) {
+				EPV2_Logger::warning('source_enricher', 'fetch_document failed', [
+					'url' => $url,
+					'error' => $e->getMessage(),
+				]);
+			}
 			return [];
 		}
 	}

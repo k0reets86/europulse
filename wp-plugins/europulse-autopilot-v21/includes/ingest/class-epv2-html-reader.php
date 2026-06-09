@@ -6,10 +6,18 @@ if (! defined('ABSPATH')) {
 
 final class EPV2_HTML_Reader {
 	public static function fetch_document(string $url): array {
+		// Реалистичные браузерные заголовки: UA вида "(compatible; bot)"
+		// блокируется WAF большинства новостных сайтов, из-за чего полный
+		// текст не скачивался и статьи строились из RSS-огрызков.
 		$response = wp_remote_get($url, [
 			'timeout' => 20,
 			'redirection' => 5,
-			'user-agent' => 'Mozilla/5.0 (compatible; EuroPulse AutoPilot)',
+			'user-agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+			'headers' => [
+				'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+				'Accept-Language' => 'de-DE,de;q=0.9,en;q=0.8',
+				'Upgrade-Insecure-Requests' => '1',
+			],
 		]);
 		if (is_wp_error($response)) {
 			throw new RuntimeException($response->get_error_message());
@@ -43,10 +51,18 @@ final class EPV2_HTML_Reader {
 	}
 
 	public static function fetch_listing(string $url, int $limit = 10, array $rules = []): array {
+		// Реалистичные браузерные заголовки: UA вида "(compatible; bot)"
+		// блокируется WAF большинства новостных сайтов, из-за чего полный
+		// текст не скачивался и статьи строились из RSS-огрызков.
 		$response = wp_remote_get($url, [
 			'timeout' => 20,
 			'redirection' => 5,
-			'user-agent' => 'Mozilla/5.0 (compatible; EuroPulse AutoPilot)',
+			'user-agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+			'headers' => [
+				'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+				'Accept-Language' => 'de-DE,de;q=0.9,en;q=0.8',
+				'Upgrade-Insecure-Requests' => '1',
+			],
 		]);
 		if (is_wp_error($response)) {
 			throw new RuntimeException($response->get_error_message());

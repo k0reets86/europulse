@@ -27,7 +27,7 @@ from __future__ import annotations
 import html
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Compact stopword sets for DE/UK/EN. We don't pull NLTK because we want
 # the gate to run during rewrite without another network/data dependency.
@@ -76,6 +76,9 @@ class PlagiarismResult:
     threshold_pct: float          # threshold used (default 80.0)
     significant_trigrams: int     # count in the generated text — small N means weak gate
     reason: str = ""              # short human-readable note
+    # Совпавшие триграммы как читаемые фразы — скармливаются в retry-промпт,
+    # чтобы модель переписывала именно проблемные места, а не вслепую.
+    shared_samples: list[str] = field(default_factory=list)
 
 
 def check_uniqueness(
@@ -122,12 +125,14 @@ def check_uniqueness(
     uniqueness = (1.0 - overlap) * 100.0
     passed = uniqueness >= threshold_pct
     reason = ""
+    shared_samples: list[str] = []
     if not passed:
         sample = list(intersect)[:3]
         reason = (
             f"shared trigrams {len(intersect)}/{len(gen_trigrams)} gen-side; "
             f"sample: {sample}"
         )
+        shared_samples = sorted(" ".join(tri) for tri in intersect)[:30]
     return PlagiarismResult(
         overlap_ratio=overlap,
         uniqueness_pct=uniqueness,
@@ -135,6 +140,7 @@ def check_uniqueness(
         threshold_pct=threshold_pct,
         significant_trigrams=len(gen_trigrams),
         reason=reason,
+        shared_samples=shared_samples,
     )
 
 

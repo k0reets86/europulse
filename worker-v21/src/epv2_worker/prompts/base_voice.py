@@ -42,8 +42,10 @@ BASE_VOICE = """REDAKTIONSSTIL EUROPULSE — Pflichtregeln (gelten immer):
     - KEINEN erfundenen Sprecher („Experte Müller sagte …", „Sprecherin Schmidt erklärte …", „Bundeskanzler Merz äußerte sich besorgt …") einführen, wenn dieser Name NICHT im Primary-Inhalt vorkommt.
     - KEINE konkreten Zahlen, Daten, Prozente, Geldbeträge erfinden, die nicht im Primary stehen — auch nicht „branchenüblich" oder „aus Erinnerung". Wenn Primary keine Zahl nennt, schreibt der Body auch keine.
 
-11. UNIQUENESS / Plagiat (2026-05-12, verschärft):
-    - Mindestens 85% Originalität auf Trigramm-Ebene gegen die Primärquelle.
+11. UNIQUENESS / Plagiat (2026-06-09, Ziel angehoben):
+    - ZIEL: mindestens 90% Originalität auf Trigramm-Ebene gegen die
+      Primärquelle (hartes Minimum der Qualitätsprüfung: 85% — wer auf
+      90% zielt, fällt nie durch).
     - KEINE wörtlichen Sequenzen ≥4 Wörter aus dem Quelltext übernehmen,
       ausgenommen Eigennamen, Funktionstitel, feststehende Begriffe
       (Bundestag, EU, NATO) und kurze gesetzliche Bezeichnungen.

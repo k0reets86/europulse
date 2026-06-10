@@ -326,7 +326,14 @@ final class EPV2_Time_Planner {
 	}
 
 	private static function publish_breaking_only_mode(string $mode): bool {
-		return in_array($mode, ['wind_down_final', 'wind_down_quiet', 'night_open', 'night_monitor'], true);
+		// 2026-06-10 (оператор): после последнего сбора в 21:00 весь собранный
+		// хвост должен дообработаться И опубликоваться (а не ждать до 06:00).
+		// Поэтому wind_down_final (21–22) и night_monitor (22–06) больше НЕ
+		// breaking-only для публикации — обычные ready_publish items в них
+		// публикуются (сбор остаётся выключен через collect_minutes).
+		// Ночью очередь пуста (нет сбора), так что публикация просто no-op
+		// после слива хвоста. Breaking-only сохраняем для legacy-режимов.
+		return in_array($mode, ['wind_down_quiet', 'night_open'], true);
 	}
 
 	private static function next_aligned_publish_timestamp_from(int $fromTimestamp, int $minutes, int $offset_seconds): int {

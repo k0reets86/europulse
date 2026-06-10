@@ -990,6 +990,7 @@ final class EPV2_AI_Processor {
 							'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 							'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 							'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 							'error_message' => '',
 						]);
 						self::log_process_item_step('after_worker_mark_state', (int) $item->id, ['run_id' => $run, 'next_state' => $next_state, 'duration_ms' => self::duration_ms_since($item_started_at)]);
@@ -1076,6 +1077,7 @@ final class EPV2_AI_Processor {
 							'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 							'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 							'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 							'error_message' => '',
 						]);
 						$count++;
@@ -1194,6 +1196,7 @@ final class EPV2_AI_Processor {
 						'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 						'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 						'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 						'error_message' => '',
 					]);
 					$count++;
@@ -1827,6 +1830,7 @@ final class EPV2_AI_Processor {
 							'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 							'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 							'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 							'error_message' => $terminal_state === 'ready_review'
 								? sprintf(
 									'Материал остановлен до переводов: selection decision "%s"; нужен ручной обзор.',
@@ -1942,6 +1946,7 @@ final class EPV2_AI_Processor {
 									'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 									'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 									'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 									'error_message' => $terminal_state_global === 'ready_review'
 										? sprintf(
 											'Материал остановлен для ручной проверки на стадии %s: worker вернул blockers (%s).',
@@ -2020,6 +2025,7 @@ final class EPV2_AI_Processor {
 									'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 									'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 									'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 									'error_message' => $err_msg,
 									'admin_notes' => wp_json_encode($terminal_notes, JSON_UNESCAPED_UNICODE),
 								]);
@@ -2079,6 +2085,7 @@ final class EPV2_AI_Processor {
 								'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 								'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 								'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 								'error_message' => '',
 							]);
 							self::log_process_item_step('after_worker_rebuild_mark_state', (int) $item->id, [
@@ -2161,6 +2168,7 @@ final class EPV2_AI_Processor {
 									'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 									'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 									'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 									'error_message' => '',
 								]);
 								self::log_process_item_step('after_worker_publish_finish_mark_state', (int) $item->id, [
@@ -2309,6 +2317,7 @@ final class EPV2_AI_Processor {
 						'ai_provider' => ! empty($gate['allow']) ? EPV2_Settings::get('ai_provider', 'gemini') : '',
 						'ai_model' => ! empty($gate['allow']) ? EPV2_Settings::get('ai_model', '') : '',
 						'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 						'error_message' => '',
 						'admin_notes' => wp_json_encode(['selection' => $analysis, 'gate' => $gate], JSON_UNESCAPED_UNICODE),
 					]);
@@ -3342,6 +3351,36 @@ final class EPV2_AI_Processor {
 		}
 		// Fallback for items без runtime history (legacy, pre-ai_runtime).
 		return max(0, (int) ($meta['tokens'] ?? 0));
+	}
+
+	/**
+	 * Оценка стоимости AI в USD (2026-06-10). Раньше ai_cost не считался нигде
+	 * → в БД всегда 0. Считаем из _meta.ai_runtime[] (provider+tokens+
+	 * cached_tokens на стадию). Точного split вход/выход нет, поэтому blended-
+	 * ставка на 1М токенов + сниженная для cached. Это оценка для трендов/
+	 * сравнения провайдеров, не бухгалтерия.
+	 */
+	public static function payload_total_cost(array $payload): float {
+		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
+		$runtime = is_array($meta['ai_runtime'] ?? null) ? $meta['ai_runtime'] : [];
+		// [blended_per_1M, cached_input_per_1M]
+		$rates = [
+			'deepseek' => [0.52, 0.07],
+			'openai'   => [0.285, 0.075],
+			'gemini'   => [0.20, 0.05],
+		];
+		$cost = 0.0;
+		foreach ($runtime as $entry) {
+			if (! is_array($entry)) {
+				continue;
+			}
+			$provider = strtolower((string) ($entry['provider'] ?? ''));
+			$tokens = max(0, (int) ($entry['tokens'] ?? 0));
+			$cached = max(0, min($tokens, (int) ($entry['cached_tokens'] ?? 0)));
+			[$blended, $cached_rate] = $rates[$provider] ?? [0.40, 0.07];
+			$cost += (($tokens - $cached) * $blended + $cached * $cached_rate) / 1000000.0;
+		}
+		return round($cost, 5);
 	}
 
 	private static function log_generate_review_payload_step(string $step, object $item, array $context = []): void {
@@ -4558,6 +4597,7 @@ final class EPV2_AI_Processor {
 				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 				'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 				'error_message' => '',
 			]);
@@ -5218,6 +5258,7 @@ final class EPV2_AI_Processor {
 			'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 			'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 			'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 			'admin_notes' => $notes_json,
 			'error_message' => sprintf(
 				'Требует ручного подтверждения translation: автоматический перевод %s стабильно не проходит валидатор после %d попыток.',
@@ -5245,6 +5286,7 @@ final class EPV2_AI_Processor {
 			'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 			'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 			'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 			'error_message' => $message,
 		]);
@@ -5334,6 +5376,7 @@ final class EPV2_AI_Processor {
 			'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 			'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 			'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 			'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 			'error_message' => '',
 		]);
@@ -5385,6 +5428,7 @@ final class EPV2_AI_Processor {
 				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 				'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 				'error_message' => '',
 			]);
 			return 'translation_recovered_to_' . $next_state;
@@ -5422,6 +5466,7 @@ final class EPV2_AI_Processor {
 				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 				'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 				'admin_notes' => wp_json_encode($notes, JSON_UNESCAPED_UNICODE),
 				'error_message' => '',
 			]);
@@ -7285,6 +7330,7 @@ final class EPV2_AI_Processor {
 				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 				'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 				'error_message' => '',
 				'admin_notes' => wp_json_encode(['selection' => $analysis, 'gate' => $gate], JSON_UNESCAPED_UNICODE),
 			]);
@@ -7332,6 +7378,7 @@ final class EPV2_AI_Processor {
 				'ai_provider' => (string) ($payload['_meta']['provider'] ?? ''),
 				'ai_model' => (string) ($payload['_meta']['model'] ?? ''),
 				'ai_tokens' => self::payload_total_tokens($payload),
+							'ai_cost' => self::payload_total_cost($payload),
 				'error_message' => $terminal_state === 'ready_review'
 					? sprintf(
 						'Материал остановлен после DE master: selection decision "%s"; нужен ручной обзор.',

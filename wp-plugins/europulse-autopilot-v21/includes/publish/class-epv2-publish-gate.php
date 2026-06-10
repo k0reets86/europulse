@@ -81,10 +81,28 @@ final class EPV2_Publish_Gate {
 				$blockers[] = 'enrichment_required';
 			}
 			$length_publishable = EPV2_Content_Kinds::payload_meets_de_length($payload);
+			$sources_publishable = EPV2_Content_Kinds::payload_meets_sources($payload);
+			// Мягкая деградация амбициозных форматов (2026-06-10, оператор:
+			// блок аналитики пуст — analysis/feature почти никогда не дотягивают
+			// до своей планки 2500+ симв / 4 источников и виснут в ready_review).
+			// Если материал не прошёл планку СВОЕГО kind, но проходит планку
+			// обычной статьи (news_article: 600 симв / 2 источника) — публикуем
+			// как статью, а не держим. Рубрику meinung publisher назначает по
+			// исходному kind, так что блок аналитики наполняется. Совсем тонкое
+			// (<600 симв) держится как раньше.
+			if (! $length_publishable || ! $sources_publishable) {
+				$kind_now = EPV2_Content_Kinds::detect_kind($payload);
+				if (in_array($kind_now, ['analysis', 'feature', 'extended_news'], true)
+					&& EPV2_Content_Kinds::payload_meets_de_length($payload, EPV2_Content_Kinds::KIND_NEWS_ARTICLE)
+					&& EPV2_Content_Kinds::payload_meets_sources($payload, EPV2_Content_Kinds::KIND_NEWS_ARTICLE)
+				) {
+					$length_publishable = true;
+					$sources_publishable = true;
+				}
+			}
 			if (! $length_publishable) {
 				$blockers[] = 'length_below_kind_minimum';
 			}
-			$sources_publishable = EPV2_Content_Kinds::payload_meets_sources($payload);
 			if (! $sources_publishable) {
 				$blockers[] = 'sources_below_kind_minimum';
 			}

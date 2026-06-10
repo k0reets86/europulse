@@ -148,6 +148,27 @@ final class EPV2_AI_Processor {
 								$existing_payload['_meta']['source_dossier'] = $prefetch_dossier;
 							}
 						}
+						// Ранний отказ для безнадёжно тонких (2026-06-10, оператор:
+						// «заведомо отклоняемый материал не должен жечь токены»).
+						// Если ПОСЛЕ префетча полного текста источник всё ещё
+						// крошечный (<350 симв ≈ 50 слов и в стабе, и в фетче) —
+						// воркер позже гарантированно вернёт «Primary source too
+						// thin» и материал повиснет в ready_review, потратив
+						// story card + рерайт + ретраи. Отказываем сейчас, до
+						// единого AI-вызова. Breaking-материалы пропускаем —
+						// для срочного тонкий тизер допустим.
+						$prefetched_len = mb_strlen((string) ($existing_payload['_meta']['source_dossier']['primary']['content'] ?? ''));
+						$stub_len = mb_strlen(trim(wp_strip_all_tags((string) ($source_item->original_content ?? ''))));
+						$is_breaking_item = ! empty($existing_payload['_meta']['breaking']) || (int) ($source_item->story_score ?? 0) >= 28;
+						if (! $is_breaking_item && max($prefetched_len, $stub_len) < 350) {
+							EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+								'error_message' => 'Материал снят до AI-обработки: источник не отдаёт текст (фетч=' . $prefetched_len . ' симв, RSS=' . $stub_len . ' симв) — статья вышла бы огрызком и была бы отбракована.',
+							]);
+							$count++;
+							$run_payload['processed_item_id'] = (int) $item->id;
+							$run_payload['result'] = 'rejected_unfetchable_thin_source';
+							break;
+						}
 						$story_card = EPV2_Story_Card_Builder::build($source_item, (array) ($existing_payload['_meta']['source_dossier'] ?? []));
 						// Operator-feedback 2026-05-11: items published без
 						// story_card (12 items today, including #2152 China
@@ -9302,6 +9323,10 @@ final class EPV2_AI_Processor {
 				'excerpt' => self::trim_input_text((string) ($primary['excerpt'] ?? $primary['content'] ?? ''), $reduced_context ? 320 : 700),
 				'content' => self::trim_input_text((string) ($primary['content'] ?? $primary['excerpt'] ?? ''), $reduced_context ? 6000 : 12000),
 				'image' => EPV2_Media::normalize_featured_candidate_url((string) ($primary['image'] ?? '')),
+				// 2026-06-10: подпись фото обязана пережить компакцию — по ней
+				// media-резолвер блокирует агентские снимки (Reuters/dpa/Getty).
+				// Раньше whitelist её вырезал → блокировка молчала на проде.
+				'image_credit' => self::trim_input_text((string) ($primary['image_credit'] ?? ''), 400),
 				'date' => sanitize_text_field((string) ($primary['date'] ?? '')),
 			];
 		}
@@ -9327,6 +9352,7 @@ final class EPV2_AI_Processor {
 				'excerpt' => self::trim_input_text((string) ($source['excerpt'] ?? $source['content'] ?? ''), $reduced_context ? 220 : 420),
 				'content' => self::trim_input_text((string) ($source['content'] ?? $source['excerpt'] ?? ''), $reduced_context ? 3000 : 6000),
 				'image' => EPV2_Media::normalize_featured_candidate_url((string) ($source['image'] ?? '')),
+				'image_credit' => self::trim_input_text((string) ($source['image_credit'] ?? ''), 400),
 				'date' => sanitize_text_field((string) ($source['date'] ?? '')),
 			];
 		}

@@ -152,6 +152,12 @@ if (! defined('ABSPATH')) {
 			if ($wikimedia_image !== '') {
 				return $wikimedia_image;
 			}
+			// Openverse — после Commons (он шире: + Flickr CC, Europeana).
+			// Гейтится той же CC-разрешалкой, что и Wikimedia.
+			$openverse_image = self::openverse_media($title, $excerpt, $categories, $queue_id, $source_dossier);
+			if ($openverse_image !== '') {
+				return $openverse_image;
+			}
 		}
 
 		if ($pexels_fallback_allowed) {
@@ -1508,6 +1514,90 @@ if (! defined('ABSPATH')) {
 		return $cache[$url] = str_starts_with($content_type, 'image/');
 	}
 
+	/**
+	 * Openverse-провайдер (2026-06-10). Агрегирует ~800М CC/PD-работ (Commons,
+	 * Flickr CC, Europeana и др.) с нормализованной лицензией и готовой строкой
+	 * атрибуции. Берём ТОЛЬКО коммерчески-безопасные лицензии (cc0, pdm, by,
+	 * by-sa) — NC/ND исключаем (сайт коммерческий). Запрос строится из тех же
+	 * семантических терминов story card, что и Wikimedia. Атрибуция кладётся в
+	 * store_media_attribution() и потом рендерится как кредит под фото.
+	 */
+	private static function openverse_media(string $title, string $excerpt, array $categories, int $queue_id = 0, array $source_dossier = []): string {
+		$query = self::wikimedia_query($title, $excerpt, $categories, $source_dossier);
+		if ($query === '') {
+			return '';
+		}
+		// Openverse API за Cloudflare: анонимные серверные запросы блокируются
+		// (403). Нужен OAuth bearer-токен (зарегистрировать приложение на
+		// api.openverse.org → client_credentials). Без токена тихо no-op, и
+		// CC-покрытие обеспечивает Wikimedia. Токен берём из настроек.
+		$token = '';
+		if (class_exists('EPV2_Settings')) {
+			$token = trim((string) EPV2_Settings::get('openverse_token', ''));
+		}
+		if ($token === '') {
+			return '';
+		}
+		$endpoint = 'https://api.openverse.org/v1/images/?q=' . rawurlencode($query)
+			. '&license=cc0,pdm,by,by-sa&page_size=8&mature=false';
+		$response = wp_remote_get($endpoint, [
+			'timeout' => 18,
+			'user-agent' => 'EuroPulse AutoPilot (+https://europulse.today)',
+			'headers' => [
+				'Authorization' => 'Bearer ' . $token,
+			],
+		]);
+		if (is_wp_error($response)) {
+			return '';
+		}
+		$code = (int) wp_remote_retrieve_response_code($response);
+		if ($code < 200 || $code >= 300) {
+			return '';
+		}
+		$data = json_decode((string) wp_remote_retrieve_body($response), true);
+		$results = (array) ($data['results'] ?? []);
+		foreach ($results as $item) {
+			if (! is_array($item)) {
+				continue;
+			}
+			$img = (string) ($item['url'] ?? '');
+			if ($img === '') {
+				continue;
+			}
+			$license = mb_strtolower((string) ($item['license'] ?? ''));
+			// Двойная защита: NC/ND нельзя для коммерческого сайта.
+			if ($license === '' || str_contains($license, 'nc') || str_contains($license, 'nd')) {
+				continue;
+			}
+			$titleText = mb_strtolower((string) ($item['title'] ?? ''));
+			if (preg_match('/logo|map|flag|icon|diagram|seal|coat of arms|clipart|chart|infographic|screenshot/u', $titleText)) {
+				continue;
+			}
+			if (preg_match('/\.svg(?:\?|$)/iu', $img) || preg_match('/\.pdf(?:\.|$)/iu', $img)) {
+				continue;
+			}
+			if (self::recently_used($img, 30, 0, $queue_id)) {
+				continue;
+			}
+			$img = esc_url_raw($img);
+			$creator = trim((string) ($item['creator'] ?? ''));
+			$lic_name = trim(strtoupper((string) ($item['license'] ?? '')) . ' ' . (string) ($item['license_version'] ?? ''));
+			$label_parts = array_filter([$creator !== '' ? $creator : '', $lic_name, 'Openverse']);
+			$details = [
+				'alt' => (string) ($item['title'] ?? ''),
+				'caption' => '',
+				'source_label' => implode(' / ', $label_parts),
+				'provider' => 'openverse',
+				'origin_url' => (string) ($item['foreign_landing_url'] ?? $img),
+			];
+			if (self::media_relevant_with_details($img, $title, $excerpt, $categories, $source_dossier, $details)) {
+				self::store_media_attribution($img, $details);
+				return $img;
+			}
+		}
+		return '';
+	}
+
 	private static function wikimedia_media(string $title, string $excerpt, array $categories, int $queue_id = 0, array $source_dossier = []): string {
 		$query = self::wikimedia_query($title, $excerpt, $categories, $source_dossier);
 		if ($query === '') {
@@ -1773,10 +1863,37 @@ if (! defined('ABSPATH')) {
 		}
 	}
 
+	/**
+	 * Персистентное хранение атрибуции картинки по URL (2026-06-10). Нужно для
+	 * Openverse: он отдаёт картинки с разных хостов (Flickr, Commons, Europeana),
+	 * а remote_media_details() резолвит атрибуцию по хосту — так автор+лицензия
+	 * терялись бы. Провайдер кладёт сюда готовый credit, sideload/рендер читают.
+	 * CC BY / BY-SA требуют атрибуцию по закону — без этого использование нелегально.
+	 */
+	private static function store_media_attribution(string $url, array $details): void {
+		$url = esc_url_raw(trim($url));
+		if ($url === '') {
+			return;
+		}
+		set_transient('epv2_mattr_' . md5($url), $details, 60 * DAY_IN_SECONDS);
+	}
+
+	private static function stored_media_attribution(string $url): array {
+		$stored = get_transient('epv2_mattr_' . md5($url));
+		return is_array($stored) ? $stored : [];
+	}
+
 	private static function remote_media_details(string $url): array {
 		static $cache = [];
 		if (isset($cache[$url])) {
 			return $cache[$url];
+		}
+		// Сохранённая провайдером атрибуция (Openverse и пр.) — высший приоритет.
+		$stored = self::stored_media_attribution($url);
+		if ($stored !== [] && trim((string) ($stored['source_label'] ?? '')) !== '') {
+			$stored['origin_url'] = esc_url_raw((string) ($stored['origin_url'] ?? $url));
+			$cache[$url] = $stored;
+			return $stored;
 		}
 
 		$resolved_url = $url;
@@ -1972,6 +2089,27 @@ if (! defined('ABSPATH')) {
 				return false;
 			}
 			return true;
+		}
+
+		// CC-провайдеры (Wikimedia/Openverse): запрос строился из семантических
+		// терминов story card, поэтому результат уже отобран по сущности. Если
+		// имя/alt картинки пересекается хотя бы одним значимым токеном с этими
+		// терминами — доверяем поиску и принимаем (junk отсекаем). Это чинит
+		// случай «Brandenburger Tor» story ↔ «Brandenburg Gate» файл, который
+		// строгий passes_entity_gate отбраковывал из-за DE/EN-вариантов. 2026-06-10.
+		if (str_contains($host, 'wikimedia.org') || (string) ($details['provider'] ?? '') === 'openverse') {
+			$card_query = mb_strtolower(self::story_card_media_query($source_dossier));
+			if ($card_query !== '' && $haystack !== '') {
+				if (preg_match('/\b(logo|icon|sprite|pdf|document|scan|map|flag|seal|coat of arms|clipart|chart)\b/u', $haystack) === 1) {
+					return false;
+				}
+				$card_tokens = array_filter(preg_split('/\s+/u', $card_query) ?: [], static fn($t) => mb_strlen($t) >= 4);
+				foreach ($card_tokens as $tok) {
+					if (str_contains($haystack, $tok)) {
+						return true;
+					}
+				}
+			}
 		}
 
 		$is_culture_story = in_array('kultur', array_map('sanitize_key', $categories), true)

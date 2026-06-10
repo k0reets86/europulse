@@ -137,6 +137,7 @@ class TranslationResult:
     uniqueness_pct: float = 100.0
     uniqueness_passed: bool = True
     uniqueness_reason: str = ""
+    uniqueness_shared: list = field(default_factory=list)
     # 2026-05-13: filler / style concerns. Не блокируют публикацию, но pipeline
     # эмитит soft warnings → PHP gate решает на основе importance/source.
     style_filler_count: int = 0
@@ -378,7 +379,28 @@ async def translate_from_german(
                 result.provider = provider
                 result.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
                 register_provider_success(provider)
-                _annotate_translation_uniqueness(result, source_text=source_text, target_lang=target_lang)
+                _annotate_translation_uniqueness(result, source_text=source_text, target_lang=target_lang, story_card=story_card)
+                # Адресный антиплагиат-retry (2026-06-10): если перевод слишком
+                # близок к источнику (<85%), один раз переписываем именно
+                # совпавшие фразы — как делает rewriter для DE. Раньше такой
+                # перевод возвращался как есть → pipeline ставил hard-блокер
+                # plagiarism_gate_uk/en → rebuild_bundle cap → ready_review.
+                if not result.uniqueness_passed and result.uniqueness_shared:
+                    listed = "\n".join(f"- {p}" for p in result.uniqueness_shared[:30])
+                    plag_prompt = (
+                        user
+                        + f"\n\nANTI-PLAGIARISM RETRY: Die {target_lang}-Übersetzung war zu nah am Text "
+                        f"(Originalität {result.uniqueness_pct:.0f}%, Ziel 85%+). Schreibe sie neu mit "
+                        f"eigener Satzarchitektur und idiomatischem {target_lang}. Diese Wortfolgen "
+                        "komplett anders formulieren (Eigennamen dürfen bleiben):\n" + listed
+                    )
+                    retry = await _call(plag_prompt, system, api_key, provider, model, target_lang, source_text)
+                    if retry.success:
+                        retry.provider = provider
+                        retry.model = model or ("deepseek-chat" if provider == "deepseek" else "gpt-4o-mini")
+                        _annotate_translation_uniqueness(retry, source_text=source_text, target_lang=target_lang, story_card=story_card)
+                        if retry.uniqueness_passed or retry.uniqueness_pct >= result.uniqueness_pct:
+                            result = retry
                 return result
             if not _translation_error_retryable(result.error):
                 break
@@ -462,11 +484,32 @@ def _format_story_card_for_translator(card: dict) -> str:
     return "\n".join(parts)
 
 
+def _story_card_entities(card: dict | None) -> list:
+    """Имена/организации/места из story card — чтобы антиплагиат не штрафовал
+    за неизбежные совпадения по собственным именам (как делает rewriter)."""
+    entities: list = []
+    if not isinstance(card, dict):
+        return entities
+    for person in card.get("entities_people") or []:
+        if isinstance(person, dict) and person.get("name"):
+            entities.append(str(person["name"]))
+    for org in card.get("entities_organizations") or []:
+        if isinstance(org, dict) and org.get("name"):
+            entities.append(str(org["name"]))
+        elif isinstance(org, str) and org:
+            entities.append(org)
+    for place in card.get("entities_places") or []:
+        if place:
+            entities.append(str(place))
+    return entities
+
+
 def _annotate_translation_uniqueness(
     result: TranslationResult,
     *,
     source_text: str,
     target_lang: str,
+    story_card: dict | None = None,
 ) -> None:
     """Anti-plagiarism gate on the translated lead+body.
 
@@ -497,11 +540,12 @@ def _annotate_translation_uniqueness(
         generated_text=generated,
         source_text=source_text,
         language=lang_code,
-        named_entities=[],
+        named_entities=_story_card_entities(story_card),
     )
     result.uniqueness_pct = round(verdict.uniqueness_pct, 1)
     result.uniqueness_passed = verdict.passed
     result.uniqueness_reason = verdict.reason
+    result.uniqueness_shared = list(getattr(verdict, "shared_samples", []) or [])
 
 
 _CARD_LEAD_LIMITS = {

@@ -6501,6 +6501,12 @@ final class EPV2_AI_Processor {
 			unset($notes['_system']['blocked_media_urls']);
 		}
 		$payload['_meta']['source_dossier'] = $dossier;
+		// 2026-06-10: пробрасываем story card в досье, чтобы семантический
+		// поиск медиа (story_card.media_search_terms) реально работал в
+		// Wikimedia/Pexels fallback. Раньше dossier_with_card() не вызывался
+		// нигде → fallback искал по пустому/TF-IDF запросу. Приоритет фото
+		// источника не меняется — это влияет только на запасной поиск.
+		$dossier = EPV2_Media::dossier_with_card($dossier, (array) ($payload['_meta']['story_card'] ?? []));
 		$source_first_exhausted = self::payload_source_first_media_exhausted($payload);
 		$needs_deeper_enrichment = self::payload_needs_deeper_supporting_enrichment($payload);
 		$attempt = 0;

@@ -581,6 +581,27 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
                 f"(severity=soft, возможная фабрикация в заголовке)"
             )
 
+    # Source-expansion guard (2026-06-10): зеркалит PHP publish-gate
+    # source_expansion_risk. Если DE-мастер раздут сверх того, что даёт
+    # источник (нет supporting и статья >2.5× источника) — это галлюцинация,
+    # и canonical publish gate ВСЁ РАВНО отклонит на публикации. Ловим ЗДЕСЬ,
+    # до перевода: blocker → существующий skip ниже не тратит 10-12K токенов
+    # на UK/EN перевод заведомо отбраковываемого материала.
+    _de_chars = len((rewrite.body_de or "") + " " + (rewrite.lead_de or ""))
+    _primary_chars = len(original_text or "")
+    _real_supporting = _supporting_entries_with_loaded_content(supporting_rich)
+    if _real_supporting == 0:
+        _risk = False
+        if _primary_chars < 120 and _de_chars > 280:
+            _risk = True
+        elif _primary_chars < 700 and _de_chars > 600 and _de_chars > max(600, int(_primary_chars * 2.5)):
+            _risk = True
+        if _risk:
+            ctx.blockers.append(
+                f"source_expansion_risk: DE {_de_chars} chars from {_primary_chars}-char source, "
+                "no supporting — would fail publish gate, skipping translation"
+            )
+
     ctx.german_master = LanguagePackage(
         lang="de",
         title=rewrite.title_de,

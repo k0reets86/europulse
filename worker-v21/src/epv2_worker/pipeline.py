@@ -343,7 +343,15 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     card_facts_count = 0
     if isinstance(_story_card_init, dict):
         card_facts_count = len(_story_card_init.get("key_facts") or [])
-    thin_primary_source_needs_support = source_word_count < 35 and card_facts_count < 3
+    # 2026-06-10: порог поднят 35→70 слов, фактов 3→4. Причина: обрывки
+    # RSS (~30-40 слов, когда full-text fetch провалился — paywall/403/
+    # interstitial) проходили старый порог и публиковались куцыми статьями
+    # (~650 симв). Story-card key_facts извлекаются из того же обрывка, не
+    # добавляя субстанции, поэтому раньше 3 фактов хватало для обхода гейта.
+    # Теперь тонкий источник без 2+ реально подгруженных supporting-источников
+    # уходит в ready_review, а не публикуется обрывком. Полные статьи и
+    # обогащённые синтезом материалы проходят без изменений.
+    thin_primary_source_needs_support = source_word_count < 70 and card_facts_count < 4
     force_enrichment = source_word_count < 500
     supporting_urls: list[str] = []
     supporting_rich: list[dict[str, str]] = []

@@ -395,6 +395,12 @@ final class EPV2_Collector {
 			self::audit_candidate($item, $source, [], 'stage', 'url_pattern_non_news', ['url' => $url]);
 			return;
 		}
+		// Paywall-блоклист (2026-06-10): издатели, у которых полный текст
+		// недоступен серверу → статья выйдет обрывком. Дропаем на ингесте.
+		if ($url !== '' && self::url_is_unfetchable_paywall($url)) {
+			self::audit_candidate($item, $source, [], 'stage', 'paywall_unfetchable', ['url' => $url]);
+			return;
+		}
 		$source_category = (string) $source->category_bias;
 		$duplicate = EPV2_Deduplicator::is_duplicate((string) ($item['title'] ?? ''), (string) ($item['content'] ?? ''), (string) ($item['url'] ?? ''));
 		if (! empty($duplicate['duplicate'])) {
@@ -1525,6 +1531,55 @@ final class EPV2_Collector {
 	 *
 	 * Conservative pattern list — добавлять при наблюдении новых паттернов.
 	 */
+	/**
+	 * Жёсткие paywall / anti-bot издатели, которые НИКОГДА не отдают полный
+	 * текст серверному fetch'у (2026-06-10). Их истории приходят в основном
+	 * через Google News-агрегаторы и дают только RSS-обрывок → короткая
+	 * статья. Дропаем на ингесте, чтобы не тратить обработку и не публиковать
+	 * куцый материал. ВАЖНО: список НЕ содержит наших рабочих прямых
+	 * источников (spiegel, zeit, faz, handelsblatt, dw, sz) — у них paywall
+	 * частичный, и обрывочные случаи ловит thin-gate воркера. Список можно
+	 * расширять через настройку epv2_settings['paywall_blocklist'].
+	 */
+	private static function paywall_blocklist(): array {
+		static $defaults = [
+			'ft.com', 'wsj.com', 'bloomberg.com', 'economist.com',
+			'thetimes.co.uk', 'telegraph.co.uk', 'nytimes.com', 'washingtonpost.com',
+			'newyorker.com', 'theatlantic.com', 'wired.com', 'politico.com', 'politico.eu',
+			'businessinsider.com', 'businessinsider.de', 'theinformation.com',
+			'foreignpolicy.com', 'foreignaffairs.com', 'barrons.com', 'seekingalpha.com',
+			'lemonde.fr', 'lefigaro.fr', 'mediapart.fr', 'scotsman.com',
+		];
+		$extra = [];
+		if (class_exists('EPV2_Settings')) {
+			$raw = EPV2_Settings::get('paywall_blocklist', []);
+			if (is_string($raw)) {
+				$raw = preg_split('/[\s,]+/', $raw, -1, PREG_SPLIT_NO_EMPTY);
+			}
+			if (is_array($raw)) {
+				$extra = array_map(static fn($d) => mb_strtolower(trim((string) $d)), $raw);
+			}
+		}
+		return array_values(array_unique(array_merge($defaults, array_filter($extra))));
+	}
+
+	private static function url_is_unfetchable_paywall(string $url): bool {
+		$host = (string) wp_parse_url($url, PHP_URL_HOST);
+		if ($host === '') {
+			return false;
+		}
+		$host = preg_replace('/^www\./i', '', mb_strtolower($host));
+		foreach (self::paywall_blocklist() as $blocked) {
+			if ($blocked === '') {
+				continue;
+			}
+			if ($host === $blocked || str_ends_with($host, '.' . $blocked)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private static function url_is_non_news(string $url): bool {
 		$path = (string) wp_parse_url($url, PHP_URL_PATH);
 		if ($path === '') return false;

@@ -31,6 +31,7 @@ final class EPV2_HTML_Reader {
 		$base_url = self::pick_base_url($xpath, $url);
 		$title = self::pick_title($xpath, $dom);
 		$image = self::pick_image($xpath, $base_url);
+		$image_credit = self::pick_image_credit($xpath);
 		$video = self::pick_meta_content($xpath, 'og:video', $base_url)
 			?: self::pick_meta_content($xpath, 'twitter:player', $base_url)
 			?: self::pick_video_src($xpath, $base_url);
@@ -45,9 +46,65 @@ final class EPV2_HTML_Reader {
 			'content' => $content,
 			'excerpt' => $excerpt,
 			'image' => $image,
+			'image_credit' => $image_credit,
 			'video' => $video,
 			'lang' => $lang,
 		];
+	}
+
+	/**
+	 * Best-effort извлечение подписи/копирайта главного изображения (2026-06-10).
+	 * Нужно, чтобы downstream мог отклонить агентские снимки (Reuters/dpa/AFP/
+	 * Getty/AP/EPA) по кредиту — фото на CDN издания имеет URL издания, но
+	 * принадлежит агентству, и подпись «Foto: Reuters» — единственный машинный
+	 * сигнал. Собираем из figcaption, элементов с credit/copyright-классами и
+	 * JSON-LD (copyrightHolder/creditText). Возвращаем короткую сводную строку.
+	 */
+	private static function pick_image_credit(DOMXPath $xpath): string {
+		$parts = [];
+		// 1. Подписи к фигурам (hero обычно первый <figure>).
+		$figcaps = $xpath->query('(//figure//figcaption)[position() <= 3]');
+		if ($figcaps) {
+			foreach ($figcaps as $node) {
+				$t = trim(preg_replace('/\s+/u', ' ', wp_strip_all_tags($node->textContent)) ?: '');
+				if ($t !== '') {
+					$parts[] = $t;
+				}
+			}
+		}
+		// 2. Элементы с классом/itemprop, намекающим на кредит/копирайт/источник.
+		$credit_nodes = $xpath->query(
+			'(//*[contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"credit")'
+			. ' or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"copyright")'
+			. ' or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"bildrechte")'
+			. ' or contains(translate(@class,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"copyrightholder")'
+			. ' or @itemprop="copyrightHolder" or @itemprop="creditText"])[position() <= 8]'
+		);
+		if ($credit_nodes) {
+			foreach ($credit_nodes as $node) {
+				$t = trim(preg_replace('/\s+/u', ' ', wp_strip_all_tags($node->textContent)) ?: '');
+				if ($t !== '' && mb_strlen($t) <= 200) {
+					$parts[] = $t;
+				}
+			}
+		}
+		// 3. JSON-LD: copyrightHolder / creditText / author изображения.
+		$ld_nodes = $xpath->query('//script[@type="application/ld+json"]');
+		if ($ld_nodes) {
+			foreach ($ld_nodes as $node) {
+				$raw = trim((string) $node->textContent);
+				if ($raw === '' || stripos($raw, 'credit') === false && stripos($raw, 'copyright') === false) {
+					continue;
+				}
+				foreach (['creditText', 'copyrightHolder', 'copyrightNotice'] as $key) {
+					if (preg_match('/"' . $key . '"\s*:\s*"([^"]{2,120})"/u', $raw, $m)) {
+						$parts[] = $m[1];
+					}
+				}
+			}
+		}
+		$joined = trim(implode(' | ', array_values(array_unique(array_filter($parts)))));
+		return mb_substr($joined, 0, 400);
 	}
 
 	public static function fetch_listing(string $url, int $limit = 10, array $rules = []): array {

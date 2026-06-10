@@ -55,6 +55,51 @@ if (! defined('ABSPATH')) {
 		return $source_dossier;
 	}
 
+	/**
+	 * Список фото-агентств (2026-06-10). Их снимки публикуются изданиями на
+	 * своих CDN, но принадлежат агентству — использование без лицензии = риск
+	 * штрафа (особенно в Германии). Если подпись фото (image_credit) называет
+	 * агентство, снимок не берём как featured → fallback на свой/легальный
+	 * источник. Расширяется через epv2_settings['media_credit_blocklist'].
+	 */
+	private static function agency_credit_patterns(): array {
+		static $defaults = [
+			'reuters', 'dpa', 'afp', 'getty', 'associated press', 'ap photo', 'ap)',
+			'epa-efe', 'epa)', 'anadolu', 'shutterstock', 'alamy', 'zuma', 'sipa',
+			'imago', 'picture alliance', 'picture-alliance', 'picturedesk', 'action press',
+			'keystone', 'abaca', 'backgrid', 'ddp images', 'profimedia', 'tass',
+			'ria novosti', 'sputnik',
+		];
+		$extra = [];
+		if (class_exists('EPV2_Settings')) {
+			$raw = EPV2_Settings::get('media_credit_blocklist', []);
+			if (is_string($raw)) {
+				$raw = preg_split('/[,\n]+/', $raw, -1, PREG_SPLIT_NO_EMPTY);
+			}
+			if (is_array($raw)) {
+				$extra = array_map(static fn($d) => mb_strtolower(trim((string) $d)), $raw);
+			}
+		}
+		return array_values(array_unique(array_merge($defaults, array_filter($extra))));
+	}
+
+	/**
+	 * True, если подпись фото называет фото-агентство из блоклиста.
+	 * При пустой подписи — false (не блокируем: нет сигнала = не трогаем).
+	 */
+	public static function image_credit_is_blacklisted(string $credit): bool {
+		$credit = mb_strtolower(trim($credit));
+		if ($credit === '') {
+			return false;
+		}
+		foreach (self::agency_credit_patterns() as $needle) {
+			if ($needle !== '' && str_contains($credit, $needle)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	public static function resolve_featured_media(string $title, string $excerpt = '', array $categories = [], string $existing_url = '', array $source_dossier = [], int $queue_id = 0): string {
 		$categories = self::normalize_media_categories($categories);
 		$story_context = self::story_context_from_dossier($title, $excerpt, $categories, $source_dossier);
@@ -1118,6 +1163,10 @@ if (! defined('ABSPATH')) {
 			$primary_entries[] = $shell_primary;
 		}
 		foreach ($primary_entries as $primary_entry) {
+			// Агентское фото (Reuters/dpa/AFP/Getty…) — не берём, юр-риск. 2026-06-10.
+			if (self::image_credit_is_blacklisted((string) ($primary_entry['image_credit'] ?? ''))) {
+				continue;
+			}
 			$entryTitle = trim((string) ($primary_entry['title'] ?? ''));
 			$entryExcerpt = trim((string) ($primary_entry['excerpt'] ?? ''));
 			$entryLooksRelevant = self::entry_context_relevant($title, $excerpt, $entryTitle, $entryExcerpt, $categories, $story_context);
@@ -1157,6 +1206,10 @@ if (! defined('ABSPATH')) {
 			}
 		}
 		foreach ($entries as $index => $entry) {
+			// Агентское фото в supporting-источнике — тоже пропускаем. 2026-06-10.
+			if (self::image_credit_is_blacklisted((string) ($entry['image_credit'] ?? ''))) {
+				continue;
+			}
 			$entryTitle = trim((string) ($entry['title'] ?? ''));
 			$entryExcerpt = trim((string) ($entry['excerpt'] ?? ''));
 			$entryLooksRelevant = self::entry_context_relevant($title, $excerpt, $entryTitle, $entryExcerpt, $categories, $story_context);

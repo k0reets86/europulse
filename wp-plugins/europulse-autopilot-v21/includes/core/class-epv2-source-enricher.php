@@ -35,7 +35,8 @@ if (! defined('ABSPATH')) {
 				(string) ($primaryDoc['title'] ?? $item->original_title ?? ''),
 				(string) ($primaryDoc['excerpt'] ?? $item->original_excerpt ?? ''),
 				(string) ($primaryDoc['content'] ?? $item->original_content ?? ''),
-				(string) ($primaryDoc['image'] ?? $item->source_image_url ?? '')
+				(string) ($primaryDoc['image'] ?? $item->source_image_url ?? ''),
+				(string) ($primaryDoc['image_credit'] ?? '')
 			);
 		}
 		if (self::primary_is_google_wrapper($dossier['primary'])) {
@@ -2184,7 +2185,7 @@ if (! defined('ABSPATH')) {
 		}
 	}
 
-	private static function source_entry(string $url, string $title, string $excerpt, string $content, string $image = ''): array {
+	private static function source_entry(string $url, string $title, string $excerpt, string $content, string $image = '', string $image_credit = ''): array {
 		$host = self::host($url);
 		return [
 			'url' => esc_url_raw($url),
@@ -2194,6 +2195,8 @@ if (! defined('ABSPATH')) {
 			'excerpt' => sanitize_textarea_field(trim(wp_strip_all_tags($excerpt))),
 			'content' => trim(wp_strip_all_tags($content)),
 			'image' => esc_url_raw($image),
+			// Подпись/копирайт фото (2026-06-10) — для блокировки агентских снимков.
+			'image_credit' => sanitize_text_field(mb_substr(trim((string) $image_credit), 0, 400)),
 			'is_official' => self::is_official_url($url),
 		];
 	}

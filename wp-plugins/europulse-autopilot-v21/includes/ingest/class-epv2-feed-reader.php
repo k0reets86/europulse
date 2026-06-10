@@ -15,6 +15,12 @@ final class EPV2_Feed_Reader {
 			if (is_object($feed) && method_exists($feed, 'set_timeout')) {
 				$feed->set_timeout(8);
 			}
+			// Браузерный UA для SimplePie (2026-06-10): дефолтный «WordPress/x»
+			// блокируется WAF части фидов (radiosvoboda.org и др. → 403), хотя
+			// браузерному UA они отвечают 200. Та же причина, что и в html-reader.
+			if (is_object($feed) && method_exists($feed, 'set_useragent')) {
+				$feed->set_useragent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36');
+			}
 		};
 		// WP/SimplePie default cache = 12h через transients (хранятся в
 		// Redis когда redis-cache active). Это блокирует свежие items:

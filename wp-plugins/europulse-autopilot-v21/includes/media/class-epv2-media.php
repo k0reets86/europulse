@@ -158,6 +158,11 @@ if (! defined('ABSPATH')) {
 			if ($openverse_image !== '') {
 				return $openverse_image;
 			}
+			// DVIDS — public-domain гос-фото (оборона/Украина). Только при ключе.
+			$dvids_image = self::dvids_media($title, $excerpt, $categories, $queue_id, $source_dossier);
+			if ($dvids_image !== '') {
+				return $dvids_image;
+			}
 		}
 
 		if ($pexels_fallback_allowed) {
@@ -1598,6 +1603,67 @@ if (! defined('ABSPATH')) {
 		return '';
 	}
 
+	/**
+	 * DVIDS-провайдер (2026-06-10) — Defense Visual Information Distribution
+	 * Service армии США. Public domain, релевантные событийные фото по теме
+	 * обороны/Украины/войны (ядро аудитории). Требует api_key (бесплатный,
+	 * dvidshub.net) → epv2_settings['dvids_api_key']. Без ключа тихо no-op.
+	 * Атрибуция «DVIDS / автор» (public domain — кредит вежливости).
+	 */
+	private static function dvids_media(string $title, string $excerpt, array $categories, int $queue_id = 0, array $source_dossier = []): string {
+		$key = '';
+		if (class_exists('EPV2_Settings')) {
+			$key = trim((string) EPV2_Settings::get('dvids_api_key', ''));
+		}
+		if ($key === '') {
+			return '';
+		}
+		$query = self::wikimedia_query($title, $excerpt, $categories, $source_dossier);
+		if ($query === '') {
+			return '';
+		}
+		$endpoint = 'https://api.dvidshub.net/search?api_key=' . rawurlencode($key)
+			. '&q=' . rawurlencode($query) . '&type=image&sort=date&max_results=8';
+		$response = wp_remote_get($endpoint, [
+			'timeout' => 18,
+			'user-agent' => 'EuroPulse AutoPilot (+https://europulse.today)',
+		]);
+		if (is_wp_error($response)) {
+			return '';
+		}
+		$code = (int) wp_remote_retrieve_response_code($response);
+		if ($code < 200 || $code >= 300) {
+			return '';
+		}
+		$data = json_decode((string) wp_remote_retrieve_body($response), true);
+		foreach ((array) ($data['results'] ?? []) as $item) {
+			if (! is_array($item)) {
+				continue;
+			}
+			$img = (string) ($item['image'] ?? $item['url'] ?? '');
+			if ($img === '' || ! self::looks_like_image_url($img)) {
+				continue;
+			}
+			if (self::recently_used($img, 30, 0, $queue_id)) {
+				continue;
+			}
+			$img = esc_url_raw($img);
+			$author = trim((string) ($item['credit'] ?? ''));
+			$details = [
+				'alt' => (string) ($item['title'] ?? ''),
+				'caption' => (string) ($item['description'] ?? ''),
+				'source_label' => trim(($author !== '' ? $author . ' / ' : '') . 'DVIDS'),
+				'provider' => 'dvids',
+				'origin_url' => (string) ($item['url'] ?? $img),
+			];
+			if (self::media_relevant_with_details($img, $title, $excerpt, $categories, $source_dossier, $details)) {
+				self::store_media_attribution($img, $details);
+				return $img;
+			}
+		}
+		return '';
+	}
+
 	private static function wikimedia_media(string $title, string $excerpt, array $categories, int $queue_id = 0, array $source_dossier = []): string {
 		$query = self::wikimedia_query($title, $excerpt, $categories, $source_dossier);
 		if ($query === '') {
@@ -2097,7 +2163,7 @@ if (! defined('ABSPATH')) {
 		// терминами — доверяем поиску и принимаем (junk отсекаем). Это чинит
 		// случай «Brandenburger Tor» story ↔ «Brandenburg Gate» файл, который
 		// строгий passes_entity_gate отбраковывал из-за DE/EN-вариантов. 2026-06-10.
-		if (str_contains($host, 'wikimedia.org') || (string) ($details['provider'] ?? '') === 'openverse') {
+		if (str_contains($host, 'wikimedia.org') || in_array((string) ($details['provider'] ?? ''), ['openverse', 'dvids'], true)) {
 			$card_query = mb_strtolower(self::story_card_media_query($source_dossier));
 			if ($card_query !== '' && $haystack !== '') {
 				if (preg_match('/\b(logo|icon|sprite|pdf|document|scan|map|flag|seal|coat of arms|clipart|chart)\b/u', $haystack) === 1) {

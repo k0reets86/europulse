@@ -131,6 +131,23 @@ final class EPV2_AI_Processor {
 						class_exists('EPV2_Story_Card_Builder')
 						&& empty($existing_payload['_meta']['story_card'])
 					) {
+						// 2026-06-10 КРИТИЧНО: дофетчить полный текст источника
+						// ДО построения story card. Раньше card строился из
+						// RSS-обрывка (source_dossier пуст у свежего item) →
+						// kind=news_brief → rewriter форсил короткую статью.
+						// Порочный круг: тонкий → brief → не обогащается → огрызок,
+						// даже когда источник (pravda/tagesschau) отдаёт полный
+						// текст. enrich_item(fast_mode) фетчит primary (~1-2с, без
+						// дорогого поиска supporting). Результат идёт и в card, и
+						// через payload воркеру (снимает force-brief по словам).
+						$current_primary_len = mb_strlen((string) ($existing_payload['_meta']['source_dossier']['primary']['content'] ?? ''));
+						if (class_exists('EPV2_Source_Enricher') && $current_primary_len < 600) {
+							$prefetch_dossier = EPV2_Source_Enricher::enrich_item($source_item, ['fast_mode' => true]);
+							if (is_array($prefetch_dossier) && mb_strlen((string) ($prefetch_dossier['primary']['content'] ?? '')) > $current_primary_len) {
+								$existing_payload['_meta'] = is_array($existing_payload['_meta'] ?? null) ? $existing_payload['_meta'] : [];
+								$existing_payload['_meta']['source_dossier'] = $prefetch_dossier;
+							}
+						}
 						$story_card = EPV2_Story_Card_Builder::build($source_item, (array) ($existing_payload['_meta']['source_dossier'] ?? []));
 						// Operator-feedback 2026-05-11: items published без
 						// story_card (12 items today, including #2152 China

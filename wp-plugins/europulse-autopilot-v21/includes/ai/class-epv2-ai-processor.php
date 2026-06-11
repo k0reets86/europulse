@@ -127,48 +127,49 @@ final class EPV2_AI_Processor {
 							]);
 						}
 					}
+					// 2026-06-11 КРИТИЧНО (переписано): дофетчить полный текст
+					// источника в досье — БЕЗУСЛОВНО на каждом тике, пока досье
+					// тонкое (<600 симв), НЕ под гейтом empty(story_card). Баг:
+					// story card строится ещё на коллекте, поэтому к процессингу
+					// он уже есть → старый префетч (под гейтом) пропускался →
+					// воркер получал RSS-обрывок (104–211 симв) → «too thin» hold,
+					// хотя fetch источника даёт 1000–3000 симв. Теперь фетч идёт
+					// всегда: и card, и воркер получают полный текст.
+					$current_primary_len = mb_strlen((string) ($existing_payload['_meta']['source_dossier']['primary']['content'] ?? ''));
+					if (class_exists('EPV2_Source_Enricher') && $current_primary_len < 600) {
+						$prefetch_dossier = EPV2_Source_Enricher::enrich_item($source_item, ['fast_mode' => true]);
+						if (is_array($prefetch_dossier) && mb_strlen((string) ($prefetch_dossier['primary']['content'] ?? '')) > $current_primary_len) {
+							$existing_payload['_meta'] = is_array($existing_payload['_meta'] ?? null) ? $existing_payload['_meta'] : [];
+							$existing_payload['_meta']['source_dossier'] = $prefetch_dossier;
+							// Сбросить устаревший story_card, построенный из обрывка
+							// на коллекте — пусть пересоберётся из полного текста.
+							if (! empty($existing_payload['_meta']['story_card'])
+								&& ($existing_payload['_meta']['story_card']['kind'] ?? '') === 'news_brief') {
+								unset($existing_payload['_meta']['story_card']);
+							}
+						}
+					}
+					// Ранний отказ для безнадёжно тонких (оператор: «заведомо
+					// отклоняемое не должно жечь токены»). Если ПОСЛЕ префетча
+					// источник всё ещё крошечный (<350 симв и в фетче, и в стабе)
+					// — воркер гарантированно вернёт «too thin», материал повиснет.
+					// Отказываем сейчас, до AI. Breaking пропускаем.
+					$prefetched_len = mb_strlen((string) ($existing_payload['_meta']['source_dossier']['primary']['content'] ?? ''));
+					$stub_len = mb_strlen(trim(wp_strip_all_tags((string) ($source_item->original_content ?? ''))));
+					$is_breaking_item = ! empty($existing_payload['_meta']['breaking']) || (int) ($source_item->story_score ?? 0) >= 28;
+					if (! $is_breaking_item && max($prefetched_len, $stub_len) < 350) {
+						EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+							'error_message' => 'Материал снят до AI-обработки: источник не отдаёт текст (фетч=' . $prefetched_len . ' симв, RSS=' . $stub_len . ' симв) — статья вышла бы огрызком и была бы отбракована.',
+						]);
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'rejected_unfetchable_thin_source';
+						break;
+					}
 					if (
 						class_exists('EPV2_Story_Card_Builder')
 						&& empty($existing_payload['_meta']['story_card'])
 					) {
-						// 2026-06-10 КРИТИЧНО: дофетчить полный текст источника
-						// ДО построения story card. Раньше card строился из
-						// RSS-обрывка (source_dossier пуст у свежего item) →
-						// kind=news_brief → rewriter форсил короткую статью.
-						// Порочный круг: тонкий → brief → не обогащается → огрызок,
-						// даже когда источник (pravda/tagesschau) отдаёт полный
-						// текст. enrich_item(fast_mode) фетчит primary (~1-2с, без
-						// дорогого поиска supporting). Результат идёт и в card, и
-						// через payload воркеру (снимает force-brief по словам).
-						$current_primary_len = mb_strlen((string) ($existing_payload['_meta']['source_dossier']['primary']['content'] ?? ''));
-						if (class_exists('EPV2_Source_Enricher') && $current_primary_len < 600) {
-							$prefetch_dossier = EPV2_Source_Enricher::enrich_item($source_item, ['fast_mode' => true]);
-							if (is_array($prefetch_dossier) && mb_strlen((string) ($prefetch_dossier['primary']['content'] ?? '')) > $current_primary_len) {
-								$existing_payload['_meta'] = is_array($existing_payload['_meta'] ?? null) ? $existing_payload['_meta'] : [];
-								$existing_payload['_meta']['source_dossier'] = $prefetch_dossier;
-							}
-						}
-						// Ранний отказ для безнадёжно тонких (2026-06-10, оператор:
-						// «заведомо отклоняемый материал не должен жечь токены»).
-						// Если ПОСЛЕ префетча полного текста источник всё ещё
-						// крошечный (<350 симв ≈ 50 слов и в стабе, и в фетче) —
-						// воркер позже гарантированно вернёт «Primary source too
-						// thin» и материал повиснет в ready_review, потратив
-						// story card + рерайт + ретраи. Отказываем сейчас, до
-						// единого AI-вызова. Breaking-материалы пропускаем —
-						// для срочного тонкий тизер допустим.
-						$prefetched_len = mb_strlen((string) ($existing_payload['_meta']['source_dossier']['primary']['content'] ?? ''));
-						$stub_len = mb_strlen(trim(wp_strip_all_tags((string) ($source_item->original_content ?? ''))));
-						$is_breaking_item = ! empty($existing_payload['_meta']['breaking']) || (int) ($source_item->story_score ?? 0) >= 28;
-						if (! $is_breaking_item && max($prefetched_len, $stub_len) < 350) {
-							EPV2_Queue::mark_state((int) $item->id, 'rejected', [
-								'error_message' => 'Материал снят до AI-обработки: источник не отдаёт текст (фетч=' . $prefetched_len . ' симв, RSS=' . $stub_len . ' симв) — статья вышла бы огрызком и была бы отбракована.',
-							]);
-							$count++;
-							$run_payload['processed_item_id'] = (int) $item->id;
-							$run_payload['result'] = 'rejected_unfetchable_thin_source';
-							break;
-						}
 						$story_card = EPV2_Story_Card_Builder::build($source_item, (array) ($existing_payload['_meta']['source_dossier'] ?? []));
 						// Operator-feedback 2026-05-11: items published без
 						// story_card (12 items today, including #2152 China

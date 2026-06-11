@@ -62,6 +62,14 @@ final class EPV2_News_Sitemap {
 			if (! $permalink) {
 				continue;
 			}
+			// 2026-06-11: принудительный завершающий слеш. В веб-контексте
+			// sitemap (запрос без языкового префикса) get_permalink иногда
+			// отдаёт URL БЕЗ слеша, а пермалинки сайта — /%postname%/ → 301.
+			// Google News отвергает редиректящие <loc> → новости не попадают
+			// в индекс. trailingslashit выравнивает с каноническим URL.
+			if (strpos($permalink, '?') === false) {
+				$permalink = trailingslashit($permalink);
+			}
 			$title = wp_strip_all_tags(get_the_title($post_id));
 			$published_at = get_post_time('c', true, $post_id);
 			$keywords = self::keywords_for_post($post_id);

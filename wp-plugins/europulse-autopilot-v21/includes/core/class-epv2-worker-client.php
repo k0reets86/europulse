@@ -240,10 +240,30 @@ final class EPV2_Worker_Client {
 		// concatenate card_basis at the end if it adds new factual lines —
 		// the rewriter is told via the system prompt that the card is the
 		// authoritative fact list.
+		// 2026-06-11: спасение тонкого primary богатым supporting. Когда
+		// оригинал — TV/видео-страница (~200 симв), но enricher нашёл полный
+		// текст в supporting (1000-3000 симв), раньше воркер его НЕ видел
+		// (передавался только primary) → «Primary source too thin» → held.
+		// Теперь самый длинный supporting.content идёт кандидатом наравне с
+		// primary, и rewriter получает реальный текст истории.
+		$dossier_supporting_content = '';
+		if ( is_array( $existing['_meta']['source_dossier']['supporting'] ?? null ) ) {
+			foreach ( $existing['_meta']['source_dossier']['supporting'] as $sup ) {
+				if ( ! is_array( $sup ) ) {
+					continue;
+				}
+				$sup_text = trim( (string) ( $sup['content'] ?? '' ) );
+				if ( mb_strlen( $sup_text ) > mb_strlen( $dossier_supporting_content ) ) {
+					$dossier_supporting_content = $sup_text;
+				}
+			}
+		}
+
 		$candidates = array_filter( [
-			'dossier_content' => $dossier_primary_content,
-			'dossier_excerpt' => $dossier_primary_excerpt,
-			'clean_original'  => $clean_original,
+			'dossier_content'    => $dossier_primary_content,
+			'dossier_supporting' => $dossier_supporting_content,
+			'dossier_excerpt'    => $dossier_primary_excerpt,
+			'clean_original'     => $clean_original,
 		], static fn( $v ) => mb_strlen( (string) $v ) > 0 );
 		$best_text = '';
 		foreach ( $candidates as $candidate ) {

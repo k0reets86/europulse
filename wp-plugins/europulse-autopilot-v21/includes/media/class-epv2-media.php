@@ -2115,7 +2115,52 @@ if (! defined('ABSPATH')) {
 		return self::media_relevant_with_details($url, $title, $excerpt, $categories, $source_dossier, $details);
 	}
 
+	/**
+	 * True, если URL — это фото primary-источника с агентской подписью
+	 * (Reuters/dpa/Getty…). Сравниваем по нормализованному URL и по базовому
+	 * файлу (CDN-варианты с resize-параметрами). 2026-06-12.
+	 */
+	public static function url_is_blacklisted_source_photo(string $url, array $source_dossier): bool {
+		$credit = '';
+		$primary_img = '';
+		foreach (['primary', 'shell_primary'] as $key) {
+			$entry = is_array($source_dossier[$key] ?? null) ? $source_dossier[$key] : [];
+			$c = (string) ($entry['image_credit'] ?? '');
+			$img = (string) ($entry['image'] ?? '');
+			if ($img !== '' && $c !== '' && self::image_credit_is_blacklisted($c)) {
+				$credit = $c;
+				$primary_img = $img;
+				break;
+			}
+		}
+		if ($primary_img === '' || $url === '') {
+			return false;
+		}
+		$norm = static function (string $u): string {
+			$u = strtok($u, '?') ?: $u;
+			return mb_strtolower(rtrim($u, '/'));
+		};
+		$a = $norm($url);
+		$b = $norm($primary_img);
+		if ($a === $b) {
+			return true;
+		}
+		// CDN-варианты: одинаковое имя файла (последний сегмент пути).
+		$fa = basename(parse_url($a, PHP_URL_PATH) ?: '');
+		$fb = basename(parse_url($b, PHP_URL_PATH) ?: '');
+		return $fa !== '' && mb_strlen($fa) >= 12 && $fa === $fb;
+	}
+
 	private static function media_relevant_with_details(string $url, string $title, string $excerpt, array $categories, array $source_dossier, array $details): bool {
+		// Агентское фото primary-источника — жёсткий стоп ДО всех trusted-
+		// shortcut'ов. Воркер берёт og:image источника напрямую (без проверки
+		// подписи), поэтому единственный надёжный шлагбаум — здесь, в общей
+		// воронке релевантности, через которую идут все PHP-пути выбора/
+		// валидации featured. 2026-06-12: 10 публикаций за 12ч взяли
+		// dpa/Reuters-фото несмотря на блокировку в source_dossier_image.
+		if (self::url_is_blacklisted_source_photo($url, $source_dossier)) {
+			return false;
+		}
 		$categories = self::normalize_media_categories($categories);
 		$story_context = self::story_context_from_dossier($title, $excerpt, $categories, $source_dossier);
 		$context = mb_strtolower(trim(wp_strip_all_tags(implode(' ', array_filter([

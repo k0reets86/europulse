@@ -367,6 +367,30 @@ final class EPV2_Watchdog {
 	 *
 	 * @param int $limit Process at most this many duplicate pairs per run.
 	 */
+	/**
+	 * Сохранить 301-редирект path → target_url для поста, который вот-вот будет
+	 * удалён (дубль/чистка). Карта в опции epv2_gone_redirects; обслуживает её
+	 * mu-plugin europulse-legacy-redirects.php на is_404(). Так удалённые, но
+	 * уже проиндексированные Google URL не дают 404. 2026-06-16.
+	 */
+	public static function register_gone_post_redirect(int $post_id, string $target_url): void {
+		$path = wp_parse_url(get_permalink($post_id), PHP_URL_PATH);
+		$target_path = wp_parse_url($target_url, PHP_URL_PATH);
+		if (! $path || ! $target_path || $path === $target_path) {
+			return;
+		}
+		$map = get_option('epv2_gone_redirects', []);
+		if (! is_array($map)) {
+			$map = [];
+		}
+		$map[ rtrim($path, '/') ] = $target_path;
+		// Ограничить рост карты (последние 1000).
+		if (count($map) > 1000) {
+			$map = array_slice($map, -1000, null, true);
+		}
+		update_option('epv2_gone_redirects', $map, false);
+	}
+
 	public static function dedupe_published_posts(int $limit = 50): array {
 		$result = ['checked_pairs' => 0, 'deleted' => 0, 'kept_pairs' => []];
 		global $wpdb;
@@ -406,7 +430,16 @@ final class EPV2_Watchdog {
 			foreach ($by_lang_ordered as $lang => $ids) {
 				$kept[$lang] = (int) $ids[0];
 				if (count($ids) > 1) {
+					$survivor_url = get_permalink((int) $ids[0]);
 					foreach (array_slice($ids, 1) as $younger) {
+						// 2026-06-16: до удаления дубля СОХРАНИТЬ 301 на оставшийся
+						// пост. Раньше wp_trash_post удалял без редиректа → уже
+						// проиндексированный Google URL становился 404 («Не найдено»
+						// в GSC для нового контента). Теперь старый URL ведёт на
+						// выжившую версию той же истории.
+						if ($survivor_url) {
+							self::register_gone_post_redirect((int) $younger, (string) $survivor_url);
+						}
 						wp_trash_post((int) $younger);
 						$result['deleted']++;
 					}

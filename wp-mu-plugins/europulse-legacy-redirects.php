@@ -12,7 +12,20 @@ add_action('template_redirect', static function (): void {
 	if (! is_404()) {
 		return;
 	}
-	$path = trim((string) parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH), '/');
+	$req_path = (string) parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+
+	// 1) Карта удалённых дубль-постов (2026-06-16): уже проиндексированный
+	// Google URL удалённой статьи 301 → на выжившую версию той же истории.
+	$gone = get_option('epv2_gone_redirects', []);
+	if (is_array($gone) && $gone !== []) {
+		$key = rtrim($req_path, '/');
+		if (isset($gone[$key])) {
+			wp_redirect(home_url($gone[$key]), 301);
+			exit;
+		}
+	}
+
+	$path = trim($req_path, '/');
 	// Только корневые слаги-статьи: один сегмент, длинный, без точек (не файлы).
 	if ($path === '' || str_contains($path, '/') || str_contains($path, '.') || strlen($path) < 20) {
 		return;

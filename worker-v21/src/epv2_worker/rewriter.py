@@ -977,6 +977,13 @@ def _parse_json_result(raw: str, source_text: str, story_card: dict | None = Non
         for name in unsupported_known:
             result.warnings.append({"kind": "unsupported_known_figure", "value": name, "severity": "hard"})
 
+        # 2026-06-16: выдуманные числа. Аудит нашёл «1085 km», фейк-статистику,
+        # которых нет в источнике. Любое число ≥3 значащих цифр в статье, которого
+        # нет в source/story_card → вероятная фабрикация. Годы 1900–2099 и
+        # количества с пробелами/точками-разделителями нормализуем перед сверкой.
+        for num in _unsupported_numbers(full_text, source_text, story_card):
+            result.warnings.append({"kind": "fabricated_number", "value": num, "severity": "hard"})
+
         return result
     except Exception as exc:
         return RewriteResult(error=f"JSON parse failed: {exc}")
@@ -1011,6 +1018,43 @@ _DATE_RELATIVE_HINTS = (
     "diesem morgen", "diesem nachmittag", "diesem abend",
     "live", "breaking", "just in",
 )
+
+
+def _unsupported_numbers(generated_text: str, source_text: str, story_card: dict | None = None) -> list[str]:
+    """Числа из статьи (>=3 значащих цифр), которых нет в источнике/story_card.
+    Ловит выдуманную статистику/расстояния. Консервативно: нормализуем
+    разделители (1.085 / 1 085 / 1,085 → 1085), пропускаем годы 1900-2099,
+    возвращаем максимум первые 4 находки."""
+    def _digits(s: str) -> set[str]:
+        out = set()
+        for m in re.findall(r"\d[\d.,\s ]*\d|\d", s):
+            d = re.sub(r"[^\d]", "", m)
+            if d:
+                out.add(d.lstrip("0") or "0")
+        return out
+    src = _digits(source_text)
+    # story_card key_facts тоже считаем источником чисел
+    if isinstance(story_card, dict):
+        sc_text = " ".join(str(x) for x in (story_card.get("key_facts") or []))
+        src |= _digits(sc_text)
+    out: list[str] = []
+    for raw in re.findall(r"\d[\d.,\s ]*\d|\d", generated_text):
+        d = re.sub(r"[^\d]", "", raw)
+        norm = d.lstrip("0") or "0"
+        if len(norm) < 3:
+            continue  # 1-2 значные числа слишком частые/неинформативные
+        if len(norm) == 4 and 1900 <= int(norm) <= 2099:
+            continue  # годы
+        if norm in src:
+            continue
+        # допускаем, если число входит в более длинное число источника или наоборот
+        if any(norm in s or s in norm for s in src if len(s) >= 3):
+            continue
+        if norm not in out:
+            out.append(norm)
+        if len(out) >= 4:
+            break
+    return out
 
 
 def _unsupported_explicit_dates(generated_text: str, source_text: str) -> list[str]:

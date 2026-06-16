@@ -245,6 +245,16 @@ PFLICHTREGELN FÜR DIE ÜBERSETZUNG:
   • Russian names: Putin, Lavrov, Medvedev — standard romanization
 - UKRAINIAN translation guards:
   • Latin-script proper names from the source/story-card are preserved as Latin, especially publishers, brands, products, platforms, companies and acronyms. НЕ пиши „Kyiv Post" як „Киівпост" або „Київ Пост"; НЕ пиши „Deutsche Welle" як „Дойтше Велле".
+  • ЖОРСТКЕ ПРАВИЛО (2026-06-16): БУДЬ-ЯКА латинська назва, бренд, платформа,
+    компанія, назва шоу/фільму/пісні/гри, та акронім ЗАЛИШАЄТЬСЯ ЛАТИНКОЮ
+    дослівно, як у німецькому майстрі. ЗАБОРОНЕНО передавати їх кирилицею
+    по літерах. Реальні помилки, яких НЕ має бути:
+      Cirque du Soleil → НЕ «Кіркуе ду Солайл» (лишай Cirque du Soleil)
+      All You Need Is Love → НЕ «Алл Иоу Неед Іс Лове» (лишай як є)
+      YouTube → НЕ «ИоуТубе»; Facebook → НЕ «Факебоок»; Snapchat → НЕ «Снапхат»;
+      TikTok, Instagram, X, SpaceX, xAI, Netflix, Spotify, Queen, Beatles,
+      Sister Act, Ohnsorg-Theater — усі лишаються латинкою/оригіналом.
+    Літера «И» (російська) у українському тексті — завжди БАГ.
   • Brand/source names стандартно preserve (AfD, CDU, EU, NATO, SAP, BMW, Kyiv Post, Deutsche Welle, OpenAI, Waymo, ProSieben)
   • Visual confusables — Latin "o" в Cyrillic context це BUG, завжди Cyrillic "о"
 
@@ -647,7 +657,10 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             kwargs["extra_body"] = reasoning_extra_body(model, 8192)
         else:
             kwargs["temperature"] = 0.2
-            kwargs["max_tokens"] = 2048
+            # 2026-06-16: было 2048 → тело перевода обрывалось на полуслове
+            # у длинных статей (кириллица «тяжелее» в токенах + JSON title+
+            # lead+card_lead+body). 4096 покрывает полную статью с запасом.
+            kwargs["max_tokens"] = 4096
         resp = await client.chat.completions.create(**kwargs)
         raw = completion_text(resp)
         if not raw.strip():

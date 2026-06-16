@@ -166,6 +166,27 @@ final class EPV2_AI_Processor {
 						$run_payload['result'] = 'rejected_unfetchable_thin_source';
 						break;
 					}
+					// 2026-06-16 ГЕЙТ ВАЛИДНОСТИ ИСТОЧНИКА. Аудит 56 статей: ~36% галлюцинаций;
+					// худшие — когда fetch отдал НЕ текст статьи (Spiegel «ссылка устарела»,
+					// DLF-хаб-блок, навигация, paywall) ИЛИ текст НЕ про эту новость → модель
+					// сочиняла всю статью. Невалидно/не по теме → отказ ДО AI.
+					$validity = self::source_text_validity(
+						(string) ($source_item->original_title ?? ''),
+						(string) ($existing_payload['_meta']['source_dossier']['primary']['content'] ?? ''),
+						(string) ($source_item->original_content ?? '')
+					);
+					if (! $validity['valid']) {
+						EPV2_Queue::mark_state((int) $item->id, 'rejected', [
+							'error_message' => 'Материал снят до AI-обработки (гейт валидности источника): ' . $validity['reason'] . '. Без реального текста статьи модель выдумала бы факты.',
+						]);
+						if (class_exists('EPV2_Logger')) {
+							EPV2_Logger::warning('source_validity', 'rejected_invalid_source', ['queue_id' => (int) $item->id, 'reason' => $validity['reason'], 'url' => (string) ($source_item->original_url ?? '')]);
+						}
+						$count++;
+						$run_payload['processed_item_id'] = (int) $item->id;
+						$run_payload['result'] = 'rejected_invalid_source_text';
+						break;
+					}
 					if (
 						class_exists('EPV2_Story_Card_Builder')
 						&& empty($existing_payload['_meta']['story_card'])
@@ -3382,6 +3403,44 @@ final class EPV2_AI_Processor {
 	 * ставка на 1М токенов + сниженная для cached. Это оценка для трендов/
 	 * сравнения провайдеров, не бухгалтерия.
 	 */
+	/**
+	 * Гейт валидности текста источника (2026-06-16). Не пускать в AI материал,
+	 * где fetch вернул не текст статьи (устаревшая ссылка, paywall, хаб/навигация)
+	 * или текст не относится к заголовку — иначе модель сочиняет факты.
+	 */
+	public static function source_text_validity(string $title, string $dossier_content, string $raw_original = ''): array {
+		$content = trim(wp_strip_all_tags($dossier_content));
+		$stub = trim(wp_strip_all_tags($raw_original));
+		$text = mb_strlen($content) >= mb_strlen($stub) ? $content : $stub;
+		$text_lc = mb_strtolower($text);
+		$boilerplate = [
+			'älter als 30 tage', 'bereits 10', 'link ist entweder', 'der link, dem sie gefolgt sind',
+			'artikel wurde bereits', 'aktivieren sie javascript', 'enable javascript', 'akzeptieren sie',
+			'um diesen artikel zu lesen', 'jetzt abonnieren', 'jetzt registrieren', 'melden sie sich an',
+			'paywall', 'nur für abonnenten', 'continue reading', 'weiterlesen mit', 'zugang zu allen',
+			'access denied', 'page not found', 'seite nicht gefunden', 'unsupported status', 'captcha', 'verify you are human',
+		];
+		foreach ($boilerplate as $marker) {
+			if ($marker !== '' && mb_strpos($text_lc, $marker) !== false && mb_strlen($text) < 900) {
+				return ['valid' => false, 'reason' => 'источник вернул не текст статьи (маркер: "' . $marker . '")'];
+			}
+		}
+		$stop = ['der','die','das','und','oder','aber','mit','von','für','auf','ein','eine','einen','einem','einer','ist','sind','war','wird','werden','hat','haben','nach','bei','aus','zum','zur','den','dem','des','als','auch','sich','wie','nicht','über','vor','noch','nur','sein','seine','the','and','for','with','from','that','this','was','were','has','have','are','his','her','its'];
+		$title_words = [];
+		foreach (preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower($title)) ?: [] as $w) {
+			if (mb_strlen($w) >= 4 && ! in_array($w, $stop, true)) { $title_words[$w] = true; }
+		}
+		$title_words = array_keys($title_words);
+		if (count($title_words) >= 3) {
+			$overlap = 0;
+			foreach ($title_words as $w) { if (mb_strpos($text_lc, $w) !== false) { $overlap++; } }
+			if ($overlap === 0) {
+				return ['valid' => false, 'reason' => 'текст источника не относится к заголовку (0 общих ключевых слов) — fetch взял не ту страницу'];
+			}
+		}
+		return ['valid' => true, 'reason' => ''];
+	}
+
 	public static function payload_total_cost(array $payload): float {
 		$meta = is_array($payload['_meta'] ?? null) ? $payload['_meta'] : [];
 		$runtime = is_array($meta['ai_runtime'] ?? null) ? $meta['ai_runtime'] : [];

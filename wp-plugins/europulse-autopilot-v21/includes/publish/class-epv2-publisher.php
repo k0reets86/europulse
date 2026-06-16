@@ -1155,13 +1155,67 @@ final class EPV2_Publisher {
 		if ($excerpt_plain === '') {
 			return $content;
 		}
-		if (preg_match('/^\s*<p>(.*?)<\/p>/isu', $content, $match)) {
-			$first_paragraph = trim(wp_strip_all_tags((string) $match[1]));
-			if ($first_paragraph !== '' && mb_strtolower($first_paragraph) === mb_strtolower($excerpt_plain)) {
-				$content = preg_replace('/^\s*<p>.*?<\/p>\s*/isu', '', $content, 1) ?? $content;
+		if (! preg_match('/^\s*<p>(.*?)<\/p>/isu', $content, $match)) {
+			return trim($content);
+		}
+		$first_paragraph = trim(wp_strip_all_tags((string) $match[1]));
+		if ($first_paragraph === '') {
+			return trim($content);
+		}
+
+		// 1) Полное совпадение первого абзаца с лидом — убрать абзац целиком.
+		if (mb_strtolower($first_paragraph) === mb_strtolower($excerpt_plain)) {
+			return trim(preg_replace('/^\s*<p>.*?<\/p>\s*/isu', '', $content, 1) ?? $content);
+		}
+
+		// 2) 2026-06-16: тавтология лид↔начало тела. Модель часто повторяет
+		// в первом абзаце предложения из лида (особенно атрибуцию «Wie X
+		// berichtet, …»). Разбиваем оба на предложения и выкидываем из
+		// первого абзаца тела те, что (почти) дословно совпадают с
+		// предложениями лида. Если абзац опустел — убираем его целиком.
+		$split = static function (string $t): array {
+			$parts = preg_split('/(?<=[.!?…])\s+/u', trim($t)) ?: [];
+			return array_values(array_filter(array_map('trim', $parts), static fn($s) => $s !== ''));
+		};
+		$norm = static function (string $s): string {
+			$s = mb_strtolower($s);
+			$s = preg_replace('/[^\p{L}\p{N}\s]+/u', '', $s) ?: $s;
+			return trim(preg_replace('/\s+/u', ' ', $s) ?: $s);
+		};
+		$lead_sentences = array_map($norm, $split($excerpt_plain));
+		$lead_sentences = array_filter($lead_sentences, static fn($s) => mb_strlen($s) >= 12);
+		if ($lead_sentences === []) {
+			return trim($content);
+		}
+		$body_sentences = $split($first_paragraph);
+		$kept = [];
+		$removed = 0;
+		foreach ($body_sentences as $bs) {
+			$bn = $norm($bs);
+			$dup = false;
+			foreach ($lead_sentences as $ls) {
+				// дословный повтор ИЛИ один содержит другой (атрибуция/ядро)
+				if ($bn === $ls || (mb_strlen($bn) >= 16 && (mb_strpos($ls, $bn) !== false || mb_strpos($bn, $ls) !== false))) {
+					$dup = true;
+					break;
+				}
+			}
+			if ($dup) {
+				$removed++;
+			} else {
+				$kept[] = $bs;
 			}
 		}
-		return trim($content);
+		if ($removed === 0) {
+			return trim($content);
+		}
+		$new_first = trim(implode(' ', $kept));
+		if ($new_first === '') {
+			// весь первый абзац был повтором лида — удаляем абзац
+			return trim(preg_replace('/^\s*<p>.*?<\/p>\s*/isu', '', $content, 1) ?? $content);
+		}
+		// заменяем первый абзац очищенным вариантом
+		return trim(preg_replace('/^\s*<p>.*?<\/p>/isu', '<p>' . esc_html($new_first) . '</p>', $content, 1) ?? $content);
 	}
 
 	private static function semantic_keywords(string $text): string {

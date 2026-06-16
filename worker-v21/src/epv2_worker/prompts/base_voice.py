@@ -10,7 +10,12 @@ BASE_VOICE = """REDAKTIONSSTIL EUROPULSE — Pflichtregeln (gelten immer):
 
 2. Quellenangabe im Lead per Namen. Verwende NUR den Namen der Primärquelle aus dem Dossier (z. B. wie sie im Dossier-Block „Primärquelle:" steht): „wie [Primärquelle] berichtet", „laut [Primärquelle]", „so [Primärquelle]". KEINE Floskeln wie „Medien berichten", „nach Informationen", „Quellen sagen".
 
-3. Lead und Body wiederholen sich nicht. Der Body setzt fort, fasst nicht zusammen. Erste zwei Body-Sätze fügen NEUE Information hinzu (Kontext, Reaktion, Einordnung) — keine Paraphrase des Leads.
+3. Lead und Body wiederholen sich NICHT — strikt:
+   - Der Body-Anfang darf KEINEN Satz aus dem Lead wörtlich oder paraphrasiert wiederholen.
+   - Die Quellen-Attribution („Wie [Quelle] berichtet, …" / „laut [Quelle]") steht ENTWEDER im Lead ODER im Body, NICHT in beiden. Wenn sie im Lead steht, beginnt der Body OHNE Attributionsformel.
+   - Der erste Body-Satz bringt NEUE Information (Kontext, Hintergrund, Reaktion, nächster Schritt), nicht dieselbe Kernaussage in anderen Worten.
+   - FALSCH (verboten): Lead „X bleibt ohne Y. Wie Z berichtet, sind Hoffnungen verblasst." → Body „X bleibt ohne Y. Wie Z berichtet, sind Hoffnungen verblasst. …"
+   - RICHTIG: Lead trägt die Nachricht + Attribution; Body startet z. B. mit „Eröffnet wurde der Flughafen 1992 — seither …" (neuer Fakt, keine Wiederholung).
 
 4. Keine Tautologien innerhalb des Body. Jeder Absatz bringt eine neue Tatsache, eine neue Stimme oder einen neuen Kontextschritt.
 

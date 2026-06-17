@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from .contracts import LanguagePackage, MediaCandidate, WorkerRequest, WorkerResponse
 from .semantic import analyze as semantic_analyze, SemanticResult
 from .rewriter import rewrite_to_german
+from .verifier import verify_and_correct_german
 from .translator import translate_from_german
 from .media import find_media, MediaResult
 from .seo import generate_seo
@@ -535,6 +536,45 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
         getattr(rewrite, "tokens", 0),
         getattr(rewrite, "cached_tokens", 0),
     )
+
+    # 2026-06-17 VERIFY-AND-CORRECT (groundedness). Аудит: ~40% статей содержали
+    # выдумки (жертвы, чиновники, цитаты, числа), которые промпт+regex не ловят.
+    # Дешёвый доп. вызов (тот же primary-провайдер) сверяет немецкий мастер с
+    # источником и ИСПРАВЛЯЕТ негрунтованное — НЕ блокирует. Идёт ДО перевода,
+    # чтобы правки попали в UK/EN. Источник сверки = original_text + supporting.
+    try:
+        _verify_provider, _verify_key, _verify_model = (ctx.provider_order[0] if ctx.provider_order else ("", "", ""))
+        if _verify_key:
+            _verify_source = original_text
+            for _se in (supporting_rich or [])[:3]:
+                _sc = str((_se or {}).get("content") or "")
+                if len(_sc) >= 200:
+                    _verify_source += "\n\n" + _sc
+            _corrected = await verify_and_correct_german(
+                title=rewrite.title_de,
+                lead=rewrite.lead_de,
+                card_lead=getattr(rewrite, "card_lead_de", "") or "",
+                body=rewrite.body_de,
+                source_text=_verify_source,
+                provider=_verify_provider,
+                api_key=_verify_key,
+                model=_verify_model,
+            )
+            if _corrected:
+                rewrite.title_de = _corrected["title"] or rewrite.title_de
+                rewrite.lead_de = _corrected["lead"] or rewrite.lead_de
+                rewrite.body_de = _corrected["body"] or rewrite.body_de
+                if _corrected.get("card_lead"):
+                    rewrite.card_lead_de = _corrected["card_lead"]
+                # Исправлено → снимаем hallucination-warnings, чтобы они НЕ
+                # превратились в блокеры (политика: исправлять и публиковать).
+                _hall_kinds = {"explicit_date", "fabricated_name", "fabricated_number", "unsupported_known_figure", "full_name"}
+                rewrite.warnings = [w for w in (rewrite.warnings or []) if not (isinstance(w, dict) and w.get("kind") in _hall_kinds)]
+                if _corrected.get("corrections"):
+                    ctx.warnings.append("verify_corrected: " + "; ".join(_corrected["corrections"][:8]))
+                _record_ai_runtime(ctx, "verify_de", _verify_provider, _verify_model, 0, 0)
+    except Exception as _verify_exc:  # noqa: BLE001
+        ctx.warnings.append(f"verify_and_correct_skipped: {_verify_exc}")
 
     # Anti-plagiarism gate (architecture phase 3).
     # R9 2026-05-14: bumped warning → BLOCKER. Items с <85% uniqueness теперь

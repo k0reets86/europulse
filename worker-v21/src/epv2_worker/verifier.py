@@ -98,7 +98,13 @@ async def verify_and_correct_german(
         raw = (resp.choices[0].message.content or "").strip()
         if not raw:
             return None
-        data = json.loads(raw)
+        # strict=False допускает сырые control-символы (переносы строк) внутри
+        # строковых значений — модель иногда кладёт их в body, и обычный
+        # json.loads падал «Invalid control character», теряя исправление.
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = json.loads(raw, strict=False)
         out = {
             "title": str(data.get("title", "") or "").strip(),
             "lead": str(data.get("lead", "") or "").strip(),

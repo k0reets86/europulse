@@ -541,21 +541,25 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     # выдумки (жертвы, чиновники, цитаты, числа), которые промпт+regex не ловят.
     # Дешёвый доп. вызов (тот же primary-провайдер) сверяет немецкий мастер с
     # источником и ИСПРАВЛЯЕТ негрунтованное — НЕ блокирует. Идёт ДО перевода,
-    # чтобы правки попали в UK/EN. Источник сверки = original_text + supporting.
+    # чтобы правки попали в UK/EN. PRIMARY (original_text) — единственный авторитет
+    # для конкретных фактов; SUPPORTING кластера = только фон (не лицензирует новые
+    # конкретные утверждения — иначе факт из соседней статьи кластера сходит за
+    # грунтованный, как было с выдуманным пассажем Ramstein в 12623).
     try:
         _verify_provider, _verify_key, _verify_model = (ctx.provider_order[0] if ctx.provider_order else ("", "", ""))
         if _verify_key:
-            _verify_source = original_text
+            _verify_supporting = ""
             for _se in (supporting_rich or [])[:3]:
                 _sc = str((_se or {}).get("content") or "")
                 if len(_sc) >= 200:
-                    _verify_source += "\n\n" + _sc
+                    _verify_supporting += ("\n\n" if _verify_supporting else "") + _sc
             _corrected = await verify_and_correct_german(
                 title=rewrite.title_de,
                 lead=rewrite.lead_de,
                 card_lead=getattr(rewrite, "card_lead_de", "") or "",
                 body=rewrite.body_de,
-                source_text=_verify_source,
+                primary_source=original_text,
+                supporting_source=_verify_supporting,
                 provider=_verify_provider,
                 api_key=_verify_key,
                 model=_verify_model,

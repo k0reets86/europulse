@@ -553,12 +553,20 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
                 _sc = str((_se or {}).get("content") or "")
                 if len(_sc) >= 200:
                     _verify_supporting += ("\n\n" if _verify_supporting else "") + _sc
+            # PRIMARY для сверки = настоящий dossier-primary (если прислан и не
+            # тонкий), а НЕ «богатый» original_text — иначе, когда supporting
+            # длиннее primary, original_text = supporting, и выдумки из соседней
+            # статьи считаются грунтованными (13091: «Gesundheitsminister James
+            # Murray» из supporting выжил). Откат на original_text, если primary пуст.
+            _verify_primary = getattr(ctx.request, "primary_source_content", "") or ""
+            if len(_verify_primary.strip()) < 200:
+                _verify_primary = original_text
             _corrected = await verify_and_correct_german(
                 title=rewrite.title_de,
                 lead=rewrite.lead_de,
                 card_lead=getattr(rewrite, "card_lead_de", "") or "",
                 body=rewrite.body_de,
-                primary_source=original_text,
+                primary_source=_verify_primary,
                 supporting_source=_verify_supporting,
                 provider=_verify_provider,
                 api_key=_verify_key,

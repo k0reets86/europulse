@@ -41,6 +41,10 @@ class WorkerRequest:
     original_title: str = ""
     original_excerpt: str = ""
     original_content: str = ""
+    # Настоящий первоисточник (dossier primary), отдельно от «богатого» блоба
+    # original_content. verify-correct сверяет факты ТОЛЬКО по нему как по
+    # единственному авторитету (см. pipeline). Пусто → откат на original_content.
+    primary_source_content: str = ""
     original_url: str = ""
     original_date: str = ""
     source_image_url: str = ""
@@ -63,6 +67,7 @@ class WorkerRequest:
             original_title=str(data.get("original_title") or ""),
             original_excerpt=str(data.get("original_excerpt") or ""),
             original_content=str(data.get("original_content") or ""),
+            primary_source_content=str(data.get("primary_source_content") or ""),
             original_url=str(data.get("original_url") or ""),
             original_date=str(data.get("original_date") or ""),
             source_image_url=str(data.get("source_image_url") or ""),

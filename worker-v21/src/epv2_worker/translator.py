@@ -309,6 +309,97 @@ PFLICHTFELD card_lead — Karten-Lead-Magnet für die Startseite:
 Ausgabe ausschließlich als JSON: {{"title":"...","lead":"...","card_lead":"...","body":"..."}}"""
 
 
+_LATIN_MULTIWORD_RE = re.compile(
+    r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÿ.&\-]+(?:\s+(?:du|de|la|von|van|der|[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÿ.&\-]+)){1,4}"
+)
+_LATIN_ACRONYM_RE = re.compile(r"\b[A-Z]{2,6}\b")
+_LATIN_CAMEL_RE = re.compile(r"\b[A-ZÀ-ÖØ-Þ][a-zà-ÿ]+[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÿ]+\b")
+
+
+def _latin_name_candidates(text: str) -> set[str]:
+    """Кандидаты в латинские имена собственные/бренды/издания: многословные
+    с заглавных, аббревиатуры (NATO), camelCase (YouTube, ProSieben)."""
+    cands: set[str] = set()
+    for rx in (_LATIN_MULTIWORD_RE, _LATIN_ACRONYM_RE, _LATIN_CAMEL_RE):
+        for m in rx.finditer(text or ""):
+            s = m.group(0).strip()
+            if len(s) >= 3:
+                cands.add(s)
+    return cands
+
+
+_UK_TRANSLIT_SYSTEM = """Du korrigierst NUR falsch ins Kyrillische transliterierte lateinische
+Eigennamen, Marken, Publikations-/Produkt-/Organisationsnamen in einem UKRAINISCHEN Text.
+
+Du bekommst das DEUTSCHE Original (mit korrekter lateinischer Schreibweise) und die
+UKRAINISCHE Übersetzung. Finde Namen, die in der UK-Version kyrillisch transliteriert
+oder als Misch-Schrift-Kauderwelsch erscheinen, z. B.:
+  «Сюддойтшер Zeitung» → «Süddeutsche Zeitung»
+  «Факебоок» → «Facebook», «ИоуТубе» → «YouTube»
+  «Кіркуе ду Солайл» → «Cirque du Soleil», «Дойтше Велле» → «Deutsche Welle»
+
+Regel: solche Namen behalten die LATEINISCHE Schreibweise aus dem DEUTSCHEN Original
+(bzw. die etablierte korrekte Form). Übliche übersetzte Wörter, Ländernamen, Personen,
+die korrekt ukrainisiert sind (z. B. «Трамп», «Зеленський», «НАТО»), NICHT anfassen.
+
+Antworte AUSSCHLIESSLICH mit JSON:
+{"ops": [{"wrong": "<exakt wie im UK-Text>", "correct": "<korrekte lateinische Schreibweise>"}]}
+Keine Funde → {"ops": []}."""
+
+
+async def _repair_uk_latin_names(
+    result: "TranslationResult", german_text: str, provider: str, api_key: str, model: str
+) -> None:
+    """Детерминированно чинит гарбленную транслитерацию латинских имён в UK.
+    Гейт: если латинские имена из немецкого отсутствуют в UK дословно → дешёвый
+    LLM-проход возвращает {wrong→correct}, замена выполняется в КОДЕ (надёжно)."""
+    try:
+        uk_blob = "\n".join([result.title or "", result.lead or "", result.card_lead or "", result.body or ""])
+        cands = _latin_name_candidates(german_text)
+        at_risk = [c for c in cands if c not in uk_blob]
+        if not at_risk:
+            return
+        client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1") if provider == "deepseek" else AsyncOpenAI(api_key=api_key)
+        user = (
+            "DEUTSCHES ORIGINAL (korrekte Latein-Namen):\n" + (german_text or "")[:4000]
+            + "\n\nUKRAINISCHE ÜBERSETZUNG (zu prüfen):\n" + uk_blob[:4000]
+            + "\n\nVerdächtige Latein-Namen (im DE vorhanden, im UK nicht wörtlich): "
+            + ", ".join(sorted(at_risk)[:30])
+            + "\n\nGib Korrektur-ops als JSON."
+        )
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": _UK_TRANSLIT_SYSTEM}, {"role": "user", "content": user}],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=800,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = json.loads(raw, strict=False)
+        ops = data.get("ops") or []
+        applied = 0
+        for op in ops:
+            wrong = str(op.get("wrong") or "").strip()
+            correct = str(op.get("correct") or "").strip()
+            if not wrong or not correct or wrong == correct or len(wrong) < 2:
+                continue
+            if wrong in uk_blob:
+                result.title = result.title.replace(wrong, correct)
+                result.lead = result.lead.replace(wrong, correct)
+                result.card_lead = result.card_lead.replace(wrong, correct)
+                result.body = result.body.replace(wrong, correct)
+                applied += 1
+        if applied:
+            logger.info("uk translit repair: fixed %d garbled latin name(s)", applied)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("uk translit repair skipped: %s", exc)
+
+
 async def translate_from_german(
     title_de: str,
     lead_de: str,
@@ -411,6 +502,11 @@ async def translate_from_german(
                         _annotate_translation_uniqueness(retry, source_text=source_text, target_lang=target_lang, story_card=story_card)
                         if retry.uniqueness_passed or retry.uniqueness_pct >= result.uniqueness_pct:
                             result = retry
+                # 2026-06-20 Детерминированный фикс гарбленной транслитерации
+                # латинских имён в UK (Сюддойтшер Zeitung → Süddeutsche Zeitung).
+                # Промпт-правила протекают; этот пост-проход чинит в коде.
+                if _target_code == "uk":
+                    await _repair_uk_latin_names(result, source_text, provider, api_key, model)
                 return result
             if not _translation_error_retryable(result.error):
                 break

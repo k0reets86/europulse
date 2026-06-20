@@ -558,8 +558,26 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
             # длиннее primary, original_text = supporting, и выдумки из соседней
             # статьи считаются грунтованными (13091: «Gesundheitsminister James
             # Murray» из supporting выжил). Откат на original_text, если primary пуст.
-            _verify_primary = getattr(ctx.request, "primary_source_content", "") or ""
-            if len(_verify_primary.strip()) < 200:
+            # PRIMARY для сверки, по приоритету: (1) чистый primary из dossier
+            # (existing_payload._meta.source_dossier.primary.content — то, что
+            # реально нафетчил enricher), (2) поле primary_source_content из PHP,
+            # (3) откат на original_text (богатый блоб). Блоб содержит supporting,
+            # поэтому он — последний вариант: иначе выдумки соседних статей
+            # считаются грунтованными (13097 Pakistan/Putin, 13103 «101 vs 71»).
+            _verify_primary = ""
+            try:
+                _ep = getattr(ctx.request, "existing_payload", None) or {}
+                _dp = (((_ep.get("_meta") or {}).get("source_dossier") or {}).get("primary") or {})
+                _dpc = str(_dp.get("content") or "")
+                if len(_dpc.strip()) >= 200:
+                    _verify_primary = _dpc
+            except Exception:  # noqa: BLE001
+                pass
+            if not _verify_primary:
+                _psc = getattr(ctx.request, "primary_source_content", "") or ""
+                if len(_psc.strip()) >= 200:
+                    _verify_primary = _psc
+            if not _verify_primary:
                 _verify_primary = original_text
             _corrected = await verify_and_correct_german(
                 title=rewrite.title_de,

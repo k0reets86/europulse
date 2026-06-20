@@ -31,17 +31,68 @@ from openai import AsyncOpenAI  # noqa: E402
 # места/даты, которых НЕТ в источнике). Игнорирует стиль, оценки, перифраз,
 # избыточные атрибуции — иначе монитор шумит (verify правит и стиль).
 _JUDGE_SYSTEM = """Du bist Faktenprüfer. Vergleiche den ARTIKEL (Deutsch) mit der QUELLE
-(kann ukr/engl/dt sein). Melde NUR ECHTE ERFINDUNGEN: erfundene/widersprüchliche
-Personen+Funktionen, Zahlen/Opferzahlen, wörtliche Zitate, Ereignisse/Treffen,
-Orte, Daten — die in der QUELLE NICHT vorkommen oder ihr widersprechen.
+(kann ukr/engl/dt sein). Melde NUR ECHTE ERFINDUNGEN — mit hoher Sicherheit.
 
-IGNORIERE (KEINE Funde): redaktionelle Adjektive/Wertungen, Einordnung/Kontext,
-Paraphrase, redundante Quellenangaben (z. B. „Wie die FAZ berichtet" wenn Quelle FAZ),
-allgemein bekannte Fakten, Synonyme, Übersetzungsvarianten.
+MELDE NUR, wenn eine der beiden Bedingungen klar zutrifft:
+  (A) WIDERSPRUCH: Eine konkrete Angabe widerspricht der QUELLE (andere Opferzahl,
+      anderer Ort/Datum/Name, anderer Sprecher).
+  (B) ERFUNDEN: Eine konkrete, überprüfbare Behauptung (benannte Person + Handlung,
+      wörtliches Zitat, Zahl, Treffen/Ereignis), die in der QUELLE FEHLT UND auch
+      nach Allgemeinwissen nicht offensichtlich wahr ist.
+
+MELDE NICHT (das sind KEINE Erfindungen):
+  - biografische/Rollen-Beschreibungen, die real und mit der QUELLE vereinbar sind
+    (z. B. „früherer Bundesliga-Profi Matheus Cunha" — real und unstrittig);
+  - allgemein bekannte/unstrittige Fakten, auch wenn nicht wörtlich in der QUELLE;
+  - redaktionelle Adjektive/Wertungen, Einordnung, Paraphrase, Synonyme,
+    Übersetzungsvarianten, redundante Quellenangaben (z. B. „Wie die FAZ berichtet").
+  - Etwas, das nur „nicht wörtlich vorkommt" — bloße Abwesenheit reicht NICHT;
+    es muss erfunden ODER widersprüchlich sein.
+
+Im Zweifel NICHT melden — aber bei klarem Widerspruch oder klar erfundenem
+Eigennamen/Zitat/Zahl/Ereignis IMMER melden (keine Nachsicht dort).
 
 Antworte AUSSCHLIESSLICH mit JSON:
-{"fabrications": [{"claim": "<kurzes Zitat>", "why": "<warum nicht gedeckt>"}]}
+{"fabrications": [{"claim": "<kurzes Zitat>", "why": "<Widerspruch oder erfunden — kurz>"}]}
 Keine echten Erfindungen → {"fabrications": []}."""
+
+
+_TRANSLIT_JUDGE_SYSTEM = """Du prüfst ukrainische Textfragmente auf KAPUTTE Transliteration
+lateinischer Eigennamen. Ein Fragment ist KAPUTT, wenn der kyrillische Teil eine
+phonetische Transliteration eines lateinischen Namens ist (z. B. «Ргайніше Post» =
+Rheinische Post; «Сюддойтшер Zeitung» = Süddeutsche Zeitung) — also ein zerbrochener
+Name aus halb-Kyrillisch + halb-Latein.
+
+NICHT kaputt (= OK): ein normales ukrainisches Wort gefolgt von einem korrekt
+lateinisch belassenen Eigennamen/Marke/Ort/Genre (z. B. «Поліція Cambridgeshire»,
+«Речник Amazon», «Проєкт Brakestop», «Після Rock»). Hier ist der kyrillische Teil ein
+echtes ukrainisches Wort, kein transliterierter Namensteil.
+
+Gegeben eine Liste von Fragmenten. Antworte AUSSCHLIESSLICH mit JSON:
+{"garbled": ["<nur die wirklich kaputten Fragmente, wörtlich aus der Liste>"]}
+Keine kaputten → {"garbled": []}."""
+
+
+async def _judge_translit(fragments: list[str], key: str) -> list[str]:
+    if not fragments:
+        return []
+    try:
+        client = AsyncOpenAI(api_key=key, base_url="https://api.deepseek.com/v1")
+        user = "Fragmente:\n" + "\n".join(f"- {f}" for f in fragments) + "\n\nWelche sind kaputt? JSON."
+        resp = await client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": _TRANSLIT_JUDGE_SYSTEM}, {"role": "user", "content": user}],
+            response_format={"type": "json_object"}, temperature=0.0, max_tokens=400,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = json.loads(raw, strict=False)
+        g = data.get("garbled") or []
+        return [str(x) for x in g if str(x).strip()]
+    except Exception:  # noqa: BLE001
+        return fragments  # при ошибке судьи — не теряем сигнал
 
 
 async def _judge_hallucinations(article: str, primary: str, supporting: str, key: str) -> list[dict]:
@@ -156,7 +207,7 @@ async def main() -> int:
     key = _deepseek_key()
     if not key:
         return 1
-    raw = _wp(["eval-file", SAMPLE_PHP], 150)
+    raw = _wp(["eval-file", SAMPLE_PHP], 600)
     try:
         items = json.loads(raw or "[]")
     except json.JSONDecodeError:
@@ -164,7 +215,7 @@ async def main() -> int:
     if not items:
         return 0
 
-    sem = asyncio.Semaphore(4)
+    sem = asyncio.Semaphore(5)
     hall: list[tuple[int, list]] = []
     translit: list[tuple[int, list]] = []
     checked = 0
@@ -175,7 +226,11 @@ async def main() -> int:
             checked += 1
             tr = _translit_risk((it.get("de_title", "") + " " + it.get("de_body", "")), it.get("uk", ""))
             if tr:
-                translit.append((it.get("qid"), tr))
+                # судья отсеивает легитимную латиницу (Поліція Cambridgeshire) от
+                # реального гарбла (Ргайніше Post)
+                confirmed = await _judge_translit(tr, key)
+                if confirmed:
+                    translit.append((it.get("qid"), confirmed))
             primary = it.get("primary", "")
             if _real_text_len(primary) >= 350:
                 article = "\n".join([it.get("de_title", ""), it.get("de_lead", ""),

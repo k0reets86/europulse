@@ -4,11 +4,13 @@
  * Вывод: JSON-массив {qid, de_title, de_lead, de_card, de_body, uk, primary, supporting}.
  * Запускается через `wp eval-file` из daily_audit.py.
  */
-$limit = (int) (getenv('EPV2_AUDIT_SAMPLE') ?: 12);
+// По умолчанию — ВСЕ статьи за сутки (оператор: «проверяй все за день»).
+// Env EPV2_AUDIT_SAMPLE ограничивает (для ручных тестов). Потолок 300 — backstop.
+$limit = (int) (getenv('EPV2_AUDIT_SAMPLE') ?: 300);
 $rows = $GLOBALS['wpdb']->get_results(
     "SELECT id, ai_payload FROM ep_epv2_queue
      WHERE state='published' AND updated_at >= (NOW() - INTERVAL 24 HOUR)
-     ORDER BY id DESC LIMIT 60"
+     ORDER BY id DESC LIMIT 300"
 );
 $out = [];
 foreach ($rows as $r) {

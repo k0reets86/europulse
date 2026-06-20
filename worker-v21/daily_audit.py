@@ -22,9 +22,49 @@ import sys
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
-from epv2_worker.verifier import verify_and_correct_german, _real_text_len  # noqa: E402
+from epv2_worker.verifier import _real_text_len  # noqa: E402
 
 import httpx  # noqa: E402
+from openai import AsyncOpenAI  # noqa: E402
+
+# Узкий judge: только ПОДТВЕРЖДЁННЫЕ выдумки (имена/роли/числа/цитаты/события/
+# места/даты, которых НЕТ в источнике). Игнорирует стиль, оценки, перифраз,
+# избыточные атрибуции — иначе монитор шумит (verify правит и стиль).
+_JUDGE_SYSTEM = """Du bist Faktenprüfer. Vergleiche den ARTIKEL (Deutsch) mit der QUELLE
+(kann ukr/engl/dt sein). Melde NUR ECHTE ERFINDUNGEN: erfundene/widersprüchliche
+Personen+Funktionen, Zahlen/Opferzahlen, wörtliche Zitate, Ereignisse/Treffen,
+Orte, Daten — die in der QUELLE NICHT vorkommen oder ihr widersprechen.
+
+IGNORIERE (KEINE Funde): redaktionelle Adjektive/Wertungen, Einordnung/Kontext,
+Paraphrase, redundante Quellenangaben (z. B. „Wie die FAZ berichtet" wenn Quelle FAZ),
+allgemein bekannte Fakten, Synonyme, Übersetzungsvarianten.
+
+Antworte AUSSCHLIESSLICH mit JSON:
+{"fabrications": [{"claim": "<kurzes Zitat>", "why": "<warum nicht gedeckt>"}]}
+Keine echten Erfindungen → {"fabrications": []}."""
+
+
+async def _judge_hallucinations(article: str, primary: str, supporting: str, key: str) -> list[dict]:
+    try:
+        client = AsyncOpenAI(api_key=key, base_url="https://api.deepseek.com/v1")
+        user = ("QUELLE:\n" + (primary or "")[:9000]
+                + (("\n\nHINTERGRUND:\n" + supporting[:2000]) if supporting else "")
+                + "\n\nARTIKEL:\n" + (article or "")[:5000]
+                + "\n\nGib erfundene Fakten als JSON.")
+        resp = await client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": _JUDGE_SYSTEM}, {"role": "user", "content": user}],
+            response_format={"type": "json_object"}, temperature=0.0, max_tokens=700,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = json.loads(raw, strict=False)
+        fab = data.get("fabrications") or []
+        return [f for f in fab if isinstance(f, dict) and f.get("claim")]
+    except Exception:  # noqa: BLE001
+        return []
 
 WP_CLI = os.getenv("EPV2_WP_CLI", "/usr/local/bin/wp")
 WP_PATH = os.getenv("EPV2_WP_PATH", "/var/www/europulse/public")
@@ -38,7 +78,9 @@ HALL_FLAG_THRESHOLD = 2  # сколько правок verifier'а считат�
 #     (расколотое имя: «Сюддойтшер Zeitung»);
 #  2) camelCase-бренд из DE (YouTube, OpenAI, ProSieben), исчезнувший из UK
 #     (вероятно транслитерирован: «ИоуТубе»).
-_UK_MIXED_GARBLE = re.compile(r"[А-ЯЁІЇЄҐ][а-яёіїєґ']{2,}\s+[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÿ]{2,}")
+# Латинская часть = Заглавная+строчные (Zeitung), НЕ all-caps аббревиатура (ZDF,
+# NATO легитимно остаются латиницей рядом с кириллицей).
+_UK_MIXED_GARBLE = re.compile(r"[А-ЯЁІЇЄҐ][а-яёіїєґ']{2,}\s+[A-ZÀ-ÖØ-Þ][a-zà-ÿ]{2,}")
 _LATIN_CAMEL = re.compile(r"\b[A-ZÀ-ÖØ-Þ][a-zà-ÿ]+[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÿ]+\b")
 
 
@@ -136,15 +178,11 @@ async def main() -> int:
                 translit.append((it.get("qid"), tr))
             primary = it.get("primary", "")
             if _real_text_len(primary) >= 350:
-                r = await verify_and_correct_german(
-                    title=it.get("de_title", ""), lead=it.get("de_lead", ""),
-                    card_lead=it.get("de_card", ""), body=it.get("de_body", ""),
-                    primary_source=primary, supporting_source=it.get("supporting", ""),
-                    provider="deepseek", api_key=key, model="deepseek-chat",
-                )
-                corr = (r or {}).get("corrections") or []
-                if len(corr) >= HALL_FLAG_THRESHOLD:
-                    hall.append((it.get("qid"), corr[:4]))
+                article = "\n".join([it.get("de_title", ""), it.get("de_lead", ""),
+                                     it.get("de_card", ""), it.get("de_body", "")])
+                fab = await _judge_hallucinations(article, primary, it.get("supporting", ""), key)
+                if fab:
+                    hall.append((it.get("qid"), [f.get("claim", "")[:90] for f in fab[:4]]))
 
     await asyncio.gather(*[check(it) for it in items])
 

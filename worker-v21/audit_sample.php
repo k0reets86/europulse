@@ -18,6 +18,22 @@ foreach ($rows as $r) {
     $de = $p['languages']['de'] ?? [];
     $uk = $p['languages']['uk'] ?? [];
     $primary = $p['_meta']['source_dossier']['primary']['content'] ?? '';
+    // 2026-06-20 Сверять надо по ЖИВОМУ источнику, а не по сохранённому dossier
+    // (он бывает обрезан → ложные флаги: 13138 «220.000», 13149 «zynisch» были
+    // в реальной статье, но не в dossier). Фетчим свежий primary нашим ридером
+    // (JSON-LD/headless), берём если он содержательнее.
+    $purl = (string) ($p['_meta']['source_dossier']['primary']['url'] ?? '');
+    if ($purl === '') {
+        $purl = (string) $GLOBALS['wpdb']->get_var($GLOBALS['wpdb']->prepare(
+            "SELECT original_url FROM ep_epv2_queue WHERE id=%d", $r->id));
+    }
+    if ($purl !== '' && class_exists('EPV2_HTML_Reader') && filter_var($purl, FILTER_VALIDATE_URL)) {
+        try {
+            $doc = EPV2_HTML_Reader::fetch_document($purl);
+            $live = (string) ($doc['content'] ?? '');
+            if (mb_strlen($live) > mb_strlen($primary)) $primary = $live;
+        } catch (Throwable $e) { /* оставляем dossier */ }
+    }
     $supp = '';
     foreach (($p['_meta']['source_dossier']['supporting'] ?? []) as $s) {
         $c = $s['content'] ?? '';

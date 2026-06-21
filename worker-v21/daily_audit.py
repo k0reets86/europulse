@@ -68,31 +68,54 @@ lateinisch belassenen Eigennamen/Marke/Ort/Genre (z. B. «Поліція Cambrid
 «Речник Amazon», «Проєкт Brakestop», «Після Rock»). Hier ist der kyrillische Teil ein
 echtes ukrainisches Wort, kein transliterierter Namensteil.
 
-Gegeben eine Liste von Fragmenten. Antworte AUSSCHLIESSLICH mit JSON:
-{"garbled": ["<nur die wirklich kaputten Fragmente, wörtlich aus der Liste>"]}
+Für jedes KAPUTTE Fragment gib das exakte fehlerhafte Fragment ("wrong", wörtlich
+aus der Liste) und die KORREKTE lateinische Schreibweise ("correct", der ganze Name
+in Latein). Antworte AUSSCHLIESSLICH mit JSON:
+{"garbled": [{"wrong": "<fragment wörtlich>", "correct": "<korrekte Latein-Schreibweise>"}]}
 Keine kaputten → {"garbled": []}."""
 
 
-async def _judge_translit(fragments: list[str], key: str) -> list[str]:
+async def _judge_translit(fragments: list[str], key: str) -> list[dict]:
+    """Возвращает [{wrong, correct}] только для реально гарбленных фрагментов."""
     if not fragments:
         return []
     try:
         client = AsyncOpenAI(api_key=key, base_url="https://api.deepseek.com/v1")
-        user = "Fragmente:\n" + "\n".join(f"- {f}" for f in fragments) + "\n\nWelche sind kaputt? JSON."
+        user = "Fragmente:\n" + "\n".join(f"- {f}" for f in fragments) + "\n\nWelche sind kaputt? Mit Korrektur. JSON."
         resp = await client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": _TRANSLIT_JUDGE_SYSTEM}, {"role": "user", "content": user}],
-            response_format={"type": "json_object"}, temperature=0.0, max_tokens=400,
+            response_format={"type": "json_object"}, temperature=0.0, max_tokens=500,
         )
         raw = (resp.choices[0].message.content or "").strip()
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
             data = json.loads(raw, strict=False)
-        g = data.get("garbled") or []
-        return [str(x) for x in g if str(x).strip()]
+        out = []
+        for g in (data.get("garbled") or []):
+            if isinstance(g, dict):
+                w = str(g.get("wrong") or "").strip()
+                c = str(g.get("correct") or "").strip()
+                if w and c and w != c:
+                    out.append({"wrong": w, "correct": c})
+        return out
     except Exception:  # noqa: BLE001
-        return fragments  # при ошибке судьи — не теряем сигнал
+        return []  # при ошибке судьи — не авто-фиксим (безопасно)
+
+
+def _apply_translit_fix(post_id: int, qid: int, wrong: str, correct: str) -> bool:
+    """Детерминированно чинит гарбл в живом UK-посте + payload через wp eval-file."""
+    env = dict(os.environ)
+    env.update({"EPV2_FIX_POST": str(post_id), "EPV2_FIX_QID": str(qid),
+                "EPV2_FIX_WRONG": wrong, "EPV2_FIX_CORRECT": correct})
+    try:
+        applier = os.path.join(os.path.dirname(__file__), "apply_translit_fix.php")
+        r = subprocess.run([WP_CLI, "--path=" + WP_PATH, "--allow-root", "eval-file", applier],
+                           capture_output=True, text=True, timeout=60, env=env)
+        return "FIXED" in (r.stdout or "")
+    except Exception:  # noqa: BLE001
+        return False
 
 
 async def _judge_hallucinations(article: str, primary: str, supporting: str, key: str) -> list[dict]:
@@ -227,10 +250,16 @@ async def main() -> int:
             tr = _translit_risk((it.get("de_title", "") + " " + it.get("de_body", "")), it.get("uk", ""))
             if tr:
                 # судья отсеивает легитимную латиницу (Поліція Cambridgeshire) от
-                # реального гарбла (Ргайніше Post)
+                # реального гарбла (Ргайніше Post → Rheinische Post) и даёт correct.
                 confirmed = await _judge_translit(tr, key)
-                if confirmed:
-                    translit.append((it.get("qid"), confirmed))
+                fixed_names = []
+                for c in confirmed:
+                    ok = await asyncio.to_thread(
+                        _apply_translit_fix, int(it.get("post_id") or 0),
+                        int(it.get("qid") or 0), c["wrong"], c["correct"])
+                    fixed_names.append(f"{c['wrong']}→{c['correct']}" + ("" if ok else " [НЕ применено]"))
+                if fixed_names:
+                    translit.append((it.get("qid"), fixed_names))
             primary = it.get("primary", "")
             if _real_text_len(primary) >= 350:
                 article = "\n".join([it.get("de_title", ""), it.get("de_lead", ""),
@@ -243,14 +272,14 @@ async def main() -> int:
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [f"📊 EuroPulse аудит достоверности {ts}",
-             f"Проверено: {checked} | потенц. галлюцинации: {len(hall)} | транслит-риски: {len(translit)}"]
+             f"Проверено: {checked} | галлюцинации (на ревью): {len(hall)} | транслит авто-исправлено: {len(translit)}"]
     if hall:
-        lines.append("\n⚠️ На заметку (verifier нашёл бы правки):")
-        for qid, corr in hall[:6]:
+        lines.append("\n⚠️ Возможные выдумки — НУЖНА проверка по источнику (не авто-правятся):")
+        for qid, corr in hall[:8]:
             lines.append(f"  #{qid}: {corr[0][:90]}")
     if translit:
-        lines.append("\n🔤 Транслит-риски UK (латинские имена исчезли):")
-        for qid, names in translit[:6]:
+        lines.append("\n🔧 Транслит-баги UK — ИСПРАВЛЕНЫ автоматически:")
+        for qid, names in translit[:8]:
             lines.append(f"  #{qid}: {', '.join(names[:3])}")
     if not hall and not translit:
         lines.append("\n✅ Проблем не выявлено.")

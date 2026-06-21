@@ -8,7 +8,7 @@
 // Env EPV2_AUDIT_SAMPLE ограничивает (для ручных тестов). Потолок 300 — backstop.
 $limit = (int) (getenv('EPV2_AUDIT_SAMPLE') ?: 300);
 $rows = $GLOBALS['wpdb']->get_results(
-    "SELECT id, ai_payload FROM ep_epv2_queue
+    "SELECT id, post_id, ai_payload FROM ep_epv2_queue
      WHERE state='published' AND updated_at >= (NOW() - INTERVAL 24 HOUR)
      ORDER BY id DESC LIMIT 300"
 );
@@ -48,6 +48,7 @@ foreach ($rows as $r) {
     if (empty($de['body']) && empty($de['content'])) continue;
     $out[] = [
         'qid'       => (int) $r->id,
+        'post_id'   => (int) $r->post_id,
         'de_title'  => (string) ($de['title'] ?? ''),
         'de_lead'   => (string) ($de['lead'] ?? ''),
         'de_card'   => (string) ($de['card_lead'] ?? ''),

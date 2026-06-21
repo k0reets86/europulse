@@ -41,10 +41,14 @@ foreach ($rows as $r) {
         $c = $s['content'] ?? '';
         if (mb_strlen($c) >= 200) $supp .= ($supp ? "\n---\n" : '') . mb_substr($c, 0, 2500);
     }
-    $ukblob = '';
-    foreach (['lead','card_lead','body','content'] as $k) {
-        if (!empty($uk[$k]) && is_string($uk[$k])) $ukblob .= $uk[$k] . "\n";
-    }
+    $en = $p['languages']['en'] ?? [];
+    $blob = function ($x) {
+        $o = '';
+        foreach (['lead','card_lead','body','content'] as $k) {
+            if (!empty($x[$k]) && is_string($x[$k])) $o .= $x[$k] . "\n";
+        }
+        return trim(preg_replace('/\s+/u', ' ', wp_strip_all_tags($o)));
+    };
     if (empty($de['body']) && empty($de['content'])) continue;
     $out[] = [
         'qid'       => (int) $r->id,
@@ -53,7 +57,8 @@ foreach ($rows as $r) {
         'de_lead'   => (string) ($de['lead'] ?? ''),
         'de_card'   => (string) ($de['card_lead'] ?? ''),
         'de_body'   => (string) ($de['body'] ?? $de['content'] ?? ''),
-        'uk'        => trim(preg_replace('/\s+/u', ' ', wp_strip_all_tags($ukblob))),
+        'uk'        => $blob($uk),
+        'en'        => $blob($en),
         'primary'   => mb_substr($primary, 0, 9000),
         'supporting'=> mb_substr($supp, 0, 5000),
     ];

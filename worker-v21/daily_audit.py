@@ -118,6 +118,56 @@ def _apply_translit_fix(post_id: int, qid: int, wrong: str, correct: str) -> boo
         return False
 
 
+_FIDELITY_JUDGE_SYSTEM = """Du prüfst die TREUE von Übersetzungen. Das DEUTSCHE (de) ist
+das Master-Original; UK und EN sind Übersetzungen davon.
+
+Melde NUR ECHTE TREUE-DEFEKTE:
+  - WEGGELASSEN/VERFÄLSCHT: ein Fakt/Zahl/Name/Funktion/Rolle aus de fehlt oder ist
+    falsch in der Übersetzung (z. B. de „Der Gouverneur der Region Tjumen, Moor" →
+    en „Tyumen Moor" ohne „governor/region"; de „der polnische Präsident X" → en
+    „Polish X" ohne „President").
+  - ABSCHNITT: Übersetzung deutlich kürzer, ganze Aussagen/Sätze fehlen.
+  - SPRACHE: deutsche Wörter im UK/EN, russische Wörter im UK.
+  - SINNVERLUST: klarer Bedeutungs-/Konnotationsverlust (z. B. Wortspiel/Pejorativ
+    völlig neutralisiert).
+
+IGNORIERE (KEINE Defekte): legitime Paraphrase, Stilvarianten, Wortstellung,
+Synonyme, kleinere idiomatische Anpassungen, korrekt belassene Latein-Eigennamen.
+
+Antworte AUSSCHLIESSLICH mit JSON:
+{"defects": [{"lang": "uk|en", "severity": "high|medium|low", "example": "<kurzes Zitat>", "problem": "<was fehlt/falsch>"}]}
+Treu → {"defects": []}."""
+
+
+async def _judge_translation_fidelity(de: str, uk: str, en: str, key: str) -> list[dict]:
+    if not de or (not uk and not en):
+        return []
+    try:
+        client = AsyncOpenAI(api_key=key, base_url="https://api.deepseek.com/v1")
+        user = ("DEUTSCH (Master):\n" + de[:4000]
+                + "\n\nUK:\n" + (uk or "—")[:4000]
+                + "\n\nEN:\n" + (en or "—")[:4000]
+                + "\n\nTreue-Defekte als JSON.")
+        resp = await client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": _FIDELITY_JUDGE_SYSTEM}, {"role": "user", "content": user}],
+            response_format={"type": "json_object"}, temperature=0.0, max_tokens=700,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = json.loads(raw, strict=False)
+        out = []
+        for d in (data.get("defects") or []):
+            if isinstance(d, dict) and d.get("problem") and d.get("severity") in ("high", "medium"):
+                out.append({"lang": str(d.get("lang") or "?"), "severity": d["severity"],
+                            "example": str(d.get("example") or "")[:80], "problem": str(d.get("problem") or "")[:90]})
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
 async def _judge_hallucinations(article: str, primary: str, supporting: str, key: str) -> list[dict]:
     try:
         client = AsyncOpenAI(api_key=key, base_url="https://api.deepseek.com/v1")
@@ -241,6 +291,7 @@ async def main() -> int:
     sem = asyncio.Semaphore(5)
     hall: list[tuple[int, list]] = []
     translit: list[tuple[int, list]] = []
+    fidelity: list[tuple[int, list]] = []
     checked = 0
 
     async def check(it: dict) -> None:
@@ -267,12 +318,19 @@ async def main() -> int:
                 fab = await _judge_hallucinations(article, primary, it.get("supporting", ""), key)
                 if fab:
                     hall.append((it.get("qid"), [f.get("claim", "")[:90] for f in fab[:4]]))
+            # ВЕРНОСТЬ ПЕРЕВОДА (DE↔UK, DE↔EN): пропуски фактов/ролей, обрезка,
+            # утечка языка, потеря смысла. Алерт оператору (не авто-правим — риск).
+            de_full = "\n".join([it.get("de_title", ""), it.get("de_lead", ""),
+                                 it.get("de_card", ""), it.get("de_body", "")])
+            defects = await _judge_translation_fidelity(de_full, it.get("uk", ""), it.get("en", ""), key)
+            if defects:
+                fidelity.append((it.get("qid"), defects))
 
     await asyncio.gather(*[check(it) for it in items])
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [f"📊 EuroPulse аудит достоверности {ts}",
-             f"Проверено: {checked} | галлюцинации (на ревью): {len(hall)} | транслит авто-исправлено: {len(translit)}"]
+             f"Проверено: {checked} | галлюцинации: {len(hall)} | транслит исправлено: {len(translit)} | перевод-дефекты: {len(fidelity)}"]
     if hall:
         lines.append("\n⚠️ Возможные выдумки — НУЖНА проверка по источнику (не авто-правятся):")
         for qid, corr in hall[:8]:
@@ -281,7 +339,12 @@ async def main() -> int:
         lines.append("\n🔧 Транслит-баги UK — ИСПРАВЛЕНЫ автоматически:")
         for qid, names in translit[:8]:
             lines.append(f"  #{qid}: {', '.join(names[:3])}")
-    if not hall and not translit:
+    if fidelity:
+        lines.append("\n📝 Дефекты верности перевода — на ревью (пропуски/обрезка/язык):")
+        for qid, defs in fidelity[:8]:
+            d = defs[0]
+            lines.append(f"  #{qid} [{d['lang']}/{d['severity']}]: {d['problem']}")
+    if not hall and not translit and not fidelity:
         lines.append("\n✅ Проблем не выявлено.")
     report = "\n".join(lines)
     _log(report + "\n" + "-" * 40)

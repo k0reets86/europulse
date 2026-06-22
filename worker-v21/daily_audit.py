@@ -68,10 +68,16 @@ lateinisch belassenen Eigennamen/Marke/Ort/Genre (z. B. «Поліція Cambrid
 «Речник Amazon», «Проєкт Brakestop», «Після Rock»). Hier ist der kyrillische Teil ein
 echtes ukrainisches Wort, kein transliterierter Namensteil.
 
-Für jedes KAPUTTE Fragment gib das exakte fehlerhafte Fragment ("wrong", wörtlich
-aus der Liste) und die KORREKTE lateinische Schreibweise ("correct", der ganze Name
-in Latein). Antworte AUSSCHLIESSLICH mit JSON:
-{"garbled": [{"wrong": "<fragment wörtlich>", "correct": "<korrekte Latein-Schreibweise>"}]}
+Für jedes KAPUTTE Fragment gib "wrong" (wörtlich aus der Liste) und "correct".
+KORREKTUR-REGEL nach Entitätstyp:
+  - PERSONENNAMEN → ukrainische KYRILLISCHE Transliteration (NICHT Latein!):
+    «Герберта Quandt» → «Герберта Квандта», «Сюддойтшер Quandt» → «Зюддойтер»…
+    NEIN: für Personen ist Latein FALSCH; Ukrainisch schreibt Personennamen kyrillisch.
+    Behalte die im Fragment sichtbare Fall-Endung (Genitiv «-а», Dativ «-і» usw.).
+  - MARKEN / PUBLIKATIONEN / PRODUKTE / ORGANISATIONEN / ORTE → LATEINISCH:
+    «Сюддойтшер Zeitung» → «Süddeutsche Zeitung», «Факебоок» → «Facebook».
+Antworte AUSSCHLIESSLICH mit JSON:
+{"garbled": [{"wrong": "<fragment wörtlich>", "correct": "<korrekt: Personen kyrillisch, Marken lateinisch>"}]}
 Keine kaputten → {"garbled": []}."""
 
 
@@ -126,6 +132,11 @@ Melde NUR ECHTE TREUE-DEFEKTE:
     falsch in der Übersetzung (z. B. de „Der Gouverneur der Region Tjumen, Moor" →
     en „Tyumen Moor" ohne „governor/region"; de „der polnische Präsident X" → en
     „Polish X" ohne „President").
+  - WER-MACHT-WAS (Verb/Rolle/Agent vertauscht): die handelnde Person oder die
+    Handlung selbst stimmt nicht mit de überein. Prüfe Verben/Rollen genau:
+    «bereitete den Ausgleich vor» (assistierte) ≠ «erzielte/schoss» (traf selbst);
+    «gewann» ≠ «verlor»; «griff an» ≠ «wurde angegriffen»; «sagte» ≠ «bestritt»;
+    Täter ↔ Opfer, Sieger ↔ Verlierer. Schon EIN solcher Tausch ist ein Defekt.
   - ABSCHNITT: Übersetzung deutlich kürzer, ganze Aussagen/Sätze fehlen.
   - SPRACHE: deutsche Wörter im UK/EN, russische Wörter im UK.
   - SINNVERLUST: klarer Bedeutungs-/Konnotationsverlust (z. B. Wortspiel/Pejorativ

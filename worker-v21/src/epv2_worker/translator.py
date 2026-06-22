@@ -328,22 +328,25 @@ def _latin_name_candidates(text: str) -> set[str]:
     return cands
 
 
-_UK_TRANSLIT_SYSTEM = """Du korrigierst NUR falsch ins Kyrillische transliterierte lateinische
-Eigennamen, Marken, Publikations-/Produkt-/Organisationsnamen in einem UKRAINISCHEN Text.
+_UK_TRANSLIT_SYSTEM = """Du korrigierst NUR falsch geschriebene Eigennamen (Misch-Schrift /
+kaputte Transliteration) in einem UKRAINISCHEN Text. Du bekommst das DEUTSCHE Original
+und die UKRAINISCHE Übersetzung.
 
-Du bekommst das DEUTSCHE Original (mit korrekter lateinischer Schreibweise) und die
-UKRAINISCHE Übersetzung. Finde Namen, die in der UK-Version kyrillisch transliteriert
-oder als Misch-Schrift-Kauderwelsch erscheinen, z. B.:
-  «Сюддойтшер Zeitung» → «Süddeutsche Zeitung»
-  «Факебоок» → «Facebook», «ИоуТубе» → «YouTube»
-  «Кіркуе ду Солайл» → «Cirque du Soleil», «Дойтше Велле» → «Deutsche Welle»
+KORREKTUR-REGEL nach Entitätstyp:
+  - MARKEN / PUBLIKATIONEN / PRODUKTE / ORGANISATIONEN / PLATTFORMEN → LATEINISCH
+    (Schreibweise aus dem DE-Original):
+      «Сюддойтшер Zeitung» → «Süddeutsche Zeitung»; «Факебоок» → «Facebook»;
+      «ИоуТубе» → «YouTube»; «Дойтше Велле» → «Deutsche Welle».
+  - PERSONENNAMEN → ukrainische KYRILLISCHE Transliteration (NICHT Latein!):
+      «Герберта Quandt» → «Герберта Квандта»; «Штефан Quandt» → «Штефан Квандт»;
+      «Усмана Dembélé» → «Усмана Дембеле». Behalte die sichtbare Fall-Endung.
+    Für Personen ist eine lateinische Schreibweise im UK-Text FALSCH.
 
-Regel: solche Namen behalten die LATEINISCHE Schreibweise aus dem DEUTSCHEN Original
-(bzw. die etablierte korrekte Form). Übliche übersetzte Wörter, Ländernamen, Personen,
-die korrekt ukrainisiert sind (z. B. «Трамп», «Зеленський», «НАТО»), NICHT anfassen.
+NICHT anfassen: bereits korrekte Namen (lateinische Marken wie «YouTube», korrekt
+kyrillische Personen wie «Трамп», «Зеленський»), übliche übersetzte Wörter.
 
 Antworte AUSSCHLIESSLICH mit JSON:
-{"ops": [{"wrong": "<exakt wie im UK-Text>", "correct": "<korrekte lateinische Schreibweise>"}]}
+{"ops": [{"wrong": "<exakt wie im UK-Text>", "correct": "<Person kyrillisch, Marke lateinisch>"}]}
 Keine Funde → {"ops": []}."""
 
 

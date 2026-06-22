@@ -225,6 +225,33 @@ SAMPLE_PHP = os.path.join(os.path.dirname(__file__), "audit_sample.php")
 BOT_ENV = "/etc/epv2-bot.env"
 REPORT_LOG = "/var/log/epv2-audit.log"
 HALL_FLAG_THRESHOLD = 2  # сколько правок verifier'а считать «на заметку»
+# Whitelist подтверждённо-ложных срабатываний: список {qid, kind, key}.
+# Если флаг совпал (qid + kind + key-подстрока в тексте дефекта) — подавляем.
+# Пополняется вручную/ежедневным ревью, когда флаг подтверждён ложным.
+WHITELIST_FILE = os.path.join(os.path.dirname(__file__), "audit_whitelist.json")
+
+
+def _load_whitelist() -> list[dict]:
+    try:
+        with open(WHITELIST_FILE) as f:
+            data = json.load(f)
+            return [e for e in data if isinstance(e, dict) and e.get("qid") and e.get("key")]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _is_whitelisted(wl: list[dict], qid, kind: str, text: str) -> bool:
+    t = (text or "").lower()
+    for e in wl:
+        if int(e.get("qid") or 0) != int(qid or 0) or str(e.get("kind") or "") != kind:
+            continue
+        k = str(e.get("key") or "")
+        # key="*" → подавить ВСЕ флаги этого типа для qid (статья проверена-чиста,
+        # опубликованный контент не меняется → пере-флагать бессмысленно);
+        # иначе — подстрочный матч конкретного дефекта.
+        if k == "*" or (k and k.lower() in t):
+            return True
+    return False
 
 # Гарбл-сигналы (точные, чтобы не шуметь на немецких нарицательных):
 #  1) в UK капитализированное КИРИЛЛИЧЕСКОЕ слово, за которым сразу ЛАТИНСКОЕ
@@ -317,6 +344,7 @@ async def main() -> int:
     if not items:
         return 0
 
+    wl = _load_whitelist()
     sem = asyncio.Semaphore(5)
     hall: list[tuple[int, list]] = []
     translit: list[tuple[int, list]] = []
@@ -345,6 +373,7 @@ async def main() -> int:
                 article = "\n".join([it.get("de_title", ""), it.get("de_lead", ""),
                                      it.get("de_card", ""), it.get("de_body", "")])
                 fab = await _judge_hallucinations(article, primary, it.get("supporting", ""), key)
+                fab = [f for f in fab if not _is_whitelisted(wl, it.get("qid"), "hallucination", f.get("claim", ""))]
                 if fab:
                     hall.append((it.get("qid"), [f.get("claim", "")[:90] for f in fab[:4]]))
             # ВЕРНОСТЬ ПЕРЕВОДА (DE↔UK, DE↔EN): пропуски фактов/ролей, обрезка,
@@ -352,6 +381,9 @@ async def main() -> int:
             de_full = "\n".join([it.get("de_title", ""), it.get("de_lead", ""),
                                  it.get("de_card", ""), it.get("de_body", "")])
             defects = await _judge_translation_fidelity(de_full, it.get("uk", ""), it.get("en", ""), key)
+            defects = [d for d in defects
+                       if not _is_whitelisted(wl, it.get("qid"), "fidelity",
+                                              (d.get("example", "") + " " + d.get("problem", "")))]
             if defects:
                 fidelity.append((it.get("qid"), defects))
 

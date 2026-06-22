@@ -93,6 +93,43 @@ Antworte AUSSCHLIESSLICH mit einem JSON-Objekt:
 {"title": "...", "lead": "...", "card_lead": "...", "body": "...", "corrections": ["kurze Liste der entfernten/korrigierten Fakten"]}"""
 
 
+import difflib
+
+
+def _translit_agree(a: str, b: str) -> bool:
+    """Согласие двух транслитераций со скидкой на падежные окончания."""
+    norm = lambda s: re.sub(r"[^\w]", "", (s or "").lower())
+    na, nb = norm(a), norm(b)
+    if not na or not nb:
+        return False
+    return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.80
+
+
+async def verify_transliteration(latin: str, cyrillic: str, provider: str, api_key: str, model: str) -> bool:
+    """СТРАХОВКА правильной транслитерации (как verify для галлюцинаций): независимо
+    транслитерируем латинское имя в укр. кириллицу и сверяем с предложенной формой.
+    True только при согласии → иначе вызывающий оставит ЛАТИНИЦУ (безопасно, без гарбла)."""
+    latin = (latin or "").strip()
+    cyrillic = (cyrillic or "").strip()
+    if not latin or not cyrillic:
+        return False
+    try:
+        client = _build_client(provider, api_key)
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Transliteriere den folgenden Eigennamen in standard-ukrainische kyrillische Schreibweise (Personennamen). Gib NUR die kyrillische Form aus — kein Wort mehr, keine Anführungszeichen, keine Erklärung."},
+                {"role": "user", "content": latin},
+            ],
+            temperature=0.0,
+            max_tokens=24,
+        )
+        independent = (resp.choices[0].message.content or "").strip()
+        return _translit_agree(independent, cyrillic)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _build_client(provider: str, api_key: str) -> AsyncOpenAI:
     if provider == "deepseek":
         return AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")

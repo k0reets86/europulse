@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 
 from openai import AsyncOpenAI
+from .verifier import verify_transliteration
 
 from .openai_compat import (
     completion_cached_tokens,
@@ -345,8 +346,10 @@ KORREKTUR-REGEL nach Entitätstyp:
 NICHT anfassen: bereits korrekte Namen (lateinische Marken wie «YouTube», korrekt
 kyrillische Personen wie «Трамп», «Зеленський»), übliche übersetzte Wörter.
 
-Antworte AUSSCHLIESSLICH mit JSON:
-{"ops": [{"wrong": "<exakt wie im UK-Text>", "correct": "<Person kyrillisch, Marke lateinisch>"}]}
+Gib pro Fund: "wrong" (wörtlich im UK-Text), "type" ("person"|"brand"),
+"latin" (korrekte lateinische Schreibweise) und bei Personen "cyrillic" (ukr.
+kyrillische Form mit Fall-Endung). Antworte AUSSCHLIESSLICH mit JSON:
+{"ops": [{"wrong": "...", "type": "person|brand", "latin": "...", "cyrillic": "..."}]}
 Keine Funde → {"ops": []}."""
 
 
@@ -388,7 +391,17 @@ async def _repair_uk_latin_names(
         applied = 0
         for op in ops:
             wrong = str(op.get("wrong") or "").strip()
-            correct = str(op.get("correct") or "").strip()
+            latin = str(op.get("latin") or op.get("correct") or "").strip()
+            cyr = str(op.get("cyrillic") or "").strip()
+            typ = str(op.get("type") or "brand").strip().lower()
+            # СТРАХОВКА: имя людей кириллизуем ТОЛЬКО при подтверждении независимой
+            # транслитерацией; иначе оставляем латиницу (безопасно, без гарбла —
+            # ровно та причина, по которой латиница была дефолтом).
+            if typ == "person" and cyr:
+                ok = await verify_transliteration(latin or wrong, cyr, provider, api_key, model)
+                correct = cyr if ok else latin
+            else:
+                correct = latin
             if not wrong or not correct or wrong == correct or len(wrong) < 2:
                 continue
             if wrong in uk_blob:

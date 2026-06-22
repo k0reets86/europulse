@@ -22,7 +22,7 @@ import sys
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
-from epv2_worker.verifier import _real_text_len  # noqa: E402
+from epv2_worker.verifier import _real_text_len, verify_transliteration  # noqa: E402
 
 import httpx  # noqa: E402
 from openai import AsyncOpenAI  # noqa: E402
@@ -68,30 +68,31 @@ lateinisch belassenen Eigennamen/Marke/Ort/Genre (z. B. «Поліція Cambrid
 «Речник Amazon», «Проєкт Brakestop», «Після Rock»). Hier ist der kyrillische Teil ein
 echtes ukrainisches Wort, kein transliterierter Namensteil.
 
-Für jedes KAPUTTE Fragment gib "wrong" (wörtlich aus der Liste) und "correct".
-KORREKTUR-REGEL nach Entitätstyp:
-  - PERSONENNAMEN → ukrainische KYRILLISCHE Transliteration (NICHT Latein!):
-    «Герберта Quandt» → «Герберта Квандта», «Сюддойтшер Quandt» → «Зюддойтер»…
-    NEIN: für Personen ist Latein FALSCH; Ukrainisch schreibt Personennamen kyrillisch.
-    Behalte die im Fragment sichtbare Fall-Endung (Genitiv «-а», Dativ «-і» usw.).
-  - MARKEN / PUBLIKATIONEN / PRODUKTE / ORGANISATIONEN / ORTE → LATEINISCH:
-    «Сюддойтшер Zeitung» → «Süddeutsche Zeitung», «Факебоок» → «Facebook».
+Für jedes KAPUTTE Fragment gib: "wrong" (wörtlich), "type" ("person" oder "brand"),
+"latin" (korrekte LATEINISCHE Schreibweise aus dem DE-Original) und — nur bei Personen —
+"cyrillic" (ukrainische kyrillische Transliteration, mit sichtbarer Fall-Endung).
+  - MARKE/PUBLIKATION/PRODUKT/ORG/ORT → type "brand": «Сюддойтшер Zeitung» →
+    latin «Süddeutsche Zeitung»; «Факебоок» → latin «Facebook».
+  - PERSON → type "person": «Герберта Quandt» → latin «Herbert Quandt»,
+    cyrillic «Герберта Квандта»; «Усмана Dembélé» → latin «Ousmane Dembélé»,
+    cyrillic «Усмана Дембеле».
 Antworte AUSSCHLIESSLICH mit JSON:
-{"garbled": [{"wrong": "<fragment wörtlich>", "correct": "<korrekt: Personen kyrillisch, Marken lateinisch>"}]}
+{"garbled": [{"wrong": "...", "type": "person|brand", "latin": "...", "cyrillic": "..."}]}
 Keine kaputten → {"garbled": []}."""
 
 
 async def _judge_translit(fragments: list[str], key: str) -> list[dict]:
-    """Возвращает [{wrong, correct}] только для реально гарбленных фрагментов."""
+    """[{wrong, correct}] для гарбла. СТРАХОВКА: имя людей кириллизуем только если
+    независимая транслитерация подтверждает; иначе откат на латиницу (без гарбла)."""
     if not fragments:
         return []
     try:
         client = AsyncOpenAI(api_key=key, base_url="https://api.deepseek.com/v1")
-        user = "Fragmente:\n" + "\n".join(f"- {f}" for f in fragments) + "\n\nWelche sind kaputt? Mit Korrektur. JSON."
+        user = "Fragmente:\n" + "\n".join(f"- {f}" for f in fragments) + "\n\nWelche sind kaputt? Mit Typ + Korrektur. JSON."
         resp = await client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "system", "content": _TRANSLIT_JUDGE_SYSTEM}, {"role": "user", "content": user}],
-            response_format={"type": "json_object"}, temperature=0.0, max_tokens=500,
+            response_format={"type": "json_object"}, temperature=0.0, max_tokens=600,
         )
         raw = (resp.choices[0].message.content or "").strip()
         try:
@@ -100,14 +101,25 @@ async def _judge_translit(fragments: list[str], key: str) -> list[dict]:
             data = json.loads(raw, strict=False)
         out = []
         for g in (data.get("garbled") or []):
-            if isinstance(g, dict):
-                w = str(g.get("wrong") or "").strip()
-                c = str(g.get("correct") or "").strip()
-                if w and c and w != c:
-                    out.append({"wrong": w, "correct": c})
+            if not isinstance(g, dict):
+                continue
+            w = str(g.get("wrong") or "").strip()
+            latin = str(g.get("latin") or "").strip()
+            cyr = str(g.get("cyrillic") or "").strip()
+            typ = str(g.get("type") or "brand").strip().lower()
+            if not w:
+                continue
+            if typ == "person" and cyr:
+                # СТРАХОВКА: подтверждаем кириллицу независимой транслитерацией.
+                ok = await verify_transliteration(latin or w, cyr, "deepseek", key, "deepseek-chat")
+                correct = cyr if ok else latin
+            else:
+                correct = latin
+            if correct and correct != w:
+                out.append({"wrong": w, "correct": correct})
         return out
     except Exception:  # noqa: BLE001
-        return []  # при ошибке судьи — не авто-фиксим (безопасно)
+        return []
 
 
 def _apply_translit_fix(post_id: int, qid: int, wrong: str, correct: str) -> bool:

@@ -149,6 +149,12 @@ Melde NUR ECHTE TREUE-DEFEKTE:
     «bereitete den Ausgleich vor» (assistierte) ≠ «erzielte/schoss» (traf selbst);
     «gewann» ≠ «verlor»; «griff an» ≠ «wurde angegriffen»; «sagte» ≠ «bestritt»;
     Täter ↔ Opfer, Sieger ↔ Verlierer. Schon EIN solcher Tausch ist ein Defekt.
+  - EIGENNAMEN (Personen/Orte/Organisationen): müssen dem DE-Original KORREKT
+    entsprechen. Melde falsch/kaputt transliterierte oder verwechselte Namen —
+    auch rein kyrillische: z. B. de «Herbert Quandt» → uk «Хрбрт Квандт» (kaputt)
+    oder «Гілберт Квандт» (falscher Vorname); de «München» → uk «Мюнхін» (falsch
+    statt «Мюнхен»). Korrekt etablierte Transliteration (Трамп, Зеленський, Мюнхен)
+    NICHT melden. Im EN bleiben Eigennamen lateinisch.
   - ABSCHNITT: Übersetzung deutlich kürzer, ganze Aussagen/Sätze fehlen.
   - SPRACHE: deutsche Wörter im UK/EN, russische Wörter im UK.
   - SINNVERLUST: klarer Bedeutungs-/Konnotationsverlust (z. B. Wortspiel/Pejorativ

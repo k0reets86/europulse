@@ -193,6 +193,8 @@ _SPAN_AUDIT_SYSTEM = """Du bist Faktenprüfer. Finde im ARTIKEL ALLE:
 (b) Quellen-/Sprecher-Attributionen («laut X», «sagte X», «wie X mitteilte»,
     «Mitteilung des …», «Studie/Autor:in X», «X erklärte»),
 (c) Rollen-/Beziehungsangaben («X als Y», «X von der/dem Y», «X, der/die Y»).
+(d) konkrete Zahlenangaben zu Personen/Ereignis: Alter («N-jährige», «N Jahre
+    alt»), Datumsangaben, Geldbeträge, Opfer-/Teilnehmer-/Mengenzahlen.
 
 Prüfe JEDE gegen die PRIMÄRQUELLE (einzige Autorität). Für jede Fundstelle ein Objekt:
 - "span": EXAKTER, wortgenauer Teilstring aus dem ARTIKEL (so wie er dort steht,
@@ -200,17 +202,21 @@ Prüfe JEDE gegen die PRIMÄRQUELLE (einzige Autorität). Für jede Fundstelle e
   oder Teilsatz — minimal, aber selbsttragend.
 - "verdict":
     "delete"  — wenn das Zitat / die konkrete Aussage in der PRIMÄRQUELLE NICHT
-                vorkommt (erfundenes Zitat, erfundene Aussage).
+                vorkommt (erfundenes Zitat, erfundene Aussage, erfundene Zahl/Alter).
     "replace" — wenn Attribution/Rolle/Beziehung FALSCH ist (z. B. Facebook-Post
                 fälschlich als „Mitteilung des Ministeriums"; Journalist:in eines
-                Artikels fälschlich als Autor:in einer Studie; falscher Sprecher).
+                Artikels fälschlich als Autor:in einer Studie; falscher Sprecher;
+                ODER eine Zahl/ein Alter, das von der PRIMÄRQUELLE ABWEICHT — dann
+                den exakten Wert der PRIMÄRQUELLE einsetzen, sonst die Angabe ganz
+                weglassen).
     "keep"    — wenn korrekt und durch die PRIMÄRQUELLE gedeckt.
 - "replacement": bei "replace" die korrigierte deutsche Fassung gemäß PRIMÄRQUELLE
   (oder Attribution ganz weglassen); sonst "".
 - "reason": kurze Begründung.
 
 Sei streng: Im Zweifel, ob ein Zitat/eine Attribution wirklich in der PRIMÄRQUELLE
-steht — "delete" bzw. "replace". Antworte AUSSCHLIESSLICH mit JSON:
+steht — "delete" bzw. "replace". Eine Zahl/ein Alter, die in der PRIMÄRQUELLE GAR
+NICHT vorkommt, ist NIE gedeckt → "delete" (Angabe weglassen). Antworte AUSSCHLIESSLICH mit JSON:
 {"ops": [{"span": "...", "verdict": "delete|replace|keep", "replacement": "...", "reason": "..."}]}"""
 
 

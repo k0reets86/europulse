@@ -416,6 +416,128 @@ async def _repair_uk_latin_names(
         logger.warning("uk translit repair skipped: %s", exc)
 
 
+# Sport-Turnierrunden-Glossar (2026-07-03) — DE→UK/EN Rundenbezeichnungen.
+# Klassischer false friend: «Achtelfinale» (round of 16) wurde wiederholt als
+# «чвертьфінал» (quarter-final) übersetzt (Audit qid15324, post40375). Glossar
+# steuert das Modell im Prompt — sicherer als deterministisches Post-Replace,
+# das legitime Erwähnungen benachbarter Runden («zieht ins Viertelfinale ein»)
+# zerstören würde. Detektor substring/IGNORECASE (fängt WM-/EM-/CL-Komposita);
+# nacktes «Finale» via Lookbehind, damit es NICHT in *finale-Komposita triggert.
+_SPORTS_ROUND_TERMS = [
+    # (Detektor-Regex, Anzeige-Term, UK-Äquivalent, EN-Äquivalent)
+    (r"Sechzehntelfinale", "Sechzehntelfinale", "«1/16 фіналу» (раунд на 32 команди)", "round of 32"),
+    (r"Achtelfinale", "Achtelfinale", "«1/8 фіналу» (раунд на 16 команд) — НЕ «чвертьфінал»", "round of 16 (NOT 'quarter-final')"),
+    (r"Viertelfinale", "Viertelfinale", "«чвертьфінал» (1/4 фіналу)", "quarter-final"),
+    (r"Halbfinale", "Halbfinale", "«півфінал»", "semi-final"),
+    (r"Gruppenphase", "Gruppenphase", "«груповий етап»", "group stage"),
+    (r"Vorrunde", "Vorrunde", "«попередній раунд»", "preliminary round"),
+    (r"(?<![A-Za-zÀ-ÿ])[Ff]inale\b", "Finale", "«фінал»", "final"),
+]
+
+
+def _sports_round_glossary_block(source_text: str, target_lang: str) -> str:
+    """Verbindliches Runden-Glossar NUR für die im DE-Master vorkommenden Terme.
+
+    Leerer String, wenn keine Turnierrunde erwähnt wird (kein Prompt-Ballast).
+    """
+    if not source_text:
+        return ""
+    tl = (target_lang or "").lower()
+    is_uk = tl.startswith("ukrain")
+    is_en = tl.startswith("engl")
+    if not (is_uk or is_en):
+        return ""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for pattern, term, uk, en in _SPORTS_ROUND_TERMS:
+        if term in seen:
+            continue
+        if re.search(pattern, source_text, re.IGNORECASE):
+            seen.add(term)
+            lines.append(f"  - {term} → {uk if is_uk else en}")
+    if not lines:
+        return ""
+    return (
+        "\n\nSPORT-TURNIERRUNDEN — VERBINDLICHE ÜBERSETZUNG:\n"
+        "Übersetze die folgenden Rundenbezeichnungen EXAKT so. Ändere NUR die\n"
+        "Terminologie, nicht die Fakten — Erwähnungen benachbarter Runden\n"
+        "(z. B. «der Sieger zieht ins Viertelfinale ein») bleiben inhaltlich erhalten:\n"
+        + "\n".join(lines)
+    )
+
+
+def _translation_pitfalls_block(source_text: str, target_lang: str) -> str:
+    """Точечные подсказки по частым РЕАЛЬНЫМ дефектам перевода (аудит недели).
+
+    Пустая строка, если в источнике нет триггеров — не раздуваем промпт.
+    """
+    if not source_text:
+        return ""
+    tl = (target_lang or "").lower()
+    is_uk = tl.startswith("ukrain")
+    is_en = tl.startswith("engl")
+    if not (is_uk or is_en):
+        return ""
+    src = source_text.lower()
+    lines: list[str] = []
+    # 1) Медицинский false-friend: Praxis/Praxen ≠ больница (аудит #40607: Praxen→«лікарні»).
+    if re.search(r"\bprax(is|en)\b", src):
+        lines.append(
+            "  - «Praxis/Praxen» (Arztpraxis) = "
+            + ("«лікарська практика / медичний кабінет / приватні лікарі» — НЕ «лікарня» (=Krankenhaus)"
+               if is_uk else
+               "«doctor's office / medical practice» — NOT «hospital» (=Krankenhaus)")
+        )
+    # 2) Числа с порядком величины НЕ опускать (аудит #40483: «Vier Millionen» → потеряно «Million»).
+    if re.search(r"\b(million|millionen|milliarde|milliarden|tausend)\b", src):
+        lines.append(
+            "  - Числа с порядком величины (Million/Millionen/Milliarde/Tausend) переносить ТОЧНО, "
+            + ("НЕ опускать: «Vier Millionen Kinder» → «чотири мільйони дітей», не «чотири діти»."
+               if is_uk else
+               "do NOT drop the magnitude word: «Vier Millionen Kinder» → «four million children», not «four children».")
+        )
+    if not lines:
+        return ""
+    return (
+        "\n\nHÄUFIGE ÜBERSETZUNGSFEHLER — BITTE VERMEIDEN:\n" + "\n".join(lines)
+    )
+
+
+# Детерминированный фикс раундов В ЗАГОЛОВКЕ (2026-07-05). Глоссарий в промпте
+# лечит тело, но заголовки повторно всплывали в аудите (#40375, #15324:
+# Achtelfinale→«чвертьфінал»). Для ЗАГОЛОВКА детерминированная замена безопасна:
+# заголовок описывает ОДИН раунд (в отличие от тела, где «переможець виходить у
+# чвертьфінал» легитимно). Ограничено ОДНОЗНАЧНЫМИ numeric-раундами (Sechzehntel/
+# Achtel), где правильный target — падежно-инвариантная числовая форма.
+_TITLE_ROUND_DE = {
+    "sechzehntelfinale": {"uk": "1/16 фіналу", "en": "round of 32"},
+    "achtelfinale": {"uk": "1/8 фіналу", "en": "round of 16"},
+}
+_TITLE_ROUND_WRONG_UK = re.compile(r"1\s*/\s*16\s*фіналу|1\s*/\s*8\s*фіналу|чвертьфінал\w*|півфінал\w*", re.IGNORECASE)
+_TITLE_ROUND_WRONG_EN = re.compile(r"round\s+of\s+(?:16|32)|quarter[-\s]?final\w*|semi[-\s]?final\w*", re.IGNORECASE)
+
+
+def _fix_sports_round_in_title(title: str, source_text: str, target_lang: str) -> str:
+    if not title or not source_text:
+        return title
+    tl = (target_lang or "").lower()
+    key = "uk" if tl.startswith("ukrain") else ("en" if tl.startswith("engl") else "")
+    if not key:
+        return title
+    de_title = source_text.split("\n", 1)[0].lower()
+    present = [term for term in _TITLE_ROUND_DE if term in de_title]
+    if len(present) != 1:
+        return title  # 0 или неоднозначно (несколько раундов) — не трогаем
+    correct = _TITLE_ROUND_DE[present[0]][key]
+    wrong_re = _TITLE_ROUND_WRONG_UK if key == "uk" else _TITLE_ROUND_WRONG_EN
+    norm = lambda s: re.sub(r"\s+", "", s.lower())
+
+    def _repl(m: "re.Match[str]") -> str:
+        return m.group(0) if norm(m.group(0)) == norm(correct) else correct
+
+    return wrong_re.sub(_repl, title)
+
+
 async def translate_from_german(
     title_de: str,
     lead_de: str,
@@ -462,14 +584,18 @@ async def translate_from_german(
             f"  3. Wenn das Original ein Zitat hat, das im DE-Master gekürzt wurde — du nimmst\n"
             f"     trotzdem nur das, was der DE-Master abdeckt. Keine Zusatz-Fakten aus Original.\n"
         )
+    source_text = f"{title_de}\n{lead_de}\n{body_de}"
+    sports_block = _sports_round_glossary_block(source_text, target_lang)
+    pitfalls_block = _translation_pitfalls_block(source_text, target_lang)
     user = (
         f"TITEL (DE):\n{title_de}\n\n"
         f"TEASER (DE):\n{lead_de}{card_lead_block}\n\n"
         f"ARTIKEL (DE):\n{body_de[:3000]}"
         f"{story_block}"
         f"{original_block}"
+        f"{sports_block}"
+        f"{pitfalls_block}"
     )
-    source_text = f"{title_de}\n{lead_de}\n{body_de}"
 
     candidates = provider_order or [
         ("openai", openai_api_key, "gpt-4o-mini"),
@@ -804,6 +930,7 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             lead = _fix_latin_cyrillic_hybrid_words(_normalize_ukrainian_grammar(_fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(lead))))))
             body = _fix_latin_cyrillic_hybrid_words(_normalize_ukrainian_grammar(_fix_ukrainian_gender_agreement(_move_ukrainian_source_attribution(_normalize_ukrainian_style(_normalize_ukrainian_names(body))))))
             title, lead, body = _repair_ukrainian_structure(title, lead, body)
+            title = _fix_sports_round_in_title(title, source_text, target_lang)
             warnings = _ukrainian_style_warnings(title, lead, body)
             filler_count = len(warnings)
             filler_samples = warnings[:8]
@@ -842,6 +969,7 @@ async def _call(user_prompt: str, system_prompt: str, api_key: str, provider: st
             title = _fix_cyrillic_latin_hybrid_words_en(title)
             lead = _fix_cyrillic_latin_hybrid_words_en(lead)
             body = _fix_cyrillic_latin_hybrid_words_en(body)
+            title = _fix_sports_round_in_title(title, source_text, target_lang)
             if _english_contains_cyrillic(title, lead, body):
                 raise ValueError("english translation contains Cyrillic text")
             if target_lang.lower().startswith("engl") and _english_looks_german(title, lead, body):

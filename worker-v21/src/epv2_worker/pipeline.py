@@ -352,7 +352,14 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     # Теперь тонкий источник без 2+ реально подгруженных supporting-источников
     # уходит в ready_review, а не публикуется обрывком. Полные статьи и
     # обогащённые синтезом материалы проходят без изменений.
-    thin_primary_source_needs_support = source_word_count < 70 and card_facts_count < 4
+    # 2026-07-03 (анти-галлюцинации): УБРАН обход по card_facts. Причина — key_facts
+    # извлекаются из ТОГО ЖЕ тонкого огрызка (когда full-text fetch провалился: 403/
+    # paywall/consent/таймаут) ИЛИ галлюцинируются моделью, поэтому «4 факта» НЕ являются
+    # реальной субстанцией. Пример инцидента: пост 39318 (источник 77 симв / ~12 слов, но
+    # 4 key_facts) обошёл гейт и выдал ВЫДУМАННОГО губернатора «Hanscha». Теперь тонкий
+    # источник (по РЕАЛЬНЫМ словам) обязан иметь 2+ реально подгруженных supporting-источника,
+    # иначе уходит в ready_review, а не автопубликуется обрывком с домыслами.
+    thin_primary_source_needs_support = source_word_count < 70
     force_enrichment = source_word_count < 500
     supporting_urls: list[str] = []
     supporting_rich: list[dict[str, str]] = []
@@ -545,6 +552,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
     # для конкретных фактов; SUPPORTING кластера = только фон (не лицензирует новые
     # конкретные утверждения — иначе факт из соседней статьи кластера сходит за
     # грунтованный, как было с выдуманным пассажем Ramstein в 12623).
+    _verify_applied = False
     try:
         _verify_provider, _verify_key, _verify_model = (ctx.provider_order[0] if ctx.provider_order else ("", "", ""))
         if _verify_key:
@@ -591,6 +599,7 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
                 model=_verify_model,
             )
             if _corrected:
+                _verify_applied = True
                 rewrite.title_de = _corrected["title"] or rewrite.title_de
                 rewrite.lead_de = _corrected["lead"] or rewrite.lead_de
                 rewrite.body_de = _corrected["body"] or rewrite.body_de
@@ -605,6 +614,17 @@ async def _run_full_bundle(ctx: PipelineContext) -> None:
                 _record_ai_runtime(ctx, "verify_de", _verify_provider, _verify_model, 0, 0)
     except Exception as _verify_exc:  # noqa: BLE001
         ctx.warnings.append(f"verify_and_correct_skipped: {_verify_exc}")
+
+    # 2026-07-03 fail-CLOSED: verify НЕ отработал (сбой/None/обрыв JSON max_tokens) — если
+    # рерайт нёс hallucination-флаги (имена/числа/даты/цитаты), НЕ публикуем непроверенным,
+    # уводим в ready_review. Раньше был fail-OPEN (~6 статей/нед уходили без verify: флаги
+    # оставались, но не блокировали). Тонкий источник уже блокируется гейтом выше; это ловит
+    # риск на нормальных источниках, где verify обломался.
+    if not _verify_applied:
+        _hall_kinds_fc = {"explicit_date", "fabricated_name", "fabricated_number", "unsupported_known_figure", "full_name"}
+        _pending_hall = [w for w in (rewrite.warnings or []) if isinstance(w, dict) and w.get("kind") in _hall_kinds_fc]
+        if _pending_hall:
+            ctx.blockers.append("verify_failed_with_pending_hallucination_flags")
 
     # Anti-plagiarism gate (architecture phase 3).
     # R9 2026-05-14: bumped warning → BLOCKER. Items с <85% uniqueness теперь

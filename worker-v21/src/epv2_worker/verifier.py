@@ -37,6 +37,36 @@ logger = logging.getLogger(__name__)
 _TAG_RE = re.compile(r"<[^>]+>")
 _URL_RE = re.compile(r"https?://\S+")
 _WS_RE = re.compile(r"\s+")
+_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+
+
+def _loads_lenient(raw: str):
+    """Устойчивый разбор JSON-ответа модели (2026-06-24). Чинит частые причины
+    fail-open verify: markdown-обёртку ```json, сырые control-символы, и ОБРЫВ
+    ответа по max_tokens («Unterminated string») — берём максимальный валидный
+    префикс до последней закрытой '}'. Возвращает dict/list или None.
+    Раньше тут был только json.loads + strict=False, и при обрыве verify молча
+    падал в None → статья публиковалась БЕЗ проверки достоверности."""
+    if not raw:
+        return None
+    raw = _JSON_FENCE_RE.sub("", raw.strip())
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    try:
+        return json.loads(raw, strict=False)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Ответ оборван по лимиту токенов: отрезаем до последней '}' и пробуем
+    # как валидный префикс (вернёт хотя бы частично исправленную структуру).
+    cut = raw.rfind("}")
+    while cut > 0:
+        try:
+            return json.loads(raw[:cut + 1], strict=False)
+        except (json.JSONDecodeError, ValueError):
+            cut = raw.rfind("}", 0, cut)
+    return None
 
 
 def _real_text_len(s: str) -> int:
@@ -167,12 +197,10 @@ async def _run_pass(
     raw = (resp.choices[0].message.content or "").strip()
     if not raw:
         return None
-    # strict=False допускает сырые control-символы (переносы строк) внутри строк —
-    # модель иногда кладёт их в body, обычный json.loads падал «Invalid control char».
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        data = json.loads(raw, strict=False)
+    data = _loads_lenient(raw)
+    if not isinstance(data, dict):
+        logger.warning("verify_and_correct: JSON parse failed (raw_len=%d) — статья пойдёт БЕЗ verify", len(raw))
+        return None
     out = {
         "title": str(data.get("title", "") or "").strip(),
         "lead": str(data.get("lead", "") or "").strip(),
@@ -272,10 +300,10 @@ async def _audit_spans(
     raw = (resp.choices[0].message.content or "").strip()
     if not raw:
         return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        data = json.loads(raw, strict=False)
+    data = _loads_lenient(raw)
+    if not isinstance(data, dict):
+        logger.warning("span audit: JSON parse failed (raw_len=%d)", len(raw))
+        return None
     ops = data.get("ops") or []
     if not isinstance(ops, list) or not ops:
         return {"fields": fields, "applied": []}
@@ -300,7 +328,7 @@ async def verify_and_correct_german(
     provider: str,
     api_key: str,
     model: str,
-    max_tokens: int = 3000,
+    max_tokens: int = 4096,
     passes: int = 2,
 ) -> dict | None:
     """Сверяет немецкую статью с PRIMARY-источником и исправляет негрунтованное.

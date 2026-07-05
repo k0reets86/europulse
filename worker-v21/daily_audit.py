@@ -367,44 +367,45 @@ async def main() -> int:
                         int(it.get("qid") or 0), c["wrong"], c["correct"])
                     fixed_names.append(f"{c['wrong']}→{c['correct']}" + ("" if ok else " [НЕ применено]"))
                 if fixed_names:
-                    translit.append((it.get("qid"), fixed_names))
+                    translit.append((it.get("post_id"), fixed_names))
             primary = it.get("primary", "")
             if _real_text_len(primary) >= 350:
                 article = "\n".join([it.get("de_title", ""), it.get("de_lead", ""),
                                      it.get("de_card", ""), it.get("de_body", "")])
                 fab = await _judge_hallucinations(article, primary, it.get("supporting", ""), key)
-                fab = [f for f in fab if not _is_whitelisted(wl, it.get("qid"), "hallucination", f.get("claim", ""))]
+                fab = [f for f in fab if not _is_whitelisted(wl, it.get("post_id"), "hallucination", f.get("claim", ""))]
                 if fab:
-                    hall.append((it.get("qid"), [f.get("claim", "")[:90] for f in fab[:4]]))
+                    hall.append((it.get("post_id"), [f.get("claim", "")[:90] for f in fab[:4]]))
             # ВЕРНОСТЬ ПЕРЕВОДА (DE↔UK, DE↔EN): пропуски фактов/ролей, обрезка,
             # утечка языка, потеря смысла. Алерт оператору (не авто-правим — риск).
             de_full = "\n".join([it.get("de_title", ""), it.get("de_lead", ""),
                                  it.get("de_card", ""), it.get("de_body", "")])
             defects = await _judge_translation_fidelity(de_full, it.get("uk", ""), it.get("en", ""), key)
             defects = [d for d in defects
-                       if not _is_whitelisted(wl, it.get("qid"), "fidelity",
+                       if not _is_whitelisted(wl, it.get("post_id"), "fidelity",
                                               (d.get("example", "") + " " + d.get("problem", "")))]
             if defects:
-                fidelity.append((it.get("qid"), defects))
+                fidelity.append((it.get("post_id"), defects))
 
     await asyncio.gather(*[check(it) for it in items])
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    urls = {it.get("post_id"): it.get("url", "") for it in items}
     lines = [f"📊 EuroPulse аудит достоверности {ts}",
              f"Проверено: {checked} | галлюцинации: {len(hall)} | транслит исправлено: {len(translit)} | перевод-дефекты: {len(fidelity)}"]
     if hall:
         lines.append("\n⚠️ Возможные выдумки — НУЖНА проверка по источнику (не авто-правятся):")
-        for qid, corr in hall[:8]:
-            lines.append(f"  #{qid}: {corr[0][:90]}")
+        for pid, corr in hall[:8]:
+            lines.append(f"  #{pid}: {corr[0][:90]}\n    {urls.get(pid, '')}")
     if translit:
         lines.append("\n🔧 Транслит-баги UK — ИСПРАВЛЕНЫ автоматически:")
-        for qid, names in translit[:8]:
-            lines.append(f"  #{qid}: {', '.join(names[:3])}")
+        for pid, names in translit[:8]:
+            lines.append(f"  #{pid}: {', '.join(names[:3])}")
     if fidelity:
         lines.append("\n📝 Дефекты верности перевода — на ревью (пропуски/обрезка/язык):")
-        for qid, defs in fidelity[:8]:
+        for pid, defs in fidelity[:8]:
             d = defs[0]
-            lines.append(f"  #{qid} [{d['lang']}/{d['severity']}]: {d['problem']}")
+            lines.append(f"  #{pid} [{d['lang']}/{d['severity']}]: {d['problem']}\n    {urls.get(pid, '')}")
     if not hall and not translit and not fidelity:
         lines.append("\n✅ Проблем не выявлено.")
     report = "\n".join(lines)
